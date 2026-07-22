@@ -1,10 +1,13 @@
-# Build and release the iShowManagement desktop app (macOS, universal binary).
+# Build and release the iShowManagement desktop app (macOS).
+#
+# Builds three .dmg flavors — Apple Silicon (aarch64), Intel (x64), and a
+# universal binary that runs on both. The app targets macOS 14 (Sonoma) and up,
+# so it runs on Sonoma, Sequoia, and newer.
 #
 # Trigger a release by pushing a version tag:
 #     git tag v0.2.0 && git push origin v0.2.0
-# That builds a universal .dmg (Apple Silicon + Intel) and publishes a GitHub
-# Release with it attached. A manual "Run workflow" (workflow_dispatch) builds
-# the same .dmg and uploads it as a run artifact, without creating a Release.
+# A manual "Run workflow" (workflow_dispatch) builds the same .dmgs as run
+# artifacts without creating a Release.
 name: Release
 
 on:
@@ -16,13 +19,19 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: write # needed to create the GitHub Release
-
 jobs:
   build:
-    # arm64 runner; we add the x86_64 target and lipo both into a universal binary.
-    runs-on: macos-latest
+    runs-on: macos-latest # arm64 runner; cross-compiles x64 + lipos the universal binary
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: aarch64
+          - target: x86_64-apple-darwin
+            arch: x64
+          - target: universal-apple-darwin
+            arch: universal
     steps:
       - uses: actions/checkout@v4
 
@@ -36,10 +45,13 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          # Both targets so the universal (and cross) builds have what they need.
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Sync app version to tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -56,13 +68,13 @@ jobs:
           npm ci
           npm run build
 
-      - name: Build desktop app (universal)
+      - name: Build desktop app (${{ matrix.arch }})
         working-directory: desktop
         # The Tauri CLI is a devDependency of web/, so invoke it from there.
-        run: ../web/node_modules/.bin/tauri build --target universal-apple-darwin
+        run: ../web/node_modules/.bin/tauri build --target ${{ matrix.target }}
         # --- Optional: code signing + notarization --------------------------
-        # The app ships unsigned (users right-click → Open on first launch). To
-        # sign + notarize instead, add these repo secrets and uncomment the env
+        # The app ships unsigned. To sign + notarize (so it opens with no
+        # Gatekeeper friction), add these repo secrets and uncomment the env
         # block — Tauri picks them up automatically during the build:
         # env:
         #   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}                 # base64 of a Developer ID .p12
@@ -75,26 +87,56 @@ jobs:
       - name: Collect .dmg
         run: |
           mkdir -p dist
-          cp target/universal-apple-darwin/release/bundle/dmg/*.dmg dist/
+          cp target/${{ matrix.target }}/release/bundle/dmg/*.dmg dist/
           ls -lh dist
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-universal-dmg
+          name: dmg-${{ matrix.arch }}
           path: dist/*.dmg
           if-no-files-found: error
 
+  # Gather every arch's .dmg and publish one Release (only on a tag).
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # needed to create the GitHub Release
+    steps:
+      - name: Download all .dmgs
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - run: ls -lhR dist
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.dmg
           fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
-            ### Install (macOS)
+            ### Downloads
+            - **`…_universal.dmg`** — runs on any Mac (Apple Silicon + Intel).
+            - **`…_aarch64.dmg`** — Apple Silicon only.
+            - **`…_x64.dmg`** — Intel only.
 
-            1. Download the `.dmg` below and drag **iShowManagement** into Applications.
-            2. The app is unsigned, so the first launch is blocked by Gatekeeper —
-               **right-click the app → Open**, then confirm. You only do this once.
+            Requires macOS 14 (Sonoma) or newer.
+
+            ### Install (macOS)
+            The app is **unsigned**, so macOS blocks it on first launch — on
+            **Sequoia (15) and newer it may silently fail to open with no dialog**.
+            After dragging the app into Applications, clear the download quarantine
+            once in Terminal:
+
+            ```
+            xattr -cr /Applications/iShowManagement.app
+            ```
+
+            Then open it normally. (Alternative: System Settings → Privacy &
+            Security → scroll down → **Open Anyway**. The old right-click → Open
+            trick no longer works on Sequoia.)
