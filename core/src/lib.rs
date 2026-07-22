@@ -22,17 +22,16 @@ mod ws;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::Request;
-use axum::http::{header, StatusCode};
+use axum::http::{header, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use rust_embed::RustEmbed;
 use serde_json::json;
-use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use api::AppState;
@@ -41,6 +40,14 @@ use store::Store;
 
 /// Default loopback port.
 pub const DEFAULT_PORT: u16 = 7070;
+
+/// The Svelte build, embedded into the binary at compile time so the app is a
+/// single self-contained file — no `web/dist` on disk at runtime. In debug
+/// builds rust-embed reads the folder live (fast dev iteration); release builds
+/// embed the bytes. The folder is resolved relative to this crate's Cargo.toml.
+#[derive(RustEmbed)]
+#[folder = "../web/dist"]
+struct Assets;
 
 /// A native notification handed to the host-registered sender.
 pub struct NativeNotification {
@@ -88,11 +95,6 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     *state.servers.lock().unwrap() = discovery::discover().await;
     tracing::info!("discovered {} ssh host(s)", state.servers.lock().unwrap().len());
 
-    let static_dir = static_dir();
-    let index = static_dir.join("index.html");
-    // SPA: serve built assets; for unknown paths fall back to index.html (200).
-    let serve_dir = ServeDir::new(&static_dir).fallback(ServeFile::new(&index));
-
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/servers", get(api::get_servers))
@@ -131,30 +133,33 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .route("/api/servers/{id}/proxy", delete(browser::stop_proxy))
         .route("/ws", get(ws::handler))
         .with_state(state)
-        .fallback_service(serve_dir)
+        .fallback(static_handler)
         .layer(middleware::from_fn(origin_guard))
         .layer(TraceLayer::new_for_http());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("serving {} on http://{}", static_dir.display(), addr);
+    tracing::info!("serving embedded frontend on http://{}", addr);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
 }
 
-/// Where the Svelte build lives. `STATIC_DIR` overrides; otherwise default to
-/// `web/dist` resolved from this crate's location at compile time.
-fn static_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("STATIC_DIR") {
-        return PathBuf::from(dir);
+/// Serve the embedded SPA. Exact asset hits (`/assets/…`, `/favicon.svg`) return
+/// their bytes; any other path falls back to `index.html` with 200 so client-side
+/// routing works. `/api` and `/ws` routes are matched before this fallback.
+async fn static_handler(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    match Assets::get(path).or_else(|| Assets::get("index.html")) {
+        Some(file) => (
+            [(header::CONTENT_TYPE, file.metadata.mimetype().to_string())],
+            file.data.into_owned(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "frontend not embedded").into_response(),
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a parent dir")
-        .join("web")
-        .join("dist")
 }
 
 async fn health() -> impl IntoResponse {
@@ -180,4 +185,20 @@ async fn origin_guard(req: Request, next: Next) -> Response {
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Assets;
+
+    /// The frontend must be embedded (or readable in debug) — its absence is what
+    /// shipped a white screen when the build read `web/dist` from a path that only
+    /// existed on the build machine. Guards that regression.
+    #[test]
+    fn frontend_index_is_available() {
+        assert!(
+            Assets::get("index.html").is_some(),
+            "web/dist/index.html not found — run `npm run build` in web/ before building core"
+        );
+    }
 }
