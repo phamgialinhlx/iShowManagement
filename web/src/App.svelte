@@ -93,8 +93,22 @@
     if (tb == null) return -1
     return tb - ta
   }
-  // Live hosts float to the top; idle hosts below a separator.
-  const liveList = $derived(visible.filter((s) => liveHostIds.has(s.id)).sort(byRecency))
+  // Live hosts in the order they went live — a newly-connected host is appended,
+  // so connecting never reshuffles the hosts already up. Reconciled from the live
+  // set: drop hosts that left, append hosts that just appeared (Set iterates in
+  // session order).
+  let liveOrder = $state<string[]>([])
+  $effect(() => {
+    const next = liveOrder.filter((id) => liveHostIds.has(id))
+    for (const id of liveHostIds) if (!next.includes(id)) next.push(id)
+    if (next.length !== liveOrder.length || next.some((id, i) => id !== liveOrder[i])) {
+      liveOrder = next
+    }
+  })
+  // Live hosts float to the top (in connection order); idle hosts below a separator.
+  const liveList = $derived(
+    liveOrder.map((id) => visible.find((s) => s.id === id)).filter((s): s is Server => !!s),
+  )
   // Idle hosts: recently-used first (so a just-disconnected host stays near the top).
   const idleList = $derived(visible.filter((s) => !liveHostIds.has(s.id)).sort(byRecency))
   const sessionCounts = $derived(
@@ -105,12 +119,11 @@
   const hostSessions = $derived(sessions.filter((s) => s.hostId === activeHostId))
   // tmux session names currently open for the active host — feeds the sidebar
   // tree's "open here" state.
-  const openTmuxNames = $derived(
+  const openTmuxNamesFor = (hostId: string) =>
     sessions
-      .filter((s) => s.hostId === activeHostId && s.kind === 'tmux')
+      .filter((s) => s.hostId === hostId && s.kind === 'tmux')
       .map((s) => s.session!)
-      .filter(Boolean),
-  )
+      .filter(Boolean)
   // The tmux session showing right now (if a tmux tab is active) — highlighted in the tree.
   const activeTmuxName = $derived.by(() => {
     if (activeState?.type !== 'session') return undefined
@@ -307,9 +320,9 @@
 
   // Attach a tmux session picked from the sidebar tree — opens (or re-focuses)
   // its persistent terminal tab.
-  function selectTmux(session: string) {
-    const hostId = activeHostId
-    if (!hostId) return
+  function selectTmux(hostId: string, session: string) {
+    // Selecting from any connected host's tree focuses that host.
+    activeHostId = hostId
     const existing = sessions.find(
       (s) => s.hostId === hostId && s.kind === 'tmux' && s.session === session,
     )
@@ -323,9 +336,7 @@
   }
 
   // Close (detach from) a tmux session's tab — the tmux session keeps running.
-  function closeTmux(session: string) {
-    const hostId = activeHostId
-    if (!hostId) return
+  function closeTmux(hostId: string, session: string) {
     const s = sessions.find((x) => x.hostId === hostId && x.kind === 'tmux' && x.session === session)
     if (s) closeSession(s.key)
   }
@@ -462,13 +473,13 @@
             {#if sessionCounts[s.id]}<span class="count">{sessionCounts[s.id]}</span>{/if}
           </span>
         </button>
-        {#if s.id === activeHostId && connectedHostIds.has(s.id)}
+        {#if connectedHostIds.has(s.id)}
           <HostTmuxTree
             id={s.id}
-            openNames={openTmuxNames}
-            activeName={activeTmuxName}
-            onSelect={selectTmux}
-            onClose={closeTmux}
+            openNames={openTmuxNamesFor(s.id)}
+            activeName={s.id === activeHostId ? activeTmuxName : undefined}
+            onSelect={(name) => selectTmux(s.id, name)}
+            onClose={(name) => closeTmux(s.id, name)}
           />
         {/if}
       </li>
