@@ -76,8 +76,34 @@ pub(crate) fn dispatch_notification(n: NativeNotification) -> bool {
 }
 
 /// Build the router and serve on `127.0.0.1:<port>` until Ctrl-C. Loopback only —
-/// this app never binds a routable interface (see security ADR).
+/// this app never binds a routable interface (see security ADR). The desktop
+/// shell prefers [`serve_on`] so it can own the port before the window loads.
 pub async fn serve(port: u16) -> anyhow::Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("serving embedded frontend on http://{}", addr);
+    axum::serve(listener, build_router().await)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+/// Serve on an already-bound listener. The desktop shell binds the socket itself
+/// (owning the port, or falling back to a free one) and hands it here — so a stray
+/// process on the default port can never make the app load *its* server instead.
+pub async fn serve_on(listener: std::net::TcpListener) -> anyhow::Result<()> {
+    listener.set_nonblocking(true)?;
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    tracing::info!("serving embedded frontend on {}", listener.local_addr()?);
+    axum::serve(listener, build_router().await)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+/// Assemble the axum app (state, ssh-host discovery, routes, middleware). Shared
+/// by [`serve`] and [`serve_on`].
+async fn build_router() -> Router {
     // Per-user data dir survives version upgrades (macOS: ~/Library/Application Support/).
     let data_dir = dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -111,6 +137,8 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .route("/api/servers/{id}/overview", get(managers::overview))
         .route("/api/servers/{id}/docker", get(managers::docker))
         .route("/api/servers/{id}/tmux", get(managers::tmux))
+        .route("/api/servers/{id}/tmux/claude", get(notify::claude_inventory))
+        .route("/api/servers/{id}/tmux/select", post(managers::tmux_select))
         .route("/api/servers/{id}/docker/stats", get(managers::docker_stats))
         .route("/api/servers/{id}/docker/{cid}/{action}", post(managers::docker_action))
         .route("/api/servers/{id}/ports", get(managers::ports))
@@ -137,13 +165,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .layer(middleware::from_fn(origin_guard))
         .layer(TraceLayer::new_for_http());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("serving embedded frontend on http://{}", addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    Ok(())
+    app
 }
 
 /// Serve the embedded SPA. Exact asset hits (`/assets/…`, `/favicon.svg`) return
@@ -152,9 +174,23 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
 async fn static_handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
-    match Assets::get(path).or_else(|| Assets::get("index.html")) {
+    // Content-hashed assets (`assets/index-<hash>.js`) are safe to cache forever;
+    // index.html is served at a fixed URL, so it must NEVER be cached — a stale
+    // copy would keep pointing at old asset hashes and the app would appear not to
+    // update. WKWebView heuristically caches responses that carry no Cache-Control
+    // (exactly this trap), so we always set it. `serve` picks the header from
+    // whether we resolved a real asset or fell back to index.html.
+    let (file, cache) = match Assets::get(path) {
+        Some(f) if path.starts_with("assets/") => (Some(f), "public, max-age=31536000, immutable"),
+        Some(f) => (Some(f), "no-cache"),
+        None => (Assets::get("index.html"), "no-cache"),
+    };
+    match file {
         Some(file) => (
-            [(header::CONTENT_TYPE, file.metadata.mimetype().to_string())],
+            [
+                (header::CONTENT_TYPE, file.metadata.mimetype().to_string()),
+                (header::CACHE_CONTROL, cache.to_string()),
+            ],
             file.data.into_owned(),
         )
             .into_response(),

@@ -271,6 +271,51 @@ pub async fn tmux(State(_): State<AppState>, Path(id): Path<String>) -> Json<Val
     Json(json!({ "available": false, "reason": reason.chars().take(300).collect::<String>() }))
 }
 
+#[derive(Deserialize)]
+pub struct TmuxSelect {
+    pub session: String,
+    pub window: u32,
+    /// Pane id like `%7` (tmux `#D`). Optional — omit to select the window only.
+    #[serde(default)]
+    pub pane_id: Option<String>,
+}
+
+/// `POST /api/servers/{id}/tmux/select` — focus a window (and pane) in a session
+/// before the app attaches, so clicking a Claude instance lands on its pane.
+/// tmux applies this to every client on the session, so an already-open tab
+/// switches too. `window` is a validated integer; `pane_id` must match `%<n>`.
+pub async fn tmux_select(
+    State(_): State<AppState>,
+    Path(id): Path<String>,
+    Json(sel): Json<TmuxSelect>,
+) -> (StatusCode, Json<Value>) {
+    let Some(tgt) = target(&id) else {
+        return bad_target();
+    };
+    if !safe_name(&sel.session) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad session name" })));
+    }
+    // Pane id is the only free-form field — pin it to `%<digits>` so it can't
+    // smuggle shell/tmux syntax into the command.
+    let pane_ok = sel
+        .pane_id
+        .as_deref()
+        .is_none_or(|p| p.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())));
+    if !pane_ok {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad pane id" })));
+    }
+    let mut cmd = format!("tmux select-window -t '{}:{}'", sel.session, sel.window);
+    if let Some(p) = sel.pane_id.as_deref() {
+        cmd.push_str(&format!(" && tmux select-pane -t '{p}'"));
+    }
+    let r = ssh::exec(tgt, &cmd, Duration::from_secs(10)).await;
+    if r.ok {
+        return (StatusCode::OK, Json(json!({ "ok": true })));
+    }
+    let reason = if r.stderr.trim().is_empty() { "select failed" } else { r.stderr.trim() };
+    (StatusCode::OK, Json(json!({ "ok": false, "reason": reason.chars().take(200).collect::<String>() })))
+}
+
 // ---------------------------------------------------------------- ports ----
 
 #[derive(Serialize)]

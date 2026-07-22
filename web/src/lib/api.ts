@@ -113,6 +113,43 @@ export const getTmux = (
 ): Promise<{ available: boolean; reason?: string; sessions?: TmuxSession[] }> =>
   fetch(`${base(id)}/tmux`).then(ok).then((r) => r.json())
 
+// A Claude instance living in a specific tmux pane, from the notify log
+// (see notify::claude_inventory). `state` is derived from the last hook event.
+export interface ClaudeInstance {
+  paneId?: string
+  window?: number
+  windowName?: string
+  pane?: number
+  // 'active' = running but no hook event yet (detected via pane command).
+  state: 'needs' | 'done' | 'active'
+  kind?: string
+  notificationType?: string
+  message?: string
+  summary?: string
+  project?: string
+}
+export interface ClaudeSession {
+  name: string
+  claude: ClaudeInstance[]
+}
+
+export const getClaudeInventory = (
+  id: string,
+): Promise<{ available: boolean; reason?: string; sessions?: ClaudeSession[] }> =>
+  fetch(`${base(id)}/tmux/claude`).then(ok).then((r) => r.json())
+
+// Focus a window (+ pane) in a session before attaching — lands the terminal on
+// a specific Claude instance. Backend validates the pane id (`%<n>`).
+export const tmuxSelect = (
+  id: string,
+  sel: { session: string; window: number; paneId?: string },
+): Promise<Response> =>
+  fetch(`${base(id)}/tmux/select`, {
+    method: 'POST',
+    headers: json,
+    body: JSON.stringify({ session: sel.session, window: sel.window, pane_id: sel.paneId ?? null }),
+  }).then(ok)
+
 export const dockerAction = (
   id: string,
   cid: string,
@@ -231,6 +268,9 @@ export const setWatching = (
 export interface NotifyStatus {
   reachable: boolean
   installed: boolean
+  /// False when the installed helper script predates the app's current version —
+  /// the app then silently reinstalls to update it.
+  current?: boolean
   reason?: string
 }
 export interface NotifyEvent {

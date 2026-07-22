@@ -30,20 +30,33 @@ use crate::ssh::{self, Target};
 /// find/replace/remove our entries idempotently without touching their own hooks.
 const SENTINEL: &str = "ism-notify.sh";
 
+/// Version of the helper script. Bump this **and** the `ism-notify-version`
+/// marker line in SCRIPT together whenever SCRIPT changes — `status` compares
+/// the two so an out-of-date install auto-updates on connect (see `install`)
+/// instead of silently keeping the stale hook.
+const HOOK_VERSION: &str = "2";
+
 /// The remote helper script. Written verbatim (via a quoted heredoc), so the
 /// `$HOME`/`$1`/`$(…)` below are expanded at *run* time on the host, not now.
 const SCRIPT: &str = r#"#!/bin/sh
+# ism-notify-version: 2
 # iShowManagement Claude notifier. $1 = event kind ("stop"|"notification").
 # stdin = Claude's JSON payload. Appends one line:
-#   <kind>\t<tmux-session>\t<compact-json>
-# The tmux column is empty when Claude isn't running inside tmux — the hook
-# inherits Claude's $TMUX/$TMUX_PANE, so `#S` resolves to Claude's own session.
+#   <kind>\t<tmux-session>\t<location>\t<compact-json>
+# The tmux columns are empty when Claude isn't running inside tmux — the hook
+# inherits Claude's $TMUX/$TMUX_PANE, so `#S` resolves to Claude's own session
+# and the pane it lives in. <location> is `#I|#W|#P|#D` (window index, window
+# name, pane index, pane id); targeting $TMUX_PANE pins it to Claude's own pane.
 d="$HOME/.ism"
 mkdir -p "$d" 2>/dev/null
 payload=$(cat)
 sess=""
-[ -n "$TMUX" ] && sess=$(tmux display-message -p '#S' 2>/dev/null)
-printf '%s\t%s\t%s\n' "$1" "$sess" "$(printf '%s' "$payload" | tr '\r\n' '  ')" >> "$d/notify.jsonl"
+loc=""
+if [ -n "$TMUX" ]; then
+  sess=$(tmux display-message -p '#S' 2>/dev/null)
+  loc=$(tmux display-message -t "$TMUX_PANE" -p '#I|#W|#P|#D' 2>/dev/null)
+fi
+printf '%s\t%s\t%s\t%s\n' "$1" "$sess" "$loc" "$(printf '%s' "$payload" | tr '\r\n\t' '   ')" >> "$d/notify.jsonl"
 "#;
 
 fn bad(msg: &str) -> (StatusCode, Json<Value>) {
@@ -159,10 +172,16 @@ pub async fn status(
     if let Err(e) = guard(&id) {
         return e;
     }
-    let cmd = "test -f \"$HOME/.claude/ism-notify.sh\" \
+    // INSTALLED = wired + script is the current version; STALE = wired but the
+    // script predates HOOK_VERSION (→ the app auto-updates it); NO = not wired.
+    let cmd = format!(
+        "test -f \"$HOME/.claude/ism-notify.sh\" \
         && grep -q 'ism-notify.sh' \"$HOME/.claude/settings.json\" 2>/dev/null \
-        && echo INSTALLED || echo NO";
-    let r = ssh::exec(Target::Remote(&id), cmd, Duration::from_secs(15)).await;
+        && (grep -q 'ism-notify-version: {HOOK_VERSION}' \"$HOME/.claude/ism-notify.sh\" \
+            && echo INSTALLED || echo STALE) \
+        || echo NO"
+    );
+    let r = ssh::exec(Target::Remote(&id), &cmd, Duration::from_secs(15)).await;
     if !r.ok && r.stdout.trim().is_empty() {
         let hint = if r.stderr.trim().is_empty() {
             "can't reach host — open a Console first to authenticate"
@@ -171,8 +190,9 @@ pub async fn status(
         };
         return (StatusCode::OK, Json(json!({ "reachable": false, "installed": false, "reason": hint })));
     }
-    let installed = r.stdout.contains("INSTALLED");
-    (StatusCode::OK, Json(json!({ "reachable": true, "installed": installed })))
+    let installed = r.stdout.contains("INSTALLED") || r.stdout.contains("STALE");
+    let current = r.stdout.contains("INSTALLED");
+    (StatusCode::OK, Json(json!({ "reachable": true, "installed": installed, "current": current })))
 }
 
 /// `POST /api/servers/{id}/claude-notify` — install the hook + helper script,
@@ -265,6 +285,18 @@ struct NotifyEvent {
     /// tmux session Claude ran in, or `None` for a plain (non-tmux) shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     tmux: Option<String>,
+    /// Window index within the session (`#I`), when Claude ran inside tmux.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window: Option<u32>,
+    /// Window name (`#W`).
+    #[serde(rename = "windowName", skip_serializing_if = "Option::is_none")]
+    window_name: Option<String>,
+    /// Pane index within the window (`#P`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pane: Option<u32>,
+    /// Stable pane id (`#D`, e.g. `%7`) — the handle for `select-pane`.
+    #[serde(rename = "paneId", skip_serializing_if = "Option::is_none")]
+    pane_id: Option<String>,
     #[serde(rename = "notificationType", skip_serializing_if = "Option::is_none")]
     notification_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -312,6 +344,139 @@ pub async fn events(
         .collect();
 
     (StatusCode::OK, Json(json!({ "cursor": cursor, "events": events })))
+}
+
+/// `GET /api/servers/{id}/tmux/claude` — Claude instances grouped by tmux
+/// session, for the nested sidebar tree. A pane counts as Claude if tmux reports
+/// its command as `claude` **or** it has fired a hook event — the command scan
+/// catches long-lived sessions that started before the hook was installed (which
+/// events alone miss entirely), while events add live `state`/summary. Location
+/// comes from the live pane list (correct even after a window rename). `state` is
+/// `needs` (last event a `notification`), `done` (a `stop`), or `active` (running
+/// but no event yet). Sessions without any live Claude are simply absent (the UI
+/// merges this with the full session list from `/tmux`).
+pub async fn claude_inventory(
+    State(_): State<AppState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    if let Err(e) = guard(&id) {
+        return e;
+    }
+    // One round trip: recent notify lines, a marker, then the live pane table.
+    let cmd = "tail -n 500 \"$HOME/.ism/notify.jsonl\" 2>/dev/null; \
+        echo '===PANES==='; \
+        tmux list-panes -a -F \
+        '#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}' \
+        2>/dev/null";
+    let r = ssh::exec(Target::Remote(&id), cmd, Duration::from_secs(15)).await;
+    if !r.ok && r.stdout.trim().is_empty() {
+        let hint = if r.stderr.trim().is_empty() {
+            "can't reach host — open a Console first"
+        } else {
+            r.stderr.trim()
+        };
+        return (StatusCode::OK, Json(json!({ "available": false, "reason": hint })));
+    }
+    let (log, panes) = r.stdout.split_once("===PANES===").unwrap_or((&r.stdout, ""));
+    (StatusCode::OK, Json(json!({ "available": true, "sessions": build_inventory(log, panes) })))
+}
+
+/// A live pane from `tmux list-panes` (see the format in `claude_inventory`).
+struct PaneInfo {
+    session: String,
+    window: u32,
+    window_name: String,
+    pane: u32,
+    command: String,
+}
+
+/// Pure core of `claude_inventory`, split out so it's testable without SSH: given
+/// the raw notify log and the live pane table, return the `sessions` array. A pane
+/// is Claude if its command is `claude` or it has a matching event; the event (if
+/// any) supplies state + summary, the live pane supplies location.
+fn build_inventory(log: &str, panes: &str) -> Vec<Value> {
+    // Live panes, in tmux's own order (used as a stable tiebreaker).
+    let mut order: Vec<String> = Vec::new();
+    let mut by_pane: HashMap<String, PaneInfo> = HashMap::new();
+    for l in panes.lines() {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() < 6 {
+            continue;
+        }
+        let pid = f[4].trim().to_string();
+        if pid.is_empty() {
+            continue;
+        }
+        order.push(pid.clone());
+        by_pane.insert(
+            pid,
+            PaneInfo {
+                session: f[0].to_string(),
+                window: f[1].trim().parse().unwrap_or(0),
+                window_name: f[2].to_string(),
+                pane: f[3].trim().parse().unwrap_or(0),
+                command: f[5].trim().to_string(),
+            },
+        );
+    }
+
+    // Latest event per pane id (a later line overwrites; its index = recency).
+    let mut ev_by_pane: HashMap<String, (usize, NotifyEvent)> = HashMap::new();
+    for (idx, line) in log.lines().enumerate() {
+        let Some(ev) = parse_event(line) else { continue };
+        let Some(pid) = ev.pane_id.clone() else { continue };
+        ev_by_pane.insert(pid, (idx, ev));
+    }
+
+    // Build instances for every live Claude pane, grouped by session.
+    // Sort key: rank (needs<done<active) then recency (newer event first).
+    let mut by_sess: HashMap<String, Vec<(i32, i64, Value)>> = HashMap::new();
+    for pid in &order {
+        let info = &by_pane[pid];
+        let ev = ev_by_pane.get(pid);
+        if info.command != "claude" && ev.is_none() {
+            continue;
+        }
+        let (state, rank, recency, kind, notif, message, summary, project) = match ev {
+            Some((idx, e)) => {
+                let (st, rank) = if e.kind == "stop" { ("done", 1) } else { ("needs", 0) };
+                (
+                    st,
+                    rank,
+                    *idx as i64,
+                    Some(e.kind.clone()),
+                    e.notification_type.clone(),
+                    e.message.clone(),
+                    e.summary.clone(),
+                    e.project.clone(),
+                )
+            }
+            None => ("active", 2, -1, None, None, None, None, None),
+        };
+        let c = json!({
+            "paneId": pid,
+            "window": info.window,
+            "windowName": info.window_name,
+            "pane": info.pane,
+            "state": state,
+            "kind": kind,
+            "notificationType": notif,
+            "message": message,
+            "summary": summary,
+            "project": project,
+        });
+        by_sess.entry(info.session.clone()).or_default().push((rank, recency, c));
+    }
+
+    let mut sessions: Vec<Value> = by_sess
+        .into_iter()
+        .map(|(name, mut v)| {
+            v.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+            json!({ "name": name, "claude": v.into_iter().map(|(_, _, c)| c).collect::<Vec<_>>() })
+        })
+        .collect();
+    sessions.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    sessions
 }
 
 /// What the UI reports it's actively watching, and when. Fired banners are
@@ -478,17 +643,24 @@ async fn notify_stream(mut socket: WebSocket, id: String) {
 }
 
 /// Parse one notify line into a compact event for the UI. New lines are
-/// `<kind>\t<tmux-session>\t<payload-json>`; lines written before the tmux column
-/// existed are `<kind>\t<payload-json>` (no session).
+/// `<kind>\t<tmux-session>\t<location>\t<payload-json>`; the format grew over
+/// time (2 cols = no session, 3 = session only). We locate the JSON as the first
+/// `{`-leading field — session/location never start with `{` — so any column
+/// count parses, and a payload that itself contains a tab is rejoined.
 fn parse_event(line: &str) -> Option<NotifyEvent> {
-    let mut parts = line.splitn(3, '\t');
-    let kind = parts.next()?;
-    let second = parts.next()?;
-    // Three columns → middle is the tmux session; two → the old format, no session.
-    let (sess, raw) = match parts.next() {
-        Some(payload) => (second, payload),
-        None => ("", second),
-    };
+    let parts: Vec<&str> = line.split('\t').collect();
+    let kind = *parts.first()?;
+    let json_idx = parts.iter().position(|p| p.trim_start().starts_with('{'))?;
+    let raw = parts[json_idx..].join("\t");
+    let meta = &parts[1..json_idx]; // [] | [sess] | [sess, location]
+    let sess = meta.first().copied().unwrap_or("");
+    // location = `#I|#W|#P|#D` (window index, window name, pane index, pane id).
+    let mut loc = meta.get(1).copied().unwrap_or("").split('|');
+    let window = loc.next().filter(|s| !s.is_empty()).and_then(|s| s.parse().ok());
+    let window_name = loc.next().filter(|s| !s.is_empty()).map(String::from);
+    let pane = loc.next().filter(|s| !s.is_empty()).and_then(|s| s.parse().ok());
+    let pane_id = loc.next().filter(|s| !s.is_empty()).map(String::from);
+
     let p: Value = serde_json::from_str(raw.trim()).unwrap_or(json!({}));
     let cwd = p.get("cwd").and_then(|v| v.as_str());
     let project = cwd.map(|c| c.rsplit('/').next().unwrap_or(c).to_string());
@@ -499,6 +671,10 @@ fn parse_event(line: &str) -> Option<NotifyEvent> {
     Some(NotifyEvent {
         kind: kind.to_string(),
         tmux: if sess.is_empty() { None } else { Some(sess.to_string()) },
+        window,
+        window_name,
+        pane,
+        pane_id,
         notification_type: p.get("notification_type").and_then(|v| v.as_str()).map(String::from),
         message: p.get("message").and_then(|v| v.as_str()).map(String::from),
         project,
@@ -580,5 +756,55 @@ mod tests {
 
         let without = parse_event("stop\t\t{\"cwd\":\"/home/u/proj\"}").unwrap();
         assert_eq!(without.tmux, None);
+    }
+
+    #[test]
+    fn parse_event_reads_location_column() {
+        // Four-column format carries window/pane; location is `#I|#W|#P|#D`.
+        let e = parse_event("notification\tdeploy\t1|build|0|%7\t{\"cwd\":\"/home/u/infra\"}").unwrap();
+        assert_eq!(e.tmux.as_deref(), Some("deploy"));
+        assert_eq!(e.window, Some(1));
+        assert_eq!(e.window_name.as_deref(), Some("build"));
+        assert_eq!(e.pane, Some(0));
+        assert_eq!(e.pane_id.as_deref(), Some("%7"));
+        assert_eq!(e.project.as_deref(), Some("infra"));
+
+        // Empty location column (in tmux, but display-message failed) → no pane.
+        let bare = parse_event("stop\tmain\t\t{\"cwd\":\"/home/u/proj\"}").unwrap();
+        assert_eq!(bare.tmux.as_deref(), Some("main"));
+        assert_eq!(bare.pane_id, None);
+    }
+
+    // Modelled on real capture from host jtl-anhnguyen: `pham` runs two Claude
+    // panes that never fired the (recently installed) hook, plus an event-bearing
+    // wrapper session. The command scan must surface pham; events supply state.
+    #[test]
+    fn inventory_surfaces_running_claude_without_events() {
+        let panes = "\
+pham\t0\teditor\t0\t%3\tclaude
+pham\t0\teditor\t1\t%21\tclaude
+pham\t1\tshell\t0\t%27\tbash
+rcw-24798257\t0\tbash\t0\t%0\tbash
+khoa\t0\tmain\t0\t%6\tclaude";
+        // Only the wrapper session ever fired an event (with a pane location).
+        let log = "stop\trcw-24798257\t0|bash|0|%0\t{\"cwd\":\"/home/anhnguyen/JTLInfra\",\"last_assistant_message\":\"all done\"}";
+        let sessions = build_inventory(log, panes);
+
+        // Sessions present: khoa, pham, rcw-24798257 (sorted); shell-only sessions absent.
+        let names: Vec<&str> = sessions.iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["khoa", "pham", "rcw-24798257"]);
+
+        // pham: two Claude panes, both `active` (running, no event), bash pane excluded.
+        let pham = &sessions[1]["claude"];
+        assert_eq!(pham.as_array().unwrap().len(), 2);
+        assert_eq!(pham[0]["state"], "active");
+        let pham_panes: Vec<&str> = pham.as_array().unwrap().iter().map(|c| c["paneId"].as_str().unwrap()).collect();
+        assert!(pham_panes.contains(&"%3") && pham_panes.contains(&"%21"));
+        assert!(!pham_panes.contains(&"%27"));
+
+        // The wrapper session carries its event state + summary.
+        let rcw = &sessions[2]["claude"];
+        assert_eq!(rcw[0]["state"], "done");
+        assert_eq!(rcw[0]["summary"], "all done");
     }
 }
