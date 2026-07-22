@@ -8,8 +8,9 @@
 //! webview via `POST /api/notify` (see `api::notify`); this module only handles
 //! install/uninstall/status and the event poll.
 
+use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -33,11 +34,16 @@ const SENTINEL: &str = "ism-notify.sh";
 /// `$HOME`/`$1`/`$(…)` below are expanded at *run* time on the host, not now.
 const SCRIPT: &str = r#"#!/bin/sh
 # iShowManagement Claude notifier. $1 = event kind ("stop"|"notification").
-# stdin = Claude's JSON payload. Appends one line: <kind>\t<compact-json>.
+# stdin = Claude's JSON payload. Appends one line:
+#   <kind>\t<tmux-session>\t<compact-json>
+# The tmux column is empty when Claude isn't running inside tmux — the hook
+# inherits Claude's $TMUX/$TMUX_PANE, so `#S` resolves to Claude's own session.
 d="$HOME/.ism"
 mkdir -p "$d" 2>/dev/null
 payload=$(cat)
-printf '%s\t%s\n' "$1" "$(printf '%s' "$payload" | tr '\r\n' '  ')" >> "$d/notify.jsonl"
+sess=""
+[ -n "$TMUX" ] && sess=$(tmux display-message -p '#S' 2>/dev/null)
+printf '%s\t%s\t%s\n' "$1" "$sess" "$(printf '%s' "$payload" | tr '\r\n' '  ')" >> "$d/notify.jsonl"
 "#;
 
 fn bad(msg: &str) -> (StatusCode, Json<Value>) {
@@ -256,6 +262,9 @@ pub struct EventsQuery {
 #[derive(Serialize)]
 struct NotifyEvent {
     kind: String,
+    /// tmux session Claude ran in, or `None` for a plain (non-tmux) shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tmux: Option<String>,
     #[serde(rename = "notificationType", skip_serializing_if = "Option::is_none")]
     notification_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,8 +320,14 @@ pub async fn events(
 struct Watch {
     host: Option<String>,
     at: Option<Instant>,
+    /// Host alias → tmux session names currently open as tabs in the app. Scopes
+    /// notifications to the sessions the user has attached; unlike `host`/`at`,
+    /// this is used without a TTL — the tabs stay open while the app is
+    /// backgrounded (when the heartbeat that refreshes it naturally stops).
+    open_tmux: HashMap<String, Vec<String>>,
 }
-static WATCH: Mutex<Watch> = Mutex::new(Watch { host: None, at: None });
+static WATCH: LazyLock<Mutex<Watch>> =
+    LazyLock::new(|| Mutex::new(Watch { host: None, at: None, open_tmux: HashMap::new() }));
 
 /// The report is only trusted this long; a suspended webview stops sending.
 const WATCH_TTL: Duration = Duration::from_secs(5);
@@ -323,13 +338,18 @@ pub struct WatchReq {
     /// backgrounded or its active tab isn't a live terminal.
     #[serde(default, rename = "activeHost")]
     pub active_host: Option<String>,
+    /// Host alias → tmux session names open as tabs in the app (all live hosts).
+    #[serde(default, rename = "openTmux")]
+    pub open_tmux: HashMap<String, Vec<String>>,
 }
 
-/// `POST /api/watching` — the UI heartbeats which host it's actively watching.
+/// `POST /api/watching` — the UI heartbeats which host it's actively watching and
+/// which tmux sessions it has open.
 pub async fn set_watching(Json(w): Json<WatchReq>) -> StatusCode {
     let mut g = WATCH.lock().unwrap();
     g.host = w.active_host;
     g.at = Some(Instant::now());
+    g.open_tmux = w.open_tmux;
     StatusCode::NO_CONTENT
 }
 
@@ -337,6 +357,15 @@ pub async fn set_watching(Json(w): Json<WatchReq>) -> StatusCode {
 fn is_watching(id: &str) -> bool {
     let g = WATCH.lock().unwrap();
     matches!((g.at, g.host.as_deref()), (Some(at), Some(h)) if h == id && at.elapsed() < WATCH_TTL)
+}
+
+/// Should an event from `id` be delivered? A tmux event passes only if that
+/// session is open as a tab in the app; an event with no tmux session (Claude in
+/// a plain console) always passes.
+fn tmux_allowed(id: &str, sess: Option<&str>) -> bool {
+    let Some(name) = sess else { return true };
+    let g = WATCH.lock().unwrap();
+    g.open_tmux.get(id).is_some_and(|v| v.iter().any(|s| s == name))
 }
 
 /// Banner title/body for an event, labelled by host alias.
@@ -412,20 +441,25 @@ async fn notify_stream(mut socket: WebSocket, id: String) {
             next = lines.next_line() => {
                 match next {
                     Ok(Some(line)) => {
-                        if let Some(ev) = parse_event(&line) {
-                            // Fire the OS banner from here — the native process is
-                            // never suspended, so it works while the app window is
-                            // backgrounded (where the webview's JS is frozen).
-                            // Suppress only when the user is watching this host now.
-                            if !is_watching(&id) {
-                                let (title, body) = banner_text(&id, &ev);
-                                crate::api::deliver_banner(title, body, None).await;
-                            }
-                            // Still push to the webview for the in-app sidebar badge.
-                            if let Ok(txt) = serde_json::to_string(&ev) {
-                                if socket.send(Message::Text(txt.into())).await.is_err() {
-                                    break;
-                                }
+                        let Some(ev) = parse_event(&line) else { continue };
+                        // Scope to the tmux sessions the user has open in the app.
+                        // A plain-console event (no tmux) always passes; a tmux
+                        // event only passes if that session is an open tab.
+                        if !tmux_allowed(&id, ev.tmux.as_deref()) {
+                            continue;
+                        }
+                        // Fire the OS banner from here — the native process is
+                        // never suspended, so it works while the app window is
+                        // backgrounded (where the webview's JS is frozen).
+                        // Suppress only when the user is watching this host now.
+                        if !is_watching(&id) {
+                            let (title, body) = banner_text(&id, &ev);
+                            crate::api::deliver_banner(title, body, None).await;
+                        }
+                        // Still push to the webview for the in-app sidebar badge.
+                        if let Ok(txt) = serde_json::to_string(&ev) {
+                            if socket.send(Message::Text(txt.into())).await.is_err() {
+                                break;
                             }
                         }
                     }
@@ -443,9 +477,18 @@ async fn notify_stream(mut socket: WebSocket, id: String) {
     let _ = child.start_kill();
 }
 
-/// Parse one `<kind>\t<payload-json>` line into a compact event for the UI.
+/// Parse one notify line into a compact event for the UI. New lines are
+/// `<kind>\t<tmux-session>\t<payload-json>`; lines written before the tmux column
+/// existed are `<kind>\t<payload-json>` (no session).
 fn parse_event(line: &str) -> Option<NotifyEvent> {
-    let (kind, raw) = line.split_once('\t')?;
+    let mut parts = line.splitn(3, '\t');
+    let kind = parts.next()?;
+    let second = parts.next()?;
+    // Three columns → middle is the tmux session; two → the old format, no session.
+    let (sess, raw) = match parts.next() {
+        Some(payload) => (second, payload),
+        None => ("", second),
+    };
     let p: Value = serde_json::from_str(raw.trim()).unwrap_or(json!({}));
     let cwd = p.get("cwd").and_then(|v| v.as_str());
     let project = cwd.map(|c| c.rsplit('/').next().unwrap_or(c).to_string());
@@ -455,6 +498,7 @@ fn parse_event(line: &str) -> Option<NotifyEvent> {
         .map(|s| s.chars().take(140).collect::<String>());
     Some(NotifyEvent {
         kind: kind.to_string(),
+        tmux: if sess.is_empty() { None } else { Some(sess.to_string()) },
         notification_type: p.get("notification_type").and_then(|v| v.as_str()).map(String::from),
         message: p.get("message").and_then(|v| v.as_str()).map(String::from),
         project,
@@ -517,11 +561,24 @@ mod tests {
 
     #[test]
     fn parse_event_extracts_project_and_message() {
+        // Old two-column format (no tmux session) still parses.
         let line = "notification\t{\"cwd\":\"/home/u/my-proj\",\"notification_type\":\"permission_prompt\",\"message\":\"Allow Write?\"}";
         let e = parse_event(line).unwrap();
         assert_eq!(e.kind, "notification");
+        assert_eq!(e.tmux, None);
         assert_eq!(e.notification_type.as_deref(), Some("permission_prompt"));
         assert_eq!(e.message.as_deref(), Some("Allow Write?"));
         assert_eq!(e.project.as_deref(), Some("my-proj"));
+    }
+
+    #[test]
+    fn parse_event_reads_tmux_column() {
+        // New three-column format carries the tmux session; empty column → None.
+        let with = parse_event("stop\tmain\t{\"cwd\":\"/home/u/proj\"}").unwrap();
+        assert_eq!(with.tmux.as_deref(), Some("main"));
+        assert_eq!(with.project.as_deref(), Some("proj"));
+
+        let without = parse_event("stop\t\t{\"cwd\":\"/home/u/proj\"}").unwrap();
+        assert_eq!(without.tmux, None);
     }
 }

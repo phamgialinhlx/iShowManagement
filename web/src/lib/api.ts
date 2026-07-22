@@ -218,11 +218,14 @@ export const notify = (title: string, body: string, subtitle?: string): Promise<
 // Heartbeat telling core which host's terminal is on screen (null when
 // backgrounded / not a terminal). Core fires Claude banners itself and uses this
 // to suppress the one you're watching — so delivery survives webview suspension.
-export const setWatching = (activeHost: string | null): Promise<Response> =>
+export const setWatching = (
+  activeHost: string | null,
+  openTmux: Record<string, string[]> = {},
+): Promise<Response> =>
   fetch('/api/watching', {
     method: 'POST',
     headers: json,
-    body: JSON.stringify({ activeHost }),
+    body: JSON.stringify({ activeHost, openTmux }),
   }).then(ok)
 
 export interface NotifyStatus {
@@ -232,6 +235,7 @@ export interface NotifyStatus {
 }
 export interface NotifyEvent {
   kind: 'stop' | 'notification'
+  tmux?: string
   notificationType?: string
   message?: string
   project?: string

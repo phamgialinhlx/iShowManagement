@@ -8,6 +8,8 @@
   import HostTmuxTree from './lib/HostTmuxTree.svelte'
   import Home from './lib/Home.svelte'
   import ClaudeNotifySetup from './lib/ClaudeNotifySetup.svelte'
+  import Dialog from './lib/Dialog.svelte'
+  import { confirmDialog, promptDialog } from './lib/dialogs.svelte'
   import {
     listServers,
     refreshServers,
@@ -252,7 +254,13 @@
   // Heartbeat our watched host to core. When the app is backgrounded the webview
   // suspends and these stop, so core (never suspended) fires the banner itself.
   function pushWatching() {
-    setWatching(watchedHost()).catch(() => {})
+    // Report which tmux sessions are open (as tabs) per host, so core scopes
+    // Claude notifications to only the sessions the user has attached.
+    const openTmux: Record<string, string[]> = {}
+    for (const s of sessions) {
+      if (s.kind === 'tmux' && s.session) (openTmux[s.hostId] ??= []).push(s.session)
+    }
+    setWatching(watchedHost(), openTmux).catch(() => {})
   }
 
   function fireNotify(id: string, _ev: NotifyEvent) {
@@ -278,7 +286,7 @@
   }
 
   async function uninstallNotifyFor(id: string) {
-    if (!confirm('Disable Claude notifications on this host? Removes the hook + helper script.')) return
+    if (!(await confirmDialog('Disable Claude notifications on this host? Removes the hook + helper script.', { okLabel: 'Disable', danger: true }))) return
     try {
       await uninstallNotify(id)
       notifyStatus = { ...notifyStatus, [id]: { reachable: true, installed: false } }
@@ -410,13 +418,13 @@
     const s = activeHost
     if (!s) return
     if (s.hasPassword) {
-      if (confirm(`Clear stored password for ${s.name}?`)) {
+      if (await confirmDialog(`Clear stored password for ${s.name}?`, { okLabel: 'Clear', danger: true })) {
         await clearPassword(s.id)
         await load(listServers)
       }
       return
     }
-    const pw = prompt(`SSH password for ${s.name}`)
+    const pw = await promptDialog(`SSH password for ${s.name}`, { password: true })
     if (pw) {
       await setPassword(s.id, pw)
       await load(listServers)
@@ -612,6 +620,8 @@
     onShowTunnels={() => (activeHostId = undefined)}
   />
 </div>
+
+<Dialog />
 
 <style>
   .app {

@@ -15,6 +15,7 @@
     type PortRow,
     type Proc,
   } from './api'
+  import { confirmDialog, alertDialog } from './dialogs.svelte'
 
   interface Props {
     id: string
@@ -83,7 +84,7 @@
   })
 
   async function doDocker(cid: string, action: 'start' | 'stop' | 'restart' | 'rm') {
-    if (action === 'rm' && !confirm(`Remove container ${cid}?`)) return
+    if (action === 'rm' && !(await confirmDialog(`Remove container ${cid}?`, { okLabel: 'Remove', danger: true }))) return
     try {
       await dockerAction(id, cid, action)
       await reload()
@@ -93,7 +94,7 @@
   }
 
   async function doKill(pid: number, force = false) {
-    if (!confirm(`Send ${force ? 'SIGKILL' : 'SIGTERM'} to pid ${pid}?`)) return
+    if (!(await confirmDialog(`Send ${force ? 'SIGKILL' : 'SIGTERM'} to pid ${pid}?`, { okLabel: 'Send', danger: true }))) return
     try {
       await killPid(id, pid, force)
       await reload()
@@ -107,7 +108,7 @@
       const r = await forwardPort(id, port)
       await reload()
       onChanged?.()
-      alert(`Forwarded remote :${port} → http://127.0.0.1:${r.localPort}`)
+      await alertDialog(`Forwarded remote :${port} → http://127.0.0.1:${r.localPort}`)
     } catch (e) {
       error = String(e)
     }
