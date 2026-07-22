@@ -1,0 +1,61 @@
+/* Self-hosted fonts (Tauri runs offline — no CDN). Latin subsets only. */
+@import '@fontsource/geist-sans/latin-300.css';
+@import '@fontsource/geist-sans/latin-400.css';
+@import '@fontsource/geist-sans/latin-500.css';
+@import '@fontsource/geist-sans/latin-600.css';
+@import '@fontsource/geist-mono/latin-400.css';
+@import '@fontsource/geist-mono/latin-500.css';
+
+/* Dark-minimal design tokens — the committed direction (references/ui-ux/_minimal.css). */
+:root {
+  color-scheme: dark;
+  --bg: #0b0c0e;
+  --surface: #0e0f11;
+  --surface-2: #141517;
+  --line: #1c1d20;
+  --line-2: #161719;
+  --ink: #e9eaec;
+  --ink-dim: #9a9ca2;
+  --ink-faint: #5c5e64;
+  --accent: #8aa6c8;
+  --accent-soft: rgba(138, 166, 200, 0.12);
+  --run: #77c091;
+  --warn: #d6b36a;
+  --danger: #d3796f;
+  --radius: 8px;
+
+  --font-ui: 'Geist Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.5;
+  letter-spacing: 0.005em;
+  -webkit-font-smoothing: antialiased;
+}
+#app {
+  height: 100vh;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+.micro {
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  font-weight: 500;
+}

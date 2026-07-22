@@ -1,0 +1,19 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# Package is `core`; its library target is `ismcore` (avoids the std `core` clash).
+ismcore = { path = "../core", package = "core" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSBundle"] }
+objc2-user-notifications = "0.3"
+block2 = "0.6"
