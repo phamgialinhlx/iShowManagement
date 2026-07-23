@@ -67,18 +67,18 @@ Add inside `mod tests` (after the `tmux_remote_is_attach_or_create` test, before
     }
 
     #[tokio::test]
-    async fn exec_with_input_survives_binary_and_large_payload() {
-        // 200 KB of arbitrary bytes incl. NULs and high bits — must round-trip intact.
-        let mut bytes = Vec::with_capacity(200_000);
-        let mut i = 0u32;
-        while bytes.len() < 200_000 {
-            bytes.push((i & 0xff) as u8);
-            bytes.push(0);
-            i = i.wrapping_add(7);
-        }
+    async fn exec_with_input_handles_large_payload() {
+        // ~240 KB of valid UTF-8 — larger than the OS pipe buffer (64 KB), so
+        // this guards against a sequential write-then-read deadlock (write_all
+        // would block on a full stdin pipe while the command's stdout pipe fills
+        // and waits for a reader that hasn't started). The save path sends file
+        // content this way, so large-payload transport must not hang. Valid UTF-8
+        // round-trips exactly through the lossy-String stdout — the actual use
+        // case, since only valid-UTF-8 files are editable.
+        let bytes: Vec<u8> = b"hello world ".repeat(20_000);
         let out = exec_with_input(
             Target::Local,
-            "cat > /dev/stdout",
+            "cat",
             &bytes,
             std::time::Duration::from_secs(10),
         )
@@ -138,11 +138,23 @@ pub async fn exec_with_input(
             }
         }
     };
-    // Write the payload, then drop stdin so the command sees EOF.
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input).await;
-    }
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    // Write stdin concurrently with reading stdout/stderr. A sequential
+    // write-then-read would deadlock once the payload exceeds the pipe buffer:
+    // write_all blocks on a full stdin pipe while the command can't drain it
+    // (its stdout pipe is full and unread). stdin is dropped at the end of
+    // `write`, signaling EOF to the command.
+    let stdin = child.stdin.take();
+    let write = async move {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(input).await;
+        }
+    };
+    match tokio::time::timeout(timeout, async move {
+        let ((), out) = tokio::join!(write, child.wait_with_output());
+        out
+    })
+    .await
+    {
         Ok(Ok(out)) => ExecOutput {
             ok: out.status.success(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
