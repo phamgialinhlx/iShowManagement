@@ -38,11 +38,10 @@
       const map: Record<string, ClaudeInstance[]> = {}
       for (const s of c?.sessions ?? []) map[s.name] = s.claude
       claudeBySession = map
-      // Auto-expand each attached session that has Claude — once — so its panes
+      // Auto-expand each opened session that has Claude — once — so its panes
       // show without hunting for the tiny caret. A later manual collapse sticks.
-      const attached = new Set((t.sessions ?? []).filter((s) => s.attached).map((s) => s.name))
       for (const [name, insts] of Object.entries(map)) {
-        if (attached.has(name) && insts.length && !autoExpanded.has(name)) {
+        if (openNames.includes(name) && insts.length && !autoExpanded.has(name)) {
           openSessions.add(name)
           autoExpanded.add(name)
         }
@@ -122,9 +121,10 @@
       {:else}
         {#each rows as s, i (s.name)}
           {@const isOpen = openNames.includes(s.name)}
-          <!-- Only surface Claude for attached tmux sessions; a detached session
-               (nobody in it) stays a plain leaf with no rollup/dropdown. -->
-          {@const claude = s.attached ? claudeBySession[s.name] : undefined}
+          <!-- Only surface Claude for sessions the user has opened here. On a
+               shared host, someone else's session (attached by them, not opened
+               in this app) stays a plain leaf with no rollup/dropdown. -->
+          {@const claude = isOpen ? claudeBySession[s.name] : undefined}
           {@const roll = rollup(claude)}
           {@const dropped = openSessions.has(s.name)}
           <div class="snode" style="--i:{i}">
