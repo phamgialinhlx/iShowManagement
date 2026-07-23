@@ -956,10 +956,12 @@ Replace the entire `<div class="right"> … </div>` block (lines 93–114) with:
         {#if preview.type === 'text'}
           {#if preview.editable}
             {#key preview.path}
-              {/* `?? ''` is a type narrowing fix, not a behavior change: the
-                 backend always sets `text` for type === 'text' (FileView.text is
-                 optional only because image/too_large/unsupported omit it; the
-                 {#if type === 'text'} guard does not narrow the sibling field). */}
+              <!-- `?? ''` is a type narrowing fix, not a behavior change: the
+                   backend always sets `text` for type === 'text' (FileView.text
+                   is optional only because image/too_large/unsupported omit it;
+                   the {#if type === 'text'} guard does not narrow the sibling
+                   field). An HTML comment is used because a Svelte {/* */}
+                   comment would break on the inner `}` below. -->
               <Editor text={preview.text ?? ''} name={preview.name} onchange={onEdit} />
             {/key}
           {:else}
