@@ -1,0 +1,50 @@
+# Lightweight CI — runs on every push to main and every pull request. Fast
+# checks only: the core crate's logic tests + the frontend typecheck. The heavy
+# macOS .dmg cross-build lives in release.yml and stays tag-triggered, so a merge
+# is verified in ~a minute instead of cross-building three bundles every commit.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # macOS runner: core depends on `keyring` with the apple-native store, which
+    # only compiles on macOS — the whole app is macOS-only anyway.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Build the frontend first: core embeds ../web/dist via rust-embed, so the
+      # folder must exist before the Rust build/tests, and `check` is the typecheck.
+      - name: Build + typecheck frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+          npm run check
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      # Test the core crate only — it holds all the logic (notify, managers, etc.).
+      # Skipping the desktop crate keeps the per-merge check fast (no Tauri
+      # compile); the release build exercises that path.
+      - name: Test core
+        run: cargo test -p core
