@@ -70,14 +70,6 @@
     openSessions = new Set(openSessions)
   }
 
-  // Worst Claude state in a session, for the collapsed-row rollup marker.
-  function rollup(insts: ClaudeInstance[] | undefined): 'needs' | 'done' | 'active' | undefined {
-    if (!insts?.length) return undefined
-    if (insts.some((i) => i.state === 'needs')) return 'needs'
-    if (insts.some((i) => i.state === 'done')) return 'done'
-    return 'active'
-  }
-
   const badgeLabel = (s: ClaudeInstance['state']) =>
     s === 'needs' ? 'needs you' : s === 'done' ? 'done' : 'active'
 
@@ -125,7 +117,6 @@
                shared host, someone else's session (attached by them, not opened
                in this app) stays a plain leaf with no rollup/dropdown. -->
           {@const claude = isOpen ? claudeBySession[s.name] : undefined}
-          {@const roll = rollup(claude)}
           {@const dropped = openSessions.has(s.name)}
           <div class="snode" style="--i:{i}">
             <!-- A div, not a <button>: WebKit/WKWebView routes clicks on
@@ -162,11 +153,6 @@
                 title={isOpen ? 'Open here' : s.attached ? 'Attached elsewhere' : 'Detached'}
               ></span>
               <span class="lname mono">{s.name}</span>
-              {#if claude?.length}
-                <span class="rollup" title="Claude sessions in this tmux session">
-                  <span class="cmk {roll}"></span>{claude.length}
-                </span>
-              {/if}
               {#if s.windows}<span class="lw" title="windows">{s.windows}</span>{/if}
               {#if isOpen}
                 <span
@@ -187,14 +173,15 @@
               <div class="kids" transition:slide={{ duration: 140 }}>
                 {#each claude as inst (inst.paneId ?? `${inst.window}.${inst.pane}`)}
                   <button class="cnode" title="Attach to this pane" onclick={() => onAttachClaude(s.name, inst)}>
-                    <span class="cst {inst.state}"></span>
                     <span class="cbody">
                       <span class="cl1">
-                        <span class="cwhere mono"
-                          >{inst.window != null ? `win ${inst.window}` : 'claude'}{inst.windowName
-                            ? ` · ${inst.windowName}`
-                            : ''}{inst.paneId ? ` · ${inst.paneId}` : ''}</span
-                        >
+                        <span class="cwhere mono">
+                          {#if inst.paneId}<span class="cpid">{inst.paneId}</span>{/if}<span class="cwin"
+                            >{inst.paneId ? ' · ' : ''}win {inst.window ?? 0}{inst.windowName
+                              ? ` · ${inst.windowName}`
+                              : ''}</span
+                          >
+                        </span>
                         <span class="cbadge {inst.state}">{badgeLabel(inst.state)}</span>
                       </span>
                       {#if inst.summary || inst.message}
@@ -383,31 +370,6 @@
     color: #fff;
   }
   /* Rollup: how many Claude instances + their worst state, on a collapsed row. */
-  .rollup {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    flex: none;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--ink-faint);
-  }
-  .cmk {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex: none;
-  }
-  .cmk.needs {
-    background: var(--warn);
-    box-shadow: 0 0 0 2.5px rgba(214, 179, 106, 0.16);
-  }
-  .cmk.done {
-    background: var(--accent);
-  }
-  .cmk.active {
-    background: var(--run);
-  }
   .lw {
     font-size: 10px;
     font-family: var(--font-mono);
@@ -455,24 +417,6 @@
   .cnode:hover {
     background: var(--surface);
   }
-  .cst {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex: none;
-    margin-top: 4px;
-  }
-  .cst.needs {
-    background: var(--warn);
-    box-shadow: 0 0 0 3px rgba(214, 179, 106, 0.14);
-  }
-  .cst.done {
-    background: var(--accent);
-  }
-  .cst.active {
-    background: var(--run);
-    box-shadow: 0 0 0 3px rgba(119, 192, 145, 0.12);
-  }
   .cbody {
     min-width: 0;
     flex: 1;
@@ -485,11 +429,22 @@
     gap: 0.4rem;
   }
   .cwhere {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
     font-size: 11.5px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  /* Pane id leads and never truncates — it's what distinguishes the sessions. */
+  .cpid {
     color: var(--ink);
+    flex: none;
+  }
+  .cwin {
+    color: var(--ink-faint);
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .cbadge {
     font-size: 8.5px;
@@ -509,8 +464,8 @@
     background: var(--accent-soft);
   }
   .cbadge.active {
-    color: var(--run);
-    background: rgba(119, 192, 145, 0.12);
+    color: var(--ink-faint);
+    background: var(--surface-2);
   }
   .csum {
     font-size: 11px;
