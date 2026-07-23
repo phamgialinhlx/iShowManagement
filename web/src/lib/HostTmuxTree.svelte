@@ -19,21 +19,33 @@
   let expanded = $state(true)
   // Which sessions have their Claude children dropped down.
   let openSessions = $state<Set<string>>(new Set())
+  // Sessions already auto-expanded once, so a later manual collapse sticks across
+  // the 6s refresh instead of springing back open.
+  let autoExpanded = new Set<string>()
 
   async function reload() {
     loading = true
     reason = ''
     try {
-      const [t, c] = await Promise.all([getTmux(id), getClaudeInventory(id).catch(() => null)])
+      // Sequential, NOT Promise.all: the first ssh call establishes the shared
+      // ControlMaster; firing both at once makes their dials race to create the
+      // socket, and the loser fails — which is why the session leaves would show
+      // (getTmux won) but the Claude inventory came back empty (it lost the race).
+      const t = await getTmux(id)
+      const c = await getClaudeInventory(id).catch(() => null)
       reason = t.available ? '' : t.reason ?? 'unavailable'
       sessions = t.sessions ?? []
       const map: Record<string, ClaudeInstance[]> = {}
       for (const s of c?.sessions ?? []) map[s.name] = s.claude
       claudeBySession = map
-      // Auto-expand an *attached* session the moment one of its Claudes needs you.
+      // Auto-expand each attached session that has Claude — once — so its panes
+      // show without hunting for the tiny caret. A later manual collapse sticks.
       const attached = new Set((t.sessions ?? []).filter((s) => s.attached).map((s) => s.name))
       for (const [name, insts] of Object.entries(map)) {
-        if (attached.has(name) && insts.some((i) => i.state === 'needs')) openSessions.add(name)
+        if (attached.has(name) && insts.length && !autoExpanded.has(name)) {
+          openSessions.add(name)
+          autoExpanded.add(name)
+        }
       }
       openSessions = new Set(openSessions)
     } catch (e) {
@@ -116,11 +128,19 @@
           {@const roll = rollup(claude)}
           {@const dropped = openSessions.has(s.name)}
           <div class="snode" style="--i:{i}">
-            <button
+            <!-- A div, not a <button>: WebKit/WKWebView routes clicks on
+                 interactive descendants of a real <button> to the button itself,
+                 so a nested caret/close would fire onSelect instead of its own
+                 handler (the bug where clicking the caret attached pham instead
+                 of expanding it). role+tabindex+keydown keep it accessible. -->
+            <div
               class="leaf"
+              role="button"
+              tabindex="0"
               class:active={activeName === s.name}
               class:open={isOpen}
               onclick={() => onSelect(s.name)}
+              onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onSelect(s.name)}
             >
               {#if claude?.length}
                 <span
@@ -161,7 +181,7 @@
                   onkeydown={(e) => e.key === 'Enter' && onClose(s.name)}
                 >×</span>
               {/if}
-            </button>
+            </div>
 
             {#if claude?.length && dropped}
               <div class="kids" transition:slide={{ duration: 140 }}>

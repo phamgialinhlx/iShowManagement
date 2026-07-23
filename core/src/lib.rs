@@ -163,6 +163,7 @@ async fn build_router() -> Router {
         .with_state(state)
         .fallback(static_handler)
         .layer(middleware::from_fn(origin_guard))
+        .layer(middleware::from_fn(no_store_dynamic))
         .layer(TraceLayer::new_for_http());
 
     app
@@ -205,6 +206,20 @@ async fn health() -> impl IntoResponse {
 /// Reject browser requests whose `Origin` isn't loopback — a remote page must
 /// not be able to drive the local server. Absent Origin (curl, same-origin nav)
 /// is allowed. Pairs with the loopback-only bind.
+/// Stamp dynamic responses `Cache-Control: no-store` so the webview never serves
+/// stale API/WS data (WKWebView heuristically caches responses that carry no
+/// cache directive — that's how a stale `/tmux/claude` hid running Claude panes).
+/// Responses that already set `Cache-Control` — the static assets — are left
+/// alone, so hashed assets keep `immutable` and index.html keeps `no-cache`.
+async fn no_store_dynamic(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    if !res.headers().contains_key(header::CACHE_CONTROL) {
+        res.headers_mut()
+            .insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+    }
+    res
+}
+
 async fn origin_guard(req: Request, next: Next) -> Response {
     let origin = req
         .headers()
