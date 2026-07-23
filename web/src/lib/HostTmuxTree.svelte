@@ -76,7 +76,8 @@
   // Claude's standard context window (the auto-compact threshold for Opus/Sonnet).
   const CTX_WINDOW = 200_000
   const ctxPct = (t: number) => Math.min(100, Math.round((t / CTX_WINDOW) * 100))
-  const ctxLabel = (t: number) => (t >= 1000 ? `${Math.round(t / 1000)}k` : `${t}`)
+  // Shown as the token count in thousands, 2 decimals — e.g. 106265 → "106.27k".
+  const ctxLabel = (t: number) => `${(t / 1000).toFixed(2)}k`
 
   $effect(() => {
     id
@@ -197,7 +198,7 @@
                             class:mid={pct >= 50 && pct < 80}
                             class:hi={pct >= 80}
                             title={`Context window: ${ctxLabel(inst.contextTokens)} / 200k tokens (${pct}%)`}
-                          >{pct}%</span>
+                          >{ctxLabel(inst.contextTokens)}</span>
                         {/if}
                       </span>
                       {#if inst.summary || inst.message}
