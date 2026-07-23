@@ -172,22 +172,20 @@
             {#if claude?.length && dropped}
               <div class="kids" transition:slide={{ duration: 140 }}>
                 {#each claude as inst (inst.paneId ?? `${inst.window}.${inst.pane}`)}
-                  <button class="cnode" title="Attach to this pane" onclick={() => onAttachClaude(s.name, inst)}>
+                  <button
+                    class="cnode"
+                    title={`Attach to pane ${inst.paneId ?? ''} (win ${inst.window ?? 0}·pane ${inst.pane ?? 0})`}
+                    onclick={() => onAttachClaude(s.name, inst)}
+                  >
                     <span class="cbody">
                       <span class="cl1">
-                        <span class="cwhere mono">
-                          {#if inst.paneId}<span class="cpid">{inst.paneId}</span>{/if}<span class="cwin"
-                            >{inst.paneId ? ' · ' : ''}win {inst.window ?? 0}{inst.windowName
-                              ? ` · ${inst.windowName}`
-                              : ''}</span
-                          >
-                        </span>
+                        <span class="cdir">{inst.project ?? 'claude'}</span>
                         <span class="cbadge {inst.state}">{badgeLabel(inst.state)}</span>
                       </span>
+                      <span class="cloc mono">win {inst.window ?? 0} · pane {inst.pane ?? 0}</span>
                       {#if inst.summary || inst.message}
                         <span class="csum">{inst.message ?? inst.summary}</span>
                       {/if}
-                      {#if inst.project}<span class="cmeta mono">{inst.project}</span>{/if}
                     </span>
                   </button>
                 {/each}
@@ -426,25 +424,24 @@
   .cl1 {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: 0.5rem;
   }
-  .cwhere {
-    display: flex;
-    align-items: baseline;
+  /* Project folder — the primary label ("which project is this Claude in"). */
+  .cdir {
+    flex: 1;
     min-width: 0;
-    font-size: 11.5px;
-    overflow: hidden;
-    white-space: nowrap;
-  }
-  /* Pane id leads and never truncates — it's what distinguishes the sessions. */
-  .cpid {
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
     color: var(--ink);
-    flex: none;
-  }
-  .cwin {
-    color: var(--ink-faint);
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cloc {
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    margin-top: 0.1rem;
   }
   .cbadge {
     font-size: 8.5px;
@@ -463,23 +460,36 @@
     color: var(--accent);
     background: var(--accent-soft);
   }
+  /* Active = a live Claude: a soft green glow that breathes, so it reads as
+     "running right now" without a hard traffic-light dot. */
   .cbadge.active {
-    color: var(--ink-faint);
-    background: var(--surface-2);
+    color: var(--run);
+    background: rgba(119, 192, 145, 0.14);
+    box-shadow: 0 0 7px rgba(119, 192, 145, 0.3);
+    animation: liveglow 2.2s ease-in-out infinite;
+  }
+  @keyframes liveglow {
+    0%,
+    100% {
+      box-shadow: 0 0 5px rgba(119, 192, 145, 0.22);
+    }
+    50% {
+      box-shadow: 0 0 13px rgba(119, 192, 145, 0.55);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cbadge.active {
+      animation: none;
+    }
   }
   .csum {
     font-size: 11px;
     color: var(--ink-dim);
-    margin-top: 0.15rem;
+    margin-top: 0.2rem;
     line-height: 1.35;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .cmeta {
-    font-size: 10px;
-    color: var(--ink-faint);
-    margin-top: 0.2rem;
   }
   .tnote {
     padding: 0.3rem 0.45rem;

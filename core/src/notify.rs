@@ -366,7 +366,7 @@ pub async fn claude_inventory(
     let cmd = "tail -n 500 \"$HOME/.ism/notify.jsonl\" 2>/dev/null; \
         echo '===PANES==='; \
         tmux list-panes -a -F \
-        '#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}' \
+        '#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}' \
         2>/dev/null";
     let r = ssh::exec(Target::Remote(&id), cmd, Duration::from_secs(15)).await;
     if !r.ok && r.stdout.trim().is_empty() {
@@ -388,6 +388,9 @@ struct PaneInfo {
     window_name: String,
     pane: u32,
     command: String,
+    /// `pane_current_path` — the pane's live cwd, so an idle Claude still shows
+    /// its project folder even with no hook event to read a cwd from.
+    path: String,
 }
 
 /// Pure core of `claude_inventory`, split out so it's testable without SSH: given
@@ -416,6 +419,7 @@ fn build_inventory(log: &str, panes: &str) -> Vec<Value> {
                 window_name: f[2].to_string(),
                 pane: f[3].trim().parse().unwrap_or(0),
                 command: f[5].trim().to_string(),
+                path: f.get(6).map(|s| s.trim().to_string()).unwrap_or_default(),
             },
         );
     }
@@ -453,6 +457,10 @@ fn build_inventory(log: &str, panes: &str) -> Vec<Value> {
             }
             None => ("active", 2, -1, None, None, None, None, None),
         };
+        // Folder name: the live pane cwd's basename (always available), falling
+        // back to the event's project. This is the "which project" label.
+        let dir = info.path.rsplit('/').next().map(str::trim).filter(|s| !s.is_empty());
+        let project = dir.map(String::from).or(project);
         let c = json!({
             "paneId": pid,
             "window": info.window,
@@ -781,11 +789,11 @@ mod tests {
     #[test]
     fn inventory_surfaces_running_claude_without_events() {
         let panes = "\
-pham\t0\teditor\t0\t%3\tclaude
-pham\t0\teditor\t1\t%21\tclaude
-pham\t1\tshell\t0\t%27\tbash
-rcw-24798257\t0\tbash\t0\t%0\tbash
-khoa\t0\tmain\t0\t%6\tclaude";
+pham\t0\teditor\t0\t%3\tclaude\t/home/anhnguyen/webshop
+pham\t0\teditor\t1\t%21\tclaude\t/home/anhnguyen/webshop
+pham\t1\tshell\t0\t%27\tbash\t/home/anhnguyen
+rcw-24798257\t0\tbash\t0\t%0\tbash\t/home/anhnguyen/JTLInfra
+khoa\t0\tmain\t0\t%6\tclaude\t/home/anhnguyen/khoa-proj";
         // Only the wrapper session ever fired an event (with a pane location).
         let log = "stop\trcw-24798257\t0|bash|0|%0\t{\"cwd\":\"/home/anhnguyen/JTLInfra\",\"last_assistant_message\":\"all done\"}";
         let sessions = build_inventory(log, panes);
@@ -798,6 +806,8 @@ khoa\t0\tmain\t0\t%6\tclaude";
         let pham = &sessions[1]["claude"];
         assert_eq!(pham.as_array().unwrap().len(), 2);
         assert_eq!(pham[0]["state"], "active");
+        // Folder name comes from the live pane cwd, even with no event.
+        assert_eq!(pham[0]["project"], "webshop");
         let pham_panes: Vec<&str> = pham.as_array().unwrap().iter().map(|c| c["paneId"].as_str().unwrap()).collect();
         assert!(pham_panes.contains(&"%3") && pham_panes.contains(&"%21"));
         assert!(!pham_panes.contains(&"%27"));
