@@ -5,6 +5,9 @@
 @import '@fontsource/geist-sans/latin-600.css';
 @import '@fontsource/geist-mono/latin-400.css';
 @import '@fontsource/geist-mono/latin-500.css';
+/* Terminal font (Zed's default): regular + bold for xterm's bold cells. */
+@import '@fontsource/lilex/latin-400.css';
+@import '@fontsource/lilex/latin-700.css';
 
 /* Dark-minimal design tokens — the committed direction (references/ui-ux/_minimal.css). */
 :root {
