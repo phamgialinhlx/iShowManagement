@@ -365,7 +365,7 @@
   .lg.on {
     background: var(--run);
     border-color: var(--run);
-    box-shadow: 0 0 0 2.5px rgba(119, 192, 145, 0.14);
+    box-shadow: 0 0 0 2.5px rgba(163, 190, 140, 0.14);
   }
   .lg.att {
     background: var(--warn);
@@ -383,7 +383,7 @@
     color: var(--ink);
   }
   .leaf.active .lname {
-    color: #fff;
+    color: #e5e9f0;
   }
   /* Rollup: how many Claude instances + their worst state, on a collapsed row. */
   .lw {
@@ -466,11 +466,11 @@
   @keyframes cpulse {
     0%,
     100% {
-      box-shadow: 0 0 0 0 rgba(119, 192, 145, 0.45);
+      box-shadow: 0 0 0 0 rgba(163, 190, 140, 0.45);
       opacity: 1;
     }
     50% {
-      box-shadow: 0 0 0 3px rgba(119, 192, 145, 0);
+      box-shadow: 0 0 0 3px rgba(163, 190, 140, 0);
       opacity: 0.55;
     }
   }
@@ -519,11 +519,11 @@
   }
   .cbadge.working {
     color: var(--run);
-    background: rgba(119, 192, 145, 0.14);
+    background: rgba(163, 190, 140, 0.14);
   }
   .cbadge.needs {
     color: var(--warn);
-    background: rgba(214, 179, 106, 0.14);
+    background: rgba(235, 203, 139, 0.14);
   }
   .cbadge.done {
     color: var(--accent);

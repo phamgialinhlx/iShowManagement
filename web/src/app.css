@@ -9,22 +9,23 @@
 @import '@fontsource/lilex/latin-400.css';
 @import '@fontsource/lilex/latin-700.css';
 
-/* Dark-minimal design tokens — the committed direction (references/ui-ux/_minimal.css). */
+/* Nord design tokens (nordtheme.com) — dark-minimal layout, Polar Night base,
+   Snow Storm text, Frost accent, Aurora status colors. */
 :root {
   color-scheme: dark;
-  --bg: #0b0c0e;
-  --surface: #0e0f11;
-  --surface-2: #141517;
-  --line: #1c1d20;
-  --line-2: #161719;
-  --ink: #e9eaec;
-  --ink-dim: #9a9ca2;
-  --ink-faint: #5c5e64;
-  --accent: #8aa6c8;
-  --accent-soft: rgba(138, 166, 200, 0.12);
-  --run: #77c091;
-  --warn: #d6b36a;
-  --danger: #d3796f;
+  --bg: #2e3440; /* nord0 */
+  --surface: #3b4252; /* nord1 — hover */
+  --surface-2: #434c5e; /* nord2 — selected/pressed */
+  --line: #434c5e; /* nord2 */
+  --line-2: #3b4252; /* nord1 — subtler nested spines */
+  --ink: #e5e9f0; /* nord5 */
+  --ink-dim: #d8dee9; /* nord4 */
+  --ink-faint: #7b88a1; /* brightened nord3 — faint labels stay legible */
+  --accent: #88c0d0; /* nord8 */
+  --accent-soft: rgba(136, 192, 208, 0.12);
+  --run: #a3be8c; /* nord14 */
+  --warn: #ebcb8b; /* nord13 */
+  --danger: #bf616a; /* nord11 */
   --radius: 8px;
 
   --font-ui: 'Geist Sans', system-ui, -apple-system, sans-serif;

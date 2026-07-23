@@ -192,6 +192,6 @@
   }
   .kill:hover {
     color: var(--danger);
-    border-color: rgba(211, 121, 111, 0.4);
+    border-color: rgba(191, 97, 106, 0.4);
   }
 </style>

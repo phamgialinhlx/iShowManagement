@@ -33,30 +33,31 @@
       term = new Terminal({
         fontFamily: "'Lilex', 'SF Mono', SFMono-Regular, ui-monospace, Menlo, monospace",
         fontSize: 15,
-        lineHeight: 1.35,
+        lineHeight: 1.0,
         cursorBlink: true,
+        /* The official Nord terminal scheme (nordtheme.com). */
         theme: {
-          background: '#0b0c0e',
-          foreground: '#c4c6ca',
-          cursor: '#8aa6c8',
-          cursorAccent: '#0b0c0e',
-          selectionBackground: 'rgba(138,166,200,0.25)',
-          black: '#0b0c0e',
-          brightBlack: '#5c5e64',
-          red: '#d3796f',
-          brightRed: '#d3796f',
-          green: '#77c091',
-          brightGreen: '#77c091',
-          yellow: '#d6b36a',
-          brightYellow: '#d6b36a',
-          blue: '#8aa6c8',
-          brightBlue: '#8aa6c8',
-          magenta: '#b08ac8',
-          brightMagenta: '#b08ac8',
-          cyan: '#8ac8c4',
-          brightCyan: '#8ac8c4',
-          white: '#c4c6ca',
-          brightWhite: '#e9eaec',
+          background: '#2e3440',
+          foreground: '#d8dee9',
+          cursor: '#d8dee9',
+          cursorAccent: '#2e3440',
+          selectionBackground: 'rgba(76,86,106,0.55)',
+          black: '#3b4252',
+          brightBlack: '#4c566a',
+          red: '#bf616a',
+          brightRed: '#bf616a',
+          green: '#a3be8c',
+          brightGreen: '#a3be8c',
+          yellow: '#ebcb8b',
+          brightYellow: '#ebcb8b',
+          blue: '#81a1c1',
+          brightBlue: '#81a1c1',
+          magenta: '#b48ead',
+          brightMagenta: '#b48ead',
+          cyan: '#88c0d0',
+          brightCyan: '#8fbcbb',
+          white: '#e5e9f0',
+          brightWhite: '#eceff4',
         },
       })
       const fit = new FitAddon()
@@ -120,6 +121,9 @@
     height: 100%;
     padding: 0.5rem;
     box-sizing: border-box;
+    /* Match the xterm theme background so the padding ring doesn't show a
+       mismatched app background around the terminal. */
+    background: #2e3440; /* nord0 */
   }
   :global(.term .xterm),
   :global(.term .xterm-viewport) {

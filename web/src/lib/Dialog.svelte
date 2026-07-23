@@ -116,14 +116,14 @@
   }
   .b.ok:hover {
     background: var(--accent);
-    color: #0b0c0e;
+    color: #2e3440;
   }
   .b.ok.danger {
-    background: rgba(211, 121, 111, 0.14);
+    background: rgba(191, 97, 106, 0.14);
     color: var(--danger);
   }
   .b.ok.danger:hover {
     background: var(--danger);
-    color: #0b0c0e;
+    color: #2e3440;
   }
 </style>

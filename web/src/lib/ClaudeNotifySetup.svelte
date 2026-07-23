@@ -208,7 +208,7 @@
   .go {
     background: var(--accent);
     border: 1px solid var(--accent);
-    color: #0b0c0e;
+    color: #2e3440;
   }
   .go:hover:not(:disabled) {
     filter: brightness(1.08);
@@ -221,8 +221,8 @@
   .spin {
     width: 11px;
     height: 11px;
-    border: 1.5px solid rgba(11, 12, 14, 0.35);
-    border-top-color: #0b0c0e;
+    border: 1.5px solid rgba(46, 52, 64, 0.35);
+    border-top-color: #2e3440;
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
   }

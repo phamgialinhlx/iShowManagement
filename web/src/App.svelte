@@ -776,7 +776,7 @@
     letter-spacing: -0.005em;
   }
   .srv.active .name {
-    color: #fff;
+    color: #e5e9f0;
   }
   .lock {
     font-size: 11px;
@@ -794,7 +794,7 @@
     padding: 0 4px;
     border-radius: 8px;
     background: var(--warn);
-    color: #0b0c0e;
+    color: #2e3440;
     font-size: 10px;
     font-weight: 700;
     font-family: var(--font-mono);
@@ -884,7 +884,7 @@
   }
   .btn.danger:hover {
     color: var(--danger);
-    border-color: rgba(211, 121, 111, 0.4);
+    border-color: rgba(191, 97, 106, 0.4);
   }
   .iconbtn {
     position: relative;
@@ -910,7 +910,7 @@
   }
   .iconbtn.on:hover {
     color: var(--danger);
-    border-color: rgba(211, 121, 111, 0.4);
+    border-color: rgba(191, 97, 106, 0.4);
   }
   .iconbtn .on-dot {
     position: absolute;

@@ -140,7 +140,7 @@
   }
   .btn.primary {
     background: var(--accent-soft);
-    border-color: rgba(138, 166, 200, 0.35);
+    border-color: rgba(136, 192, 208, 0.35);
     color: var(--ink);
   }
   .btn:disabled {

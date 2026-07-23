@@ -327,5 +327,5 @@
     font-weight: 500;
   }
   .row-actions button:hover { color: var(--ink); border-color: var(--ink-faint); }
-  .row-actions .danger:hover { color: var(--danger); border-color: rgba(211,121,111,0.4); }
+  .row-actions .danger:hover { color: var(--danger); border-color: rgba(191,97,106,0.4); }
 </style>
