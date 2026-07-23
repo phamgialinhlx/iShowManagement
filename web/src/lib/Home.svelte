@@ -95,8 +95,10 @@
   }
   .hgrid {
     max-width: 1000px;
+    /* Gutter lives outside the border — padding here would show as empty
+       strips inside the card. */
+    width: calc(100% - 4rem);
     margin: 0 auto;
-    padding: 0 2rem;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
     gap: 1px;

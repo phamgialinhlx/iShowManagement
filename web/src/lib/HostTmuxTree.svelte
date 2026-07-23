@@ -461,7 +461,7 @@
     background: var(--warn);
   }
   .cdot.done {
-    background: var(--accent);
+    background: var(--run);
   }
   @keyframes cpulse {
     0%,
@@ -526,8 +526,8 @@
     background: rgba(235, 203, 139, 0.14);
   }
   .cbadge.done {
-    color: var(--accent);
-    background: var(--accent-soft);
+    color: var(--run);
+    background: rgba(163, 190, 140, 0.14);
   }
   .cbadge.unknown {
     color: var(--ink-faint);
