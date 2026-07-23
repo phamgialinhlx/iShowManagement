@@ -285,11 +285,15 @@ pub async fn view(
         v["dataUrl"] = json!(data_url);
         return Ok(Json(v));
     }
-    // Text: decode base64 to bytes → utf8 (lossy).
+    // Text: decode base64 → bytes → utf8 (lossy for display, strict flag for editability).
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(cleaned.as_bytes()).unwrap_or_default();
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    Ok(Json(with_type(base, "text", Some(text))))
+    let (text, valid) = decode_text(&bytes);
+    let mut v = with_type(base, "text", Some(text));
+    if is_editable(&stat, valid) {
+        v["editable"] = json!(true);
+    }
+    Ok(Json(v))
 }
 
 // ------------------------------------------------------------ save ----
