@@ -33,20 +33,26 @@ const SENTINEL: &str = "ism-notify.sh";
 /// Version of the helper script. Bump this **and** the `ism-notify-version`
 /// marker line in SCRIPT together whenever SCRIPT changes — `status` compares
 /// the two so an out-of-date install auto-updates on connect (see `install`)
-/// instead of silently keeping the stale hook.
-const HOOK_VERSION: &str = "2";
+/// instead of silently keeping the stale hook. Bumping also forces a reinstall,
+/// which is how a new hook *wiring* (v3 added `UserPromptSubmit`, v4 added
+/// `PostToolUse`) reaches hosts even when the script body itself is unchanged.
+const HOOK_VERSION: &str = "4";
 
 /// The remote helper script. Written verbatim (via a quoted heredoc), so the
 /// `$HOME`/`$1`/`$(…)` below are expanded at *run* time on the host, not now.
 const SCRIPT: &str = r#"#!/bin/sh
-# ism-notify-version: 2
-# iShowManagement Claude notifier. $1 = event kind ("stop"|"notification").
+# ism-notify-version: 4
+# iShowManagement Claude notifier. $1 = event kind
+# ("stop"|"notification"|"prompt"|"tool").
 # stdin = Claude's JSON payload. Appends one line:
-#   <kind>\t<tmux-session>\t<location>\t<compact-json>
+#   <kind>\t<tmux-session>\t<location>\t<context-tokens>\t<compact-json>
 # The tmux columns are empty when Claude isn't running inside tmux — the hook
 # inherits Claude's $TMUX/$TMUX_PANE, so `#S` resolves to Claude's own session
 # and the pane it lives in. <location> is `#I|#W|#P|#D` (window index, window
 # name, pane index, pane id); targeting $TMUX_PANE pins it to Claude's own pane.
+# <context-tokens> is how full the context window was on the last assistant turn
+# (input + cache-read + cache-creation), read from the session transcript; empty
+# when it can't be determined.
 d="$HOME/.ism"
 mkdir -p "$d" 2>/dev/null
 payload=$(cat)
@@ -56,7 +62,30 @@ if [ -n "$TMUX" ]; then
   sess=$(tmux display-message -p '#S' 2>/dev/null)
   loc=$(tmux display-message -t "$TMUX_PANE" -p '#I|#W|#P|#D' 2>/dev/null)
 fi
-printf '%s\t%s\t%s\t%s\n' "$1" "$sess" "$loc" "$(printf '%s' "$payload" | tr '\r\n\t' '   ')" >> "$d/notify.jsonl"
+# Tool events (PostToolUse) fire on every tool call — the "Claude resumed" signal
+# that clears a "needs you" once you approve a permission. They're frequent, so
+# keep them tiny: state only, empty payload, no transcript read. Everything
+# heavier (context size, full payload) is reserved for turn-boundary events.
+ctx=""
+json="{}"
+if [ "$1" != "tool" ]; then
+  json=$(printf '%s' "$payload" | tr '\r\n\t' '   ')
+  # Context size: the payload carries transcript_path; the last usage block there
+  # holds the three input-side token counters that sum to how full the window is.
+  # Pure POSIX (no jq/python) so it runs on any host. Nothing goes to stdout — a
+  # UserPromptSubmit hook's stdout would be injected into Claude's context.
+  tp=$(printf '%s' "$payload" | grep -o '"transcript_path":"[^"]*"' | head -1 | sed 's/.*:"//;s/"$//')
+  if [ -n "$tp" ] && [ -f "$tp" ]; then
+    u=$(tail -n 400 "$tp" 2>/dev/null | grep '"usage"' | tail -1 | grep -o '"usage":{[^{]*')
+    if [ -n "$u" ]; then
+      it=$(printf '%s' "$u" | grep -o '"input_tokens":[0-9]*' | head -1 | sed 's/[^0-9]//g')
+      cr=$(printf '%s' "$u" | grep -o '"cache_read_input_tokens":[0-9]*' | head -1 | sed 's/[^0-9]//g')
+      cc=$(printf '%s' "$u" | grep -o '"cache_creation_input_tokens":[0-9]*' | head -1 | sed 's/[^0-9]//g')
+      ctx=$(( ${it:-0} + ${cr:-0} + ${cc:-0} ))
+    fi
+  fi
+fi
+printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$sess" "$loc" "$ctx" "$json" >> "$d/notify.jsonl"
 "#;
 
 fn bad(msg: &str) -> (StatusCode, Json<Value>) {
@@ -100,7 +129,7 @@ fn group_is_ours(group: &Value) -> bool {
 /// Drop our previously-installed groups from a `hooks` map's `Stop`/`Notification`
 /// arrays, pruning arrays/keys left empty. Leaves the user's own hooks untouched.
 fn strip_ours(hooks: &mut serde_json::Map<String, Value>) {
-    for key in ["Stop", "Notification"] {
+    for key in ["Stop", "Notification", "UserPromptSubmit", "PostToolUse"] {
         if let Some(arr) = hooks.get_mut(key).and_then(|v| v.as_array_mut()) {
             arr.retain(|g| !group_is_ours(g));
             if arr.is_empty() {
@@ -139,6 +168,25 @@ fn apply(mut settings: Value, install: bool) -> Value {
             .unwrap();
         notif.push(our_group("notification", Some("permission_prompt")));
         notif.push(our_group("notification", Some("idle_prompt")));
+        // UserPromptSubmit fires the moment the user submits a prompt — the
+        // "Claude started working" signal. Without it, a busy Claude looks the
+        // same as a finished one (both sit on their last Stop event).
+        hooks
+            .entry("UserPromptSubmit")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(our_group("prompt", None));
+        // PostToolUse fires after each tool runs — the "Claude resumed" signal
+        // that clears a "needs you" once a permission is approved (approving a
+        // prompt fires no other hook we listen to, so the state would otherwise
+        // stay stuck on the permission Notification until the turn's Stop).
+        hooks
+            .entry("PostToolUse")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(our_group("tool", None));
     }
 
     // Tidy: drop an empty hooks object so we don't leave `{"hooks":{}}` behind.
@@ -297,6 +345,10 @@ struct NotifyEvent {
     /// Stable pane id (`#D`, e.g. `%7`) — the handle for `select-pane`.
     #[serde(rename = "paneId", skip_serializing_if = "Option::is_none")]
     pane_id: Option<String>,
+    /// Context-window tokens on the last turn (input + cache), from the hook's
+    /// transcript read. `None` on pre-v3 lines or when it couldn't be read.
+    #[serde(rename = "contextTokens", skip_serializing_if = "Option::is_none")]
+    context_tokens: Option<u64>,
     #[serde(rename = "notificationType", skip_serializing_if = "Option::is_none")]
     notification_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -352,8 +404,11 @@ pub async fn events(
 /// catches long-lived sessions that started before the hook was installed (which
 /// events alone miss entirely), while events add live `state`/summary. Location
 /// comes from the live pane list (correct even after a window rename). `state` is
-/// `needs` (last event a `notification`), `done` (a `stop`), or `active` (running
-/// but no event yet). Sessions without any live Claude are simply absent (the UI
+/// the kind of the most recent event: `working` (a `prompt` or `tool` — generating
+/// now, incl. resumed after a permission was approved), `needs` (a permission
+/// prompt — blocked), `done` (a `stop`/idle prompt — your move), or `unknown`
+/// (process alive but no events, e.g. it started before the hook). Sessions
+/// without any live Claude are simply absent (the UI
 /// merges this with the full session list from `/tmux`).
 pub async fn claude_inventory(
     State(_): State<AppState>,
@@ -363,7 +418,9 @@ pub async fn claude_inventory(
         return e;
     }
     // One round trip: recent notify lines, a marker, then the live pane table.
-    let cmd = "tail -n 500 \"$HOME/.ism/notify.jsonl\" 2>/dev/null; \
+    // 1500 lines (not 500) so a single tool-chatty pane can't scroll another
+    // pane's latest state event out of the window before we read it.
+    let cmd = "tail -n 1500 \"$HOME/.ism/notify.jsonl\" 2>/dev/null; \
         echo '===PANES==='; \
         tmux list-panes -a -F \
         '#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}' \
@@ -424,30 +481,46 @@ fn build_inventory(log: &str, panes: &str) -> Vec<Value> {
         );
     }
 
-    // Latest event per pane id (a later line overwrites; its index = recency).
-    let mut ev_by_pane: HashMap<String, (usize, NotifyEvent)> = HashMap::new();
-    for (idx, line) in log.lines().enumerate() {
+    // Latest event per pane id (a later line overwrites the earlier one).
+    let mut ev_by_pane: HashMap<String, NotifyEvent> = HashMap::new();
+    for line in log.lines() {
         let Some(ev) = parse_event(line) else { continue };
         let Some(pid) = ev.pane_id.clone() else { continue };
-        ev_by_pane.insert(pid, (idx, ev));
+        ev_by_pane.insert(pid, ev);
     }
 
-    // Build instances for every live Claude pane, grouped by session.
-    // Sort key: rank (needs<done<active) then recency (newer event first).
-    let mut by_sess: HashMap<String, Vec<(i32, i64, Value)>> = HashMap::new();
+    // Build instances for every live Claude pane, grouped by session. Children
+    // keep tmux's own pane order (the order `order` was read from list-panes) so a
+    // row never jumps position when its state changes — it stays where it sits in
+    // the actual tmux layout.
+    let mut by_sess: HashMap<String, Vec<Value>> = HashMap::new();
     for pid in &order {
         let info = &by_pane[pid];
         let ev = ev_by_pane.get(pid);
         if info.command != "claude" && ev.is_none() {
             continue;
         }
-        let (state, rank, recency, kind, notif, message, summary, project) = match ev {
-            Some((idx, e)) => {
-                let (st, rank) = if e.kind == "stop" { ("done", 1) } else { ("needs", 0) };
+        // State = the kind of the pane's most recent event.
+        let (state, kind, notif, message, summary, project) = match ev {
+            Some(e) => {
+                let st = match e.kind.as_str() {
+                    // A prompt (turn started) or a tool that just ran (turn still
+                    // going, e.g. resumed after you approved a permission) → busy.
+                    "prompt" | "tool" => "working",
+                    // A permission prompt blocks Claude; an idle prompt just means
+                    // it's been waiting on you — treat idle like "done" (your move).
+                    "notification" => {
+                        if e.notification_type.as_deref() == Some("permission_prompt") {
+                            "needs"
+                        } else {
+                            "done"
+                        }
+                    }
+                    "stop" => "done",
+                    _ => "unknown",
+                };
                 (
                     st,
-                    rank,
-                    *idx as i64,
                     Some(e.kind.clone()),
                     e.notification_type.clone(),
                     e.message.clone(),
@@ -455,12 +528,15 @@ fn build_inventory(log: &str, panes: &str) -> Vec<Value> {
                     e.project.clone(),
                 )
             }
-            None => ("active", 2, -1, None, None, None, None, None),
+            None => ("unknown", None, None, None, None, None),
         };
         // Folder name: the live pane cwd's basename (always available), falling
         // back to the event's project. This is the "which project" label.
         let dir = info.path.rsplit('/').next().map(str::trim).filter(|s| !s.is_empty());
         let project = dir.map(String::from).or(project);
+        // How full the context window is — from the pane's latest event (the hook
+        // reads it off the transcript). `null` for command-scan-only panes.
+        let context = ev.and_then(|e| e.context_tokens);
         let c = json!({
             "paneId": pid,
             "window": info.window,
@@ -472,16 +548,16 @@ fn build_inventory(log: &str, panes: &str) -> Vec<Value> {
             "message": message,
             "summary": summary,
             "project": project,
+            "contextTokens": context,
         });
-        by_sess.entry(info.session.clone()).or_default().push((rank, recency, c));
+        by_sess.entry(info.session.clone()).or_default().push(c);
     }
 
+    // Children stay in tmux pane order (insertion order above); only the sessions
+    // themselves are sorted, by name, so the session list is stable too.
     let mut sessions: Vec<Value> = by_sess
         .into_iter()
-        .map(|(name, mut v)| {
-            v.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-            json!({ "name": name, "claude": v.into_iter().map(|(_, _, c)| c).collect::<Vec<_>>() })
-        })
+        .map(|(name, v)| json!({ "name": name, "claude": v }))
         .collect();
     sessions.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     sessions
@@ -615,6 +691,13 @@ async fn notify_stream(mut socket: WebSocket, id: String) {
                 match next {
                     Ok(Some(line)) => {
                         let Some(ev) = parse_event(&line) else { continue };
+                        // Only `stop`/`notification` warrant a banner or a sidebar
+                        // badge. `prompt`/`tool` are high-frequency state signals
+                        // consumed by the tmux tree's inventory poll — badging the
+                        // sidebar on every prompt/tool would just be noise.
+                        if !matches!(ev.kind.as_str(), "stop" | "notification") {
+                            continue;
+                        }
                         // Scope to the tmux sessions the user has open in the app.
                         // A plain-console event (no tmux) always passes; a tmux
                         // event only passes if that session is an open tab.
@@ -624,12 +707,12 @@ async fn notify_stream(mut socket: WebSocket, id: String) {
                         // Fire the OS banner from here — the native process is
                         // never suspended, so it works while the app window is
                         // backgrounded (where the webview's JS is frozen).
-                        // Suppress only when the user is watching this host now.
+                        // Suppress when the user is watching this host now.
                         if !is_watching(&id) {
                             let (title, body) = banner_text(&id, &ev);
                             crate::api::deliver_banner(title, body, None).await;
                         }
-                        // Still push to the webview for the in-app sidebar badge.
+                        // Push to the webview for the in-app sidebar badge.
                         if let Ok(txt) = serde_json::to_string(&ev) {
                             if socket.send(Message::Text(txt.into())).await.is_err() {
                                 break;
@@ -660,7 +743,7 @@ fn parse_event(line: &str) -> Option<NotifyEvent> {
     let kind = *parts.first()?;
     let json_idx = parts.iter().position(|p| p.trim_start().starts_with('{'))?;
     let raw = parts[json_idx..].join("\t");
-    let meta = &parts[1..json_idx]; // [] | [sess] | [sess, location]
+    let meta = &parts[1..json_idx]; // [] | [sess] | [sess, loc] | [sess, loc, ctx]
     let sess = meta.first().copied().unwrap_or("");
     // location = `#I|#W|#P|#D` (window index, window name, pane index, pane id).
     let mut loc = meta.get(1).copied().unwrap_or("").split('|');
@@ -668,6 +751,7 @@ fn parse_event(line: &str) -> Option<NotifyEvent> {
     let window_name = loc.next().filter(|s| !s.is_empty()).map(String::from);
     let pane = loc.next().filter(|s| !s.is_empty()).and_then(|s| s.parse().ok());
     let pane_id = loc.next().filter(|s| !s.is_empty()).map(String::from);
+    let context_tokens = meta.get(2).and_then(|s| s.trim().parse::<u64>().ok());
 
     let p: Value = serde_json::from_str(raw.trim()).unwrap_or(json!({}));
     let cwd = p.get("cwd").and_then(|v| v.as_str());
@@ -683,6 +767,7 @@ fn parse_event(line: &str) -> Option<NotifyEvent> {
         window_name,
         pane,
         pane_id,
+        context_tokens,
         notification_type: p.get("notification_type").and_then(|v| v.as_str()).map(String::from),
         message: p.get("message").and_then(|v| v.as_str()).map(String::from),
         project,
@@ -768,7 +853,7 @@ mod tests {
 
     #[test]
     fn parse_event_reads_location_column() {
-        // Four-column format carries window/pane; location is `#I|#W|#P|#D`.
+        // Legacy four-column format (v2, no context) carries window/pane only.
         let e = parse_event("notification\tdeploy\t1|build|0|%7\t{\"cwd\":\"/home/u/infra\"}").unwrap();
         assert_eq!(e.tmux.as_deref(), Some("deploy"));
         assert_eq!(e.window, Some(1));
@@ -776,11 +861,26 @@ mod tests {
         assert_eq!(e.pane, Some(0));
         assert_eq!(e.pane_id.as_deref(), Some("%7"));
         assert_eq!(e.project.as_deref(), Some("infra"));
+        assert_eq!(e.context_tokens, None);
 
         // Empty location column (in tmux, but display-message failed) → no pane.
         let bare = parse_event("stop\tmain\t\t{\"cwd\":\"/home/u/proj\"}").unwrap();
         assert_eq!(bare.tmux.as_deref(), Some("main"));
         assert_eq!(bare.pane_id, None);
+    }
+
+    #[test]
+    fn parse_event_reads_context_tokens_column() {
+        // Five-column format (v3): kind, sess, loc, context-tokens, json.
+        let e = parse_event("stop\tdeploy\t1|build|0|%7\t106265\t{\"cwd\":\"/home/u/infra\"}").unwrap();
+        assert_eq!(e.pane_id.as_deref(), Some("%7"));
+        assert_eq!(e.context_tokens, Some(106265));
+
+        // Empty context column (hook couldn't read the transcript) → None, and
+        // the pane location still parses.
+        let empty = parse_event("prompt\tdeploy\t1|build|0|%7\t\t{\"cwd\":\"/home/u/infra\"}").unwrap();
+        assert_eq!(empty.pane_id.as_deref(), Some("%7"));
+        assert_eq!(empty.context_tokens, None);
     }
 
     // Modelled on real capture from host jtl-anhnguyen: `pham` runs two Claude
@@ -802,10 +902,10 @@ khoa\t0\tmain\t0\t%6\tclaude\t/home/anhnguyen/khoa-proj";
         let names: Vec<&str> = sessions.iter().map(|s| s["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["khoa", "pham", "rcw-24798257"]);
 
-        // pham: two Claude panes, both `active` (running, no event), bash pane excluded.
+        // pham: two Claude panes, both `unknown` (running, no event), bash pane excluded.
         let pham = &sessions[1]["claude"];
         assert_eq!(pham.as_array().unwrap().len(), 2);
-        assert_eq!(pham[0]["state"], "active");
+        assert_eq!(pham[0]["state"], "unknown");
         // Folder name comes from the live pane cwd, even with no event.
         assert_eq!(pham[0]["project"], "webshop");
         let pham_panes: Vec<&str> = pham.as_array().unwrap().iter().map(|c| c["paneId"].as_str().unwrap()).collect();
@@ -816,5 +916,89 @@ khoa\t0\tmain\t0\t%6\tclaude\t/home/anhnguyen/khoa-proj";
         let rcw = &sessions[2]["claude"];
         assert_eq!(rcw[0]["state"], "done");
         assert_eq!(rcw[0]["summary"], "all done");
+    }
+
+    // The whole point of the UserPromptSubmit hook: a `prompt` as the pane's most
+    // recent event means Claude is generating *right now* — distinct from `done`
+    // (its last event was a Stop) even though the process is alive in both.
+    #[test]
+    fn most_recent_event_drives_state_working_needs_done() {
+        let panes = "\
+work\t0\tmain\t0\t%1\tclaude\t/home/u/alpha
+wait\t0\tmain\t0\t%2\tclaude\t/home/u/beta
+fin\t0\tmain\t0\t%3\tclaude\t/home/u/gamma";
+        // %1: prompt after its stop → working. %2: permission prompt → needs.
+        // %3: a stop that came after an earlier prompt → done (recency wins).
+        let log = "\
+stop\twork\t0|main|0|%1\t{\"cwd\":\"/home/u/alpha\"}
+prompt\twork\t0|main|0|%1\t{\"cwd\":\"/home/u/alpha\"}
+notification\twait\t0|main|0|%2\t{\"cwd\":\"/home/u/beta\",\"notification_type\":\"permission_prompt\"}
+prompt\tfin\t0|main|0|%3\t{\"cwd\":\"/home/u/gamma\"}
+stop\tfin\t0|main|0|%3\t106265\t{\"cwd\":\"/home/u/gamma\",\"last_assistant_message\":\"finished\"}";
+        let sessions = build_inventory(log, panes);
+        let by = |name: &str| {
+            sessions.iter().find(|s| s["name"] == name).unwrap()["claude"][0].clone()
+        };
+        assert_eq!(by("work")["state"], "working");
+        assert_eq!(by("wait")["state"], "needs");
+        assert_eq!(by("fin")["state"], "done");
+        assert_eq!(by("fin")["summary"], "finished");
+        // The context-window size rides along on the pane's latest event.
+        assert_eq!(by("fin")["contextTokens"], 106265);
+    }
+
+    #[test]
+    fn install_wires_prompt_and_tool_hooks() {
+        let installed = apply(json!({}), true);
+        let ups = installed["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1);
+        assert!(ups[0]["hooks"][0]["command"].as_str().unwrap().contains("prompt"));
+        let ptu = installed["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(ptu.len(), 1);
+        assert!(ptu[0]["hooks"][0]["command"].as_str().unwrap().contains("tool"));
+        // Uninstall strips both back out cleanly.
+        let removed = apply(installed, false);
+        assert!(removed.get("hooks").is_none(), "{removed}");
+    }
+
+    // Children keep tmux's pane order no matter their state — a row must never
+    // jump position when it changes state. Panes here are laid out done, needs,
+    // working; the result must stay in that (tmux) order, not be state-sorted.
+    #[test]
+    fn children_keep_tmux_pane_order_regardless_of_state() {
+        let panes = "\
+s\t0\tmain\t0\t%10\tclaude\t/home/u/a
+s\t0\tmain\t1\t%11\tclaude\t/home/u/b
+s\t0\tmain\t2\t%12\tclaude\t/home/u/c";
+        let log = "\
+stop\ts\t0|main|0|%10\t{\"cwd\":\"/home/u/a\"}
+notification\ts\t0|main|1|%11\t{\"cwd\":\"/home/u/b\",\"notification_type\":\"permission_prompt\"}
+prompt\ts\t0|main|2|%12\t{\"cwd\":\"/home/u/c\"}";
+        let claude = build_inventory(log, panes)[0]["claude"].clone();
+        let ids: Vec<&str> = claude.as_array().unwrap().iter().map(|c| c["paneId"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["%10", "%11", "%12"], "must follow tmux pane order");
+        let states: Vec<&str> = claude.as_array().unwrap().iter().map(|c| c["state"].as_str().unwrap()).collect();
+        assert_eq!(states, ["done", "needs", "working"]);
+    }
+
+    // The bug this fixes: after a permission notification (`needs`), approving it
+    // makes Claude run the tool — a `tool` event lands *after* the notification and
+    // must flip the pane back to `working`. Without the PostToolUse hook the state
+    // stayed stuck on `needs` until the turn's eventual Stop.
+    #[test]
+    fn tool_event_clears_a_pending_permission() {
+        let panes = "sess\t0\tmain\t0\t%5\tclaude\t/home/u/proj";
+        let needs_then_tool = "\
+notification\tsess\t0|main|0|%5\t{\"cwd\":\"/home/u/proj\",\"notification_type\":\"permission_prompt\"}
+tool\tsess\t0|main|0|%5\t\t{}";
+        let s = build_inventory(needs_then_tool, panes);
+        assert_eq!(s[0]["claude"][0]["state"], "working");
+
+        // Order matters: a tool *before* the permission must NOT hide the `needs`.
+        let tool_then_needs = "\
+tool\tsess\t0|main|0|%5\t\t{}
+notification\tsess\t0|main|0|%5\t{\"cwd\":\"/home/u/proj\",\"notification_type\":\"permission_prompt\"}";
+        let s = build_inventory(tool_then_needs, panes);
+        assert_eq!(s[0]["claude"][0]["state"], "needs");
     }
 }

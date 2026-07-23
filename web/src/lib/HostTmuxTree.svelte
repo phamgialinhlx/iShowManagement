@@ -71,7 +71,12 @@
   }
 
   const badgeLabel = (s: ClaudeInstance['state']) =>
-    s === 'needs' ? 'needs you' : s === 'done' ? 'done' : 'active'
+    s === 'working' ? 'working' : s === 'needs' ? 'needs you' : s === 'done' ? 'done' : 'running'
+
+  // Claude's standard context window (the auto-compact threshold for Opus/Sonnet).
+  const CTX_WINDOW = 200_000
+  const ctxPct = (t: number) => Math.min(100, Math.round((t / CTX_WINDOW) * 100))
+  const ctxLabel = (t: number) => (t >= 1000 ? `${Math.round(t / 1000)}k` : `${t}`)
 
   $effect(() => {
     id
@@ -179,10 +184,22 @@
                   >
                     <span class="cbody">
                       <span class="cl1">
+                        <span class="cdot {inst.state}" aria-hidden="true"></span>
                         <span class="cdir">{inst.project ?? 'claude'}</span>
                         <span class="cbadge {inst.state}">{badgeLabel(inst.state)}</span>
                       </span>
-                      <span class="cloc mono">win {inst.window ?? 0} · pane {inst.pane ?? 0}</span>
+                      <span class="cloc mono">
+                        <span>win {inst.window ?? 0} · pane {inst.pane ?? 0}</span>
+                        {#if inst.contextTokens != null}
+                          {@const pct = ctxPct(inst.contextTokens)}
+                          <span
+                            class="cctx"
+                            class:mid={pct >= 50 && pct < 80}
+                            class:hi={pct >= 80}
+                            title={`Context window: ${ctxLabel(inst.contextTokens)} / 200k tokens (${pct}%)`}
+                          >{pct}%</span>
+                        {/if}
+                      </span>
                       {#if inst.summary || inst.message}
                         <span class="csum">{inst.message ?? inst.summary}</span>
                       {/if}
@@ -426,6 +443,36 @@
     align-items: center;
     gap: 0.5rem;
   }
+  /* Status dot — the at-a-glance colour. `working` breathes so a live Claude
+     reads as live; the rest are steady. */
+  .cdot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--ink-faint);
+  }
+  .cdot.working {
+    background: var(--run);
+    animation: cpulse 1.4s ease-in-out infinite;
+  }
+  .cdot.needs {
+    background: var(--warn);
+  }
+  .cdot.done {
+    background: var(--accent);
+  }
+  @keyframes cpulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 rgba(119, 192, 145, 0.45);
+      opacity: 1;
+    }
+    50% {
+      box-shadow: 0 0 0 3px rgba(119, 192, 145, 0);
+      opacity: 0.55;
+    }
+  }
   /* Project folder — the primary label ("which project is this Claude in"). */
   .cdir {
     flex: 1;
@@ -439,9 +486,26 @@
     white-space: nowrap;
   }
   .cloc {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
     font-size: 10.5px;
     color: var(--ink-faint);
     margin-top: 0.1rem;
+  }
+  /* Context-window fullness, pinned to the bottom-right of the row. Tints amber
+     past half-full and red past 80% so a nearly-compacting session stands out. */
+  .cctx {
+    flex: none;
+    color: var(--ink-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .cctx.mid {
+    color: var(--warn);
+  }
+  .cctx.hi {
+    color: var(--danger);
   }
   .cbadge {
     font-size: 8.5px;
@@ -452,6 +516,10 @@
     border-radius: 3px;
     flex: none;
   }
+  .cbadge.working {
+    color: var(--run);
+    background: rgba(119, 192, 145, 0.14);
+  }
   .cbadge.needs {
     color: var(--warn);
     background: rgba(214, 179, 106, 0.14);
@@ -460,9 +528,9 @@
     color: var(--accent);
     background: var(--accent-soft);
   }
-  .cbadge.active {
-    color: var(--run);
-    background: rgba(119, 192, 145, 0.14);
+  .cbadge.unknown {
+    color: var(--ink-faint);
+    background: var(--surface-2);
   }
   .csum {
     font-size: 11px;

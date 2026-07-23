@@ -120,13 +120,20 @@ export interface ClaudeInstance {
   window?: number
   windowName?: string
   pane?: number
-  // 'active' = running but no hook event yet (detected via pane command).
-  state: 'needs' | 'done' | 'active'
+  // State = kind of the most recent hook event:
+  //   'working' = generating now (last event a UserPromptSubmit)
+  //   'needs'   = blocked on a permission prompt
+  //   'done'    = finished its turn (a Stop or idle prompt)
+  //   'unknown' = process alive but no events (e.g. started before the hook)
+  state: 'working' | 'needs' | 'done' | 'unknown'
   kind?: string
   notificationType?: string
   message?: string
   summary?: string
   project?: string
+  // Context-window tokens on the last turn (input + cache). Absent when the
+  // pane was found by command scan only (no hook event to read the transcript).
+  contextTokens?: number
 }
 export interface ClaudeSession {
   name: string
