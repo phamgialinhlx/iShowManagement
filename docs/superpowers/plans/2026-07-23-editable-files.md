@@ -864,7 +864,12 @@ Replace the entire `<script lang="ts"> … </script>` block (lines 1–66) with:
   // when it finishes it will see `dirty` still true (currentText differs from
   // what it saved) and reschedule, so the latest edits are not lost.
   async function runSave() {
-    debounceTimer = undefined
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+      debounceTimer = undefined
+    }
+    saveError = '' // clear so a retry (which calls runSave directly) doesn't
+                   // briefly show the old error color / retry button mid-save
     if (inFlight || !currentPath) return
     saving = true
     saveStatus = 'saving…'
@@ -1057,6 +1062,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 - **`currentId` is load-bearing.** The autosave must save to the host the file came from, not whatever `id` is current when the save fires (a host switch would otherwise write the old file's content to the new host). Never replace `currentId` with `id` inside `runSave` / `flushSave`.
 - **The dirty-check on save completion** (`dirty = currentText !== text`) is what makes autosave correct under concurrent edits: if the user typed during the save, `dirty` stays true and another save is scheduled. Do not simplify it to `dirty = false`.
+- **`runSave` clears the debounce timer and `saveError` at its top.** Clearing the timer (`clearTimeout` + `debounceTimer = undefined`) prevents a `scheduleSave` timer that fires during a `flushSave` loop from surviving the flush and triggering a redundant save after a file switch. Clearing `saveError` lets the `retry` button (which calls `runSave` directly, not `scheduleSave`) reset the error styling instead of briefly showing the old error color mid-retry.
 - **`{#key preview.path}`** in the template is what makes the editor recreate cleanly on file switch (destroying the old CodeMirror view via the `onMount` cleanup). Do not remove it.
 - **Switching files or hosts with an unsaved failed save** is an accepted edge: `flushSave` returns without forcing when `saveError` is set, so the switch proceeds and the failed file's edits are left unsaved (the user must `retry` before switching). Do not add a confirm dialog (the spec chose autosave + no confirms).
 - **Permission preservation** is GNU-only (`chmod --reference`), consistent with the existing `list` command's `find -printf` assumption. Do not add a BSD branch.
