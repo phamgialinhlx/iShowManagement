@@ -460,27 +460,9 @@
     color: var(--accent);
     background: var(--accent-soft);
   }
-  /* Active = a live Claude: a soft green glow that breathes, so it reads as
-     "running right now" without a hard traffic-light dot. */
   .cbadge.active {
     color: var(--run);
     background: rgba(119, 192, 145, 0.14);
-    box-shadow: 0 0 7px rgba(119, 192, 145, 0.3);
-    animation: liveglow 2.2s ease-in-out infinite;
-  }
-  @keyframes liveglow {
-    0%,
-    100% {
-      box-shadow: 0 0 5px rgba(119, 192, 145, 0.22);
-    }
-    50% {
-      box-shadow: 0 0 13px rgba(119, 192, 145, 0.55);
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .cbadge.active {
-      animation: none;
-    }
   }
   .csum {
     font-size: 11px;
