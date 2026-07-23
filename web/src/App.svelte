@@ -468,6 +468,19 @@
   let menuPos = $state({ x: 0, y: 0 })
   let plusBtn: HTMLButtonElement | undefined
 
+  // Sidebar collapse — ⌘B (never Ctrl+B: that's the tmux prefix).
+  let sideCollapsed = $state(localStorage.getItem('sideCollapsed') === '1')
+  function toggleSide() {
+    sideCollapsed = !sideCollapsed
+    localStorage.setItem('sideCollapsed', sideCollapsed ? '1' : '0')
+  }
+  function onGlobalKeydown(e: KeyboardEvent) {
+    if (e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'b') {
+      e.preventDefault()
+      toggleSide()
+    }
+  }
+
   function toggleAddMenu() {
     if (!addMenuOpen && plusBtn) {
       const r = plusBtn.getBoundingClientRect()
@@ -481,7 +494,13 @@
   }
 </script>
 
-<div class="app">
+<svelte:window onkeydowncapture={onGlobalKeydown} />
+
+<div class="app" class:collapsed={sideCollapsed}>
+  {#if sideCollapsed}
+    <button class="side-expand" title="Show sidebar (⌘B)" onclick={toggleSide}>»</button>
+  {/if}
+
   <!-- Sidebar -->
   <aside class="side">
     <div class="brand">
@@ -489,6 +508,7 @@
       <b>iShowManagement</b>
       <span class="spacer"></span>
       <button class="ico" title="Refresh from ~/.ssh/config" onclick={() => load(refreshServers)}>⟳</button>
+      <button class="ico" title="Hide sidebar (⌘B)" onclick={toggleSide}>«</button>
     </div>
 
     {#if error}<div class="err">{error}</div>{/if}
@@ -654,6 +674,31 @@
     grid-template-rows: 1fr auto;
     height: 100vh;
   }
+  .app.collapsed {
+    grid-template-columns: 0 1fr;
+  }
+  /* Kept mounted (HostTmuxTree polls its own data); just not shown. */
+  .app.collapsed .side {
+    visibility: hidden;
+    border-right: none;
+  }
+  .side-expand {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 30;
+    width: 26px;
+    height: 26px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface-2, none);
+    color: var(--ink-faint);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .side-expand:hover {
+    color: var(--ink);
+  }
 
   /* Sidebar */
   .side {
@@ -662,6 +707,7 @@
     flex-direction: column;
     min-height: 0;
     border-right: 1px solid var(--line);
+    overflow: hidden;
   }
   .brand {
     display: flex;
