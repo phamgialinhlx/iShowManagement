@@ -956,7 +956,11 @@ Replace the entire `<div class="right"> … </div>` block (lines 93–114) with:
         {#if preview.type === 'text'}
           {#if preview.editable}
             {#key preview.path}
-              <Editor text={preview.text} name={preview.name} onchange={onEdit} />
+              {/* `?? ''` is a type narrowing fix, not a behavior change: the
+                 backend always sets `text` for type === 'text' (FileView.text is
+                 optional only because image/too_large/unsupported omit it; the
+                 {#if type === 'text'} guard does not narrow the sibling field). */}
+              <Editor text={preview.text ?? ''} name={preview.name} onchange={onEdit} />
             {/key}
           {:else}
             <pre>{preview.text}</pre>
