@@ -226,8 +226,15 @@ Add inside `mod tests` (after the `safe_download_name_strips_separators` test):
         assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "new content");
         let mode = tokio::fs::metadata(&path).await.unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "mode should be preserved across rename");
-        // No leftover temp file in the directory.
-        let left: Vec<_> = tokio::fs::read_dir(&dir).await.unwrap().collect::<Result<_, _>>().await.unwrap();
+        // No leftover temp file in the directory. (Uses a `next_entry()` loop
+        // rather than `.collect()` on `tokio::fs::ReadDir`: the latter requires
+        // `ReadDir: Stream`, which the locked tokio 1.53.x does not implement
+        // without the separate `tokio-stream` crate — not a `core` dependency.)
+        let mut rd = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut left = Vec::new();
+        while let Some(e) = rd.next_entry().await.unwrap() {
+            left.push(e);
+        }
         assert_eq!(left.len(), 1, "only the target should remain");
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
