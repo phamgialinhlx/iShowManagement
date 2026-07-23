@@ -239,6 +239,11 @@ pub async fn exec_with_input(
     let stdin = child.stdin.take();
     let write = async move {
         if let Some(mut stdin) = stdin {
+            // A write error (e.g. the command closes stdin early) is intentionally
+            // swallowed: it does not always surface via the command's exit status
+            // (a partial write that closes with a clean EOF exits 0). Callers that
+            // need byte-exact delivery — notably files::save_command — verify the
+            // payload size themselves before acting on it.
             let _ = stdin.write_all(input).await;
         }
     };

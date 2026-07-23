@@ -325,7 +325,7 @@ pub async fn save(
     let result = if is_local(&id) {
         atomic_write_local(&stat.path, &bytes).await
     } else {
-        let r = ssh::exec_with_input(tgt, &save_command(&pq.path), &bytes, Duration::from_secs(20)).await;
+        let r = ssh::exec_with_input(tgt, &save_command(&pq.path, bytes.len() as u64), &bytes, Duration::from_secs(20)).await;
         if r.ok {
             Ok(())
         } else {
@@ -564,15 +564,25 @@ fn is_editable(stat: &Stat, valid_utf8: bool) -> bool {
 }
 
 /// The remote save command: stream stdin into a temp in the same directory
-/// (so the `mv` is an atomic rename), preserve the original mode, then move
-/// it over the target. `chmod --reference` is GNU — consistent with `list`'s
-/// `find -printf` assumption.
-fn save_command(target_path: &str) -> String {
+/// (so the `mv` is an atomic rename), verify the FULL payload landed, preserve
+/// the original mode, then move it over the target. `chmod --reference` is GNU
+/// — consistent with `list`'s `find -printf` assumption.
+///
+/// The size guard is load-bearing: the steps are `;`-joined, so the shell's
+/// exit status is `mv`'s. Without verifying `cat` wrote `expected_len` bytes
+/// before the rename, a short write (remote disk full, or a transport drop
+/// that closes stdin with a clean EOF after a partial send) would let `mv`
+/// replace the original with the truncated temp while `exec_with_input`
+/// reports success — silently losing data. `exit` aborts the shell so
+/// `chmod`/`mv` never run, and the temp is removed so the original is untouched.
+fn save_command(target_path: &str, expected_len: u64) -> String {
     [
         format!("p={}", q(target_path)),
         r#"dir=$(dirname "$p")"#.into(),
         r#"tmp=$(mktemp "$dir/.ism-XXXXXX")"#.into(),
         r#"cat > "$tmp""#.into(),
+        r#"n=$(wc -c < "$tmp" | tr -d "[:space:]")"#.into(),
+        format!(r#"[ "$n" -eq {expected_len} ] || {{ rm -f "$tmp"; echo "short write: got $n of {expected_len}" >&2; exit 120; }}"#),
         r#"chmod --reference="$p" "$tmp" 2>/dev/null"#.into(),
         r#"mv -f "$tmp" "$p""#.into(),
     ]
@@ -711,11 +721,40 @@ mod tests {
 
     #[test]
     fn save_command_shape() {
-        let cmd = save_command("/home/u/notes.txt");
+        let cmd = save_command("/home/u/notes.txt", 42);
         assert!(cmd.contains("/home/u/notes.txt"), "path present: {cmd}");
         assert!(cmd.contains("mktemp"), "writes to a temp: {cmd}");
         assert!(cmd.contains("cat > "), "reads stdin into temp: {cmd}");
+        assert!(cmd.contains("wc -c"), "verifies payload size before rename: {cmd}");
+        assert!(cmd.contains("-eq 42"), "compares against expected length: {cmd}");
         assert!(cmd.contains("chmod --reference="), "preserves mode: {cmd}");
         assert!(cmd.contains("mv -f "), "atomic rename: {cmd}");
+    }
+
+    #[tokio::test]
+    async fn save_command_rejects_short_write_and_preserves_original() {
+        use crate::ssh::{exec_with_input, Target};
+        let dir = std::env::temp_dir().join(format!("ism-sc-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("target.txt");
+        tokio::fs::write(&path, b"original content").await.unwrap();
+        // Claim 99 bytes but send 5 → cat writes 5, the size guard fails, the
+        // shell exits 120, and `mv` never runs — so the original is untouched.
+        let cmd = save_command(&path.to_string_lossy(), 99);
+        let out = exec_with_input(Target::Local, &cmd, b"short", std::time::Duration::from_secs(5)).await;
+        assert!(!out.ok, "a short write must fail the save (exit 120), stderr: {}", out.stderr);
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "original content",
+            "the original must be untouched when the save is rejected"
+        );
+        // No leftover temp in the directory.
+        let mut rd = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut count = 0;
+        while rd.next_entry().await.unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 1, "only the target should remain (no leftover temp)");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }
