@@ -191,6 +191,81 @@ pub async fn exec(target: Target<'_>, command: &str, timeout: std::time::Duratio
     }
 }
 
+/// Like [`exec`], but pipes `input` to the command's stdin. Binary-safe and
+/// uncoupled from the argument-length limit, so it can move a file's worth of
+/// bytes (the save path). Local runs `sh -c`; remote rides the ControlMaster.
+pub async fn exec_with_input(
+    target: Target<'_>,
+    command: &str,
+    input: &[u8],
+    timeout: std::time::Duration,
+) -> ExecOutput {
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::Command;
+    let mut cmd = match target {
+        Target::Local => {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(command);
+            c
+        }
+        Target::Remote(alias) => {
+            wait_for_master(alias, std::time::Duration::from_secs(3)).await;
+            let mut c = Command::new("ssh");
+            for a in exec_args(alias) {
+                c.arg(a);
+            }
+            c.arg(command); // ssh runs this as the remote command
+            c
+        }
+    };
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return ExecOutput {
+                ok: false,
+                stdout: String::new(),
+                stderr: e.to_string(),
+            }
+        }
+    };
+    // Write stdin concurrently with reading stdout/stderr. A sequential
+    // write-then-read would deadlock once the payload exceeds the pipe buffer:
+    // write_all blocks on a full stdin pipe while the command can't drain it
+    // (its stdout pipe is full and unread). stdin is dropped at the end of
+    // `write`, signaling EOF to the command.
+    let stdin = child.stdin.take();
+    let write = async move {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(input).await;
+        }
+    };
+    match tokio::time::timeout(timeout, async move {
+        let ((), out) = tokio::join!(write, child.wait_with_output());
+        out
+    })
+    .await
+    {
+        Ok(Ok(out)) => ExecOutput {
+            ok: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        },
+        Ok(Err(e)) => ExecOutput {
+            ok: false,
+            stdout: String::new(),
+            stderr: e.to_string(),
+        },
+        Err(_) => ExecOutput {
+            ok: false,
+            stdout: String::new(),
+            stderr: "command timed out".into(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +301,39 @@ mod tests {
     #[test]
     fn tmux_remote_is_attach_or_create() {
         assert_eq!(tmux_remote("work"), "tmux new-session -A -s work");
+    }
+
+    #[tokio::test]
+    async fn exec_with_input_pipes_stdin_to_cat() {
+        let out = exec_with_input(
+            Target::Local,
+            "cat",
+            b"hello world",
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(out.ok, "stderr: {}", out.stderr);
+        assert_eq!(out.stdout, "hello world");
+    }
+
+    #[tokio::test]
+    async fn exec_with_input_handles_large_payload() {
+        // ~240 KB of valid UTF-8 — larger than the OS pipe buffer (64 KB), so
+        // this guards against a sequential write-then-read deadlock (write_all
+        // would block on a full stdin pipe while the command's stdout pipe fills
+        // and waits for a reader that hasn't started). The save path sends file
+        // content this way, so large-payload transport must not hang. Valid UTF-8
+        // round-trips exactly through the lossy-String stdout — the actual use
+        // case, since only valid-UTF-8 files are editable.
+        let bytes: Vec<u8> = b"hello world ".repeat(20_000);
+        let out = exec_with_input(
+            Target::Local,
+            "cat",
+            &bytes,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        assert!(out.ok, "stderr: {}", out.stderr);
+        assert_eq!(out.stdout.as_bytes(), &bytes[..]);
     }
 }
