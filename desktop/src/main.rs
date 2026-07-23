@@ -8,7 +8,7 @@
 //! macOS uses the system WebKit — no extra runtime deps. Package with
 //! `cargo tauri build` (`.app`/`.dmg`).
 
-use std::net::TcpStream;
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
@@ -31,25 +31,32 @@ fn main() {
     // core when this reports failure (e.g. running unbundled in dev).
     ismcore::set_notifier(|n| notify::post(&n.title, &n.body, n.subtitle.as_deref()));
 
-    // Embedded server on its own multi-thread runtime.
-    thread::spawn(|| {
+    // Bind our own loopback socket BEFORE loading the window, so the app always
+    // serves — and loads — its own embedded server. If something else holds the
+    // default port (e.g. a stray `cargo run -p core`), we fall back to a free
+    // port rather than silently loading that other process's UI.
+    let listener = bind_loopback(PORT);
+    let port = listener.local_addr().expect("bound loopback addr").port();
+
+    // Embedded server on its own multi-thread runtime, serving our bound socket.
+    thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
         rt.block_on(async {
-            if let Err(e) = ismcore::serve(PORT).await {
+            if let Err(e) = ismcore::serve_on(listener).await {
                 eprintln!("embedded server error: {e}");
             }
         });
     });
 
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             // Only open the window once the server is accepting connections,
             // otherwise the webview would load a blank/error page.
-            wait_for_server();
-            let url = Url::parse(&format!("http://127.0.0.1:{PORT}")).expect("valid url");
+            wait_for_server(port);
+            let url = Url::parse(&format!("http://127.0.0.1:{port}")).expect("valid url");
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("iShowManagement")
                 .inner_size(1200.0, 800.0)
@@ -100,9 +107,19 @@ fn extract_path(stdout: &str, marker: &str) -> Option<String> {
     (!p.is_empty()).then(|| p.to_string())
 }
 
-fn wait_for_server() {
+/// Bind a loopback listener on `preferred`, or — if it's taken — on an
+/// OS-assigned free port. Owning the socket here (rather than letting the server
+/// bind by number) guarantees the window loads *our* server, never a squatter's.
+fn bind_loopback(preferred: u16) -> TcpListener {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, preferred)).unwrap_or_else(|_| {
+        eprintln!("port {preferred} is in use — serving on an ephemeral port instead");
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind loopback server port")
+    })
+}
+
+fn wait_for_server(port: u16) {
     for _ in 0..100 {
-        if TcpStream::connect(("127.0.0.1", PORT)).is_ok() {
+        if TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok() {
             return;
         }
         thread::sleep(Duration::from_millis(100));
@@ -111,7 +128,17 @@ fn wait_for_server() {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_path;
+    use super::{bind_loopback, extract_path};
+
+    #[test]
+    fn bind_loopback_falls_back_when_preferred_port_is_taken() {
+        // Hold a real free port, then ask for the same one — it must fall back to
+        // a different (ephemeral) port instead of panicking or returning the same.
+        let held = bind_loopback(0);
+        let taken = held.local_addr().unwrap().port();
+        let fallback = bind_loopback(taken);
+        assert_ne!(fallback.local_addr().unwrap().port(), taken);
+    }
 
     #[test]
     fn extracts_path_after_marker_despite_rc_noise() {

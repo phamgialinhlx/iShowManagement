@@ -23,10 +23,12 @@
     getNotifyStatus,
     installNotify,
     uninstallNotify,
+    tmuxSelect,
     type Server,
     type Tunnels,
     type NotifyStatus,
     type NotifyEvent,
+    type ClaudeInstance,
   } from './lib/api'
 
   type Kind = 'shell' | 'tmux' | 'docker-logs' | 'docker-exec' | 'browser'
@@ -203,7 +205,18 @@
   async function ensureNotifyStatus(id: string) {
     if (id === '__local__' || notifyStatus[id]) return
     try {
-      notifyStatus = { ...notifyStatus, [id]: await getNotifyStatus(id) }
+      const st = await getNotifyStatus(id)
+      notifyStatus = { ...notifyStatus, [id]: st }
+      // Auto-update: the hook is wired but its script predates this app version
+      // (e.g. lacks the pane-location column). Silently reinstall to refresh it —
+      // install is idempotent, so this just rewrites the script and re-merges.
+      if (st.installed && st.current === false) {
+        installNotify(id)
+          .then(() => (notifyStatus = { ...notifyStatus, [id]: { ...st, current: true } }))
+          .catch(() => {
+            /* leave it stale; the user can reinstall manually */
+          })
+      }
     } catch {
       /* transient — retry next tick */
     }
@@ -341,6 +354,16 @@
     const key = nextKey++
     sessions = [...sessions, { key, hostId, kind: 'tmux', session, title: session }]
     hostActive = { ...hostActive, [hostId]: { type: 'session', key } }
+  }
+
+  // Attach a specific Claude instance from the sidebar tree: focus its
+  // window+pane on the host (so every client on the session follows), then open
+  // or re-focus the session's terminal tab — landing right on that pane.
+  async function attachClaude(hostId: string, session: string, inst: ClaudeInstance) {
+    if (inst.window != null) {
+      await tmuxSelect(hostId, { session, window: inst.window, paneId: inst.paneId }).catch(() => {})
+    }
+    selectTmux(hostId, session)
   }
 
   // Close (detach from) a tmux session's tab — the tmux session keeps running.
@@ -488,6 +511,7 @@
             activeName={s.id === activeHostId ? activeTmuxName : undefined}
             onSelect={(name) => selectTmux(s.id, name)}
             onClose={(name) => closeTmux(s.id, name)}
+            onAttachClaude={(name, inst) => attachClaude(s.id, name, inst)}
           />
         {/if}
       </li>
