@@ -782,6 +782,9 @@ Replace the entire `<script lang="ts"> … </script>` block (lines 1–66) with:
   }
 
   async function load(path = '') {
+    // Flush the file we're leaving before the preview pane is cleared — covers
+    // the "up" button and directory navigation, which both destroy the editor.
+    await flushSave()
     loading = true
     error = ''
     preview = undefined
@@ -893,12 +896,13 @@ Replace the entire `<script lang="ts"> … </script>` block (lines 1–66) with:
     })
   }
 
-  // (Re)load when the target server changes. Flush the outgoing file first.
+  // (Re)load when the target server changes. `load` flushes the outgoing file
+  // (saving to its original host via `currentId`) before listing the new one.
   // untrack keeps this effect dependent on `id` only, not the save state.
   $effect(() => {
     const _ = id
     untrack(() => {
-      void flushSave().then(() => load(''))
+      void load('')
     })
   })
 </script>
@@ -1029,5 +1033,5 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - **`currentId` is load-bearing.** The autosave must save to the host the file came from, not whatever `id` is current when the save fires (a host switch would otherwise write the old file's content to the new host). Never replace `currentId` with `id` inside `runSave` / `flushSave`.
 - **The dirty-check on save completion** (`dirty = currentText !== text`) is what makes autosave correct under concurrent edits: if the user typed during the save, `dirty` stays true and another save is scheduled. Do not simplify it to `dirty = false`.
 - **`{#key preview.path}`** in the template is what makes the editor recreate cleanly on file switch (destroying the old CodeMirror view via the `onMount` cleanup). Do not remove it.
-- **Switching hosts with an unsaved failed save** is an accepted edge: the failed file is left unsaved (the user must `retry` before switching). Do not add a confirm dialog (the spec chose autosave + no confirms).
+- **Switching files or hosts with an unsaved failed save** is an accepted edge: `flushSave` returns without forcing when `saveError` is set, so the switch proceeds and the failed file's edits are left unsaved (the user must `retry` before switching). Do not add a confirm dialog (the spec chose autosave + no confirms).
 - **Permission preservation** is GNU-only (`chmod --reference`), consistent with the existing `list` command's `find -printf` assumption. Do not add a BSD branch.
