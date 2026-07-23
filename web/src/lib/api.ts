@@ -300,3 +300,18 @@ export const uninstallNotify = (id: string): Promise<Response> =>
 
 // Live events arrive over the /ws/notify WebSocket (see App.svelte), not this
 // HTTP endpoint — core pushes them so delivery survives window-hidden throttling.
+
+/// Upload a pasted image; resolves to its path on the remote host. Errors
+/// carry the server's message (scp stderr) so dialogs can show the cause.
+export const pasteImage = async (id: string, blob: Blob): Promise<string> => {
+  const r = await fetch(`${base(id)}/paste-image`, {
+    method: 'POST',
+    headers: { 'content-type': blob.type || 'image/png' },
+    body: blob,
+  })
+  if (!r.ok) {
+    const msg = await r.json().then((j) => j.error, () => '')
+    throw new Error(msg || `${r.status} ${r.statusText}`)
+  }
+  return (await r.json()).path
+}

@@ -18,6 +18,7 @@ use portable_pty::CommandBuilder;
 use serde::Deserialize;
 
 use crate::api::{AppState, LOCAL_ID};
+use crate::clipboard;
 use crate::pty::Pty;
 use crate::secrets::pw_key;
 use crate::security::safe_name;
@@ -103,12 +104,23 @@ async fn run(socket: WebSocket, params: WsParams, state: AppState) {
         Err(e) => return fail(&mut socket, &format!("failed to start session: {e}")).await,
     };
 
-    bridge(socket, pty, &mut output).await;
+    // OSC 52 copy → macOS clipboard, for interactive modes only. docker-logs is
+    // display-only: tailed log content could set the clipboard with no user
+    // driving the session (see plans/2026-07-23-bidirectional-clipboard.md).
+    let clipboard = params.mode != "docker-logs";
+
+    bridge(socket, pty, &mut output, clipboard).await;
     // `pty` drops here → child killed, threads unwind.
 }
 
 /// Pump bytes between the socket and the PTY until either side closes.
-async fn bridge(mut socket: WebSocket, pty: Pty, output: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) {
+async fn bridge(
+    mut socket: WebSocket,
+    pty: Pty,
+    output: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    clipboard: bool,
+) {
+    let mut scanner = clipboard.then(clipboard::Scanner::new);
     loop {
         tokio::select! {
             incoming = socket.recv() => {
@@ -129,6 +141,15 @@ async fn bridge(mut socket: WebSocket, pty: Pty, output: &mut tokio::sync::mpsc:
             chunk = output.recv() => {
                 match chunk {
                     Some(bytes) => {
+                        if let Some(scanner) = &mut scanner {
+                            for text in scanner.feed(&bytes) {
+                                // Pass-through tee: bytes are forwarded
+                                // unchanged; pbcopy is blocking, so off-runtime.
+                                tokio::task::spawn_blocking(move || {
+                                    clipboard::copy_to_clipboard(&text)
+                                });
+                            }
+                        }
                         if socket.send(Message::Binary(bytes.into())).await.is_err() {
                             break;
                         }

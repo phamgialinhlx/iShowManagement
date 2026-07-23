@@ -59,8 +59,18 @@ pub fn ssh_command(alias: &str, remote: Option<&str>) -> CommandBuilder {
 }
 
 /// The tmux attach-or-create remote command for `session`.
+///
+/// The trailing `set` commands make clipboard work out of the box (see
+/// plans/2026-07-23-bidirectional-clipboard.md): `set-clipboard on` forwards
+/// inner apps' OSC 52 (the default `external` swallows it), and the
+/// `clipboard` terminal-feature tells tmux our terminal accepts OSC 52 —
+/// stock xterm-256color terminfo lacks `Ms`, so tmux would otherwise stay
+/// silent. `\;` reaches tmux as its command separator; the remote shell eats
+/// the backslash.
 pub fn tmux_remote(session: &str) -> String {
-    format!("tmux new-session -A -s {session}")
+    format!(
+        "tmux new-session -A -s {session} \\; set -g set-clipboard on \\; set -as terminal-features ',xterm*:clipboard'"
+    )
 }
 
 /// Where a command runs: the app's own machine, or a remote host by alias.
@@ -225,6 +235,9 @@ mod tests {
 
     #[test]
     fn tmux_remote_is_attach_or_create() {
-        assert_eq!(tmux_remote("work"), "tmux new-session -A -s work");
+        assert_eq!(
+            tmux_remote("work"),
+            "tmux new-session -A -s work \\; set -g set-clipboard on \\; set -as terminal-features ',xterm*:clipboard'"
+        );
     }
 }

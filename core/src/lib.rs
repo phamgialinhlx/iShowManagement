@@ -7,6 +7,7 @@
 mod api;
 mod bg;
 mod browser;
+mod clipboard;
 mod discovery;
 mod files;
 mod forward;
@@ -147,6 +148,11 @@ async fn build_router() -> Router {
         .route("/api/servers/{id}/files", get(files::list))
         .route("/api/servers/{id}/files/view", get(files::view))
         .route("/api/servers/{id}/files/download", get(files::download))
+        .route(
+            "/api/servers/{id}/paste-image",
+            post(files::paste_image)
+                .layer(axum::extract::DefaultBodyLimit::max(files::PASTE_IMAGE_LIMIT)),
+        )
         .route(
             "/api/servers/{id}/ports/{port}/forward",
             post(forward::forward).delete(forward::unforward),

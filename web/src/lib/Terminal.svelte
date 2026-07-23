@@ -3,6 +3,8 @@
   import { Terminal } from '@xterm/xterm'
   import { FitAddon } from '@xterm/addon-fit'
   import '@xterm/xterm/css/xterm.css'
+  import { pasteImage } from './api'
+  import { alertDialog } from './dialogs.svelte'
 
   interface Props {
     mode: string
@@ -17,6 +19,25 @@
   let term: Terminal | undefined
   let socket: WebSocket | undefined
   let ro: ResizeObserver | undefined
+
+  // Pasting an image uploads it to the remote host's /tmp and types the path,
+  // so CLIs like Claude Code can read it (see plans/2026-07-23-image-paste.md).
+  // console/tmux only; elsewhere image pastes stay no-ops as before. Capture
+  // phase so this runs before xterm's own paste handler on the hidden textarea.
+  function onPaste(ev: ClipboardEvent) {
+    const item = Array.from(ev.clipboardData?.items ?? []).find(
+      (i) => i.kind === 'file' && i.type.startsWith('image/'),
+    )
+    if (!item || !alias) return // text paste: let xterm handle it
+    ev.preventDefault()
+    ev.stopImmediatePropagation()
+    const blob = item.getAsFile()
+    if (!blob) return
+    pasteImage(alias, blob)
+      .then((path) => term?.paste(path + ' '))
+      .catch((e) => alertDialog(`Image paste failed: ${e.message}`))
+  }
+  const interceptImagePaste = () => mode === 'console' || mode === 'tmux'
 
   onMount(() => {
     let cancelled = false
@@ -104,10 +125,13 @@
 
       ro = new ResizeObserver(() => fit.fit())
       ro.observe(host)
+
+      if (interceptImagePaste()) host.addEventListener('paste', onPaste, true)
     }
   })
 
   onDestroy(() => {
+    host?.removeEventListener('paste', onPaste, true)
     ro?.disconnect()
     socket?.close()
     term?.dispose()

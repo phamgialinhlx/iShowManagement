@@ -20,6 +20,11 @@ keys, agent, and `ProxyJump` all work as-is — no separate connection setup.
   tree so you can attach/detach named sessions from the sidebar.
 - **Managers** — overview, docker (with logs/exec/actions), listening ports, and
   processes, each parsed straight from `ssh exec`.
+- **Clipboard** — remote copies (tmux yank, nvim `"+y`, OSC 52) land on the
+  macOS clipboard; Cmd+V pastes into the remote terminal. Tmux sessions are
+  auto-configured for clipboard pass-through on attach. Pasting an **image**
+  in a console/tmux terminal uploads it to the host's `/tmp` and types the
+  path — so CLIs like Claude Code can read it.
 - **Files** — browse, preview, and download (rsync → scp fallback).
 - **Port forwarding** — `ssh -L` tunnels managed per host.
 - **Browser** — server-side `ssh -D` SOCKS proxy + a Chrome launch (macOS).

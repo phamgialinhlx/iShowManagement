@@ -8,9 +8,9 @@ use std::path::Path as FsPath;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -487,6 +487,76 @@ async fn read_and_remove(path: &std::path::Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+// ------------------------------------------------------------ paste-image ----
+
+/// Max pasted image size; the route's `DefaultBodyLimit` enforces it (413).
+pub const PASTE_IMAGE_LIMIT: usize = 20 * 1024 * 1024;
+
+/// `POST /api/servers/{id}/paste-image` — body = raw image bytes. Uploads to
+/// the remote host's /tmp and returns `{"path": "..."}` so the terminal can
+/// type it (see plans/2026-07-23-image-paste.md). Remote aliases only:
+/// image paste is scoped to console/tmux sessions.
+pub async fn paste_image(Path(id): Path<String>, headers: HeaderMap, body: Bytes) -> Response {
+    if is_local(&id) || !safe_name(&id) {
+        return err(StatusCode::BAD_REQUEST, "bad server id").into_response();
+    }
+    if body.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "empty image").into_response();
+    }
+    let mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let name = paste_name(mime);
+    match upload_paste(&id, &body, &name).await {
+        Ok(path) => Json(json!({ "path": path })).into_response(),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e).into_response(),
+    }
+}
+
+/// A unique /tmp filename from a safe alphabet — no shell quoting needed.
+fn paste_name(mime: &str) -> String {
+    let ext = match mime {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png", // macOS screenshots; also the fallback
+    };
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("ishow-paste-{secs}-{}-{n}.{ext}", std::process::id())
+}
+
+/// Stage the bytes to a local temp file and scp them to `<alias>:/tmp/<name>`
+/// over the ControlMaster. Returns the remote path.
+async fn upload_paste(alias: &str, bytes: &[u8], name: &str) -> Result<String, String> {
+    let local = unique_tmp(name);
+    tokio::fs::write(&local, bytes).await.map_err(|e| e.to_string())?;
+
+    let remote_path = format!("/tmp/{name}");
+    let mut cmd = tokio::process::Command::new("scp");
+    for o in ssh::transfer_opts(alias) {
+        cmd.arg(o);
+    }
+    // Fail fast on unreachable hosts: the paste UX is a dialog on error, not
+    // a POST hanging for the OS TCP timeout.
+    cmd.arg("-o").arg("ConnectTimeout=10");
+    cmd.arg(&local).arg(format!("{alias}:{remote_path}"));
+    let out = cmd.output().await.map_err(|e| e.to_string());
+    let _ = tokio::fs::remove_file(&local).await;
+
+    let out = out?;
+    if out.status.success() {
+        Ok(remote_path)
+    } else {
+        Err(trim300(&String::from_utf8_lossy(&out.stderr)))
+    }
+}
+
 // ------------------------------------------------------------ util ----
 
 fn trim300(s: &str) -> String {
@@ -500,6 +570,20 @@ fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_name_is_safe_and_unique() {
+        let a = paste_name("image/png");
+        let b = paste_name("image/jpeg");
+        assert!(a.starts_with("ishow-paste-") && a.ends_with(".png"));
+        assert!(b.ends_with(".jpg"));
+        assert_ne!(a, paste_name("image/png"));
+        // Safe alphabet: no quoting needed when the path is typed or scp'd.
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'));
+        // Unknown/missing MIME falls back to png.
+        assert!(paste_name("").ends_with(".png"));
+        assert!(paste_name("image/tiff").ends_with(".png"));
+    }
 
     #[test]
     fn parse_listing_sorts_dirs_first() {
