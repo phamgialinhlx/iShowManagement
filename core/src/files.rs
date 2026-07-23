@@ -292,6 +292,48 @@ pub async fn view(
     Ok(Json(with_type(base, "text", Some(text))))
 }
 
+// ------------------------------------------------------------ save ----
+
+/// `POST /api/servers/{id}/files/save?path=…` — body is the new file contents
+/// (text/plain, UTF-8). Writes atomically: locally via temp+rename, remotely by
+/// piping stdin into the save command. Rejects directories and oversized files.
+pub async fn save(
+    State(_): State<AppState>,
+    Path(id): Path<String>,
+    Query(pq): Query<PathQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tgt = target(&id).ok_or(err(StatusCode::BAD_REQUEST, "bad server id"))?;
+    if pq.path.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "path is required"));
+    }
+    if body.len() as u64 > TEXT_LIMIT {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file too large to edit"));
+    }
+    let stat = stat_path(tgt, &pq.path).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
+    if stat.kind == "dir" {
+        return Err(err(StatusCode::BAD_REQUEST, "cannot save a directory"));
+    }
+    if stat.size > TEXT_LIMIT {
+        return Err(err(StatusCode::BAD_REQUEST, "file too large to edit"));
+    }
+    let bytes = body.to_vec();
+    let result = if is_local(&id) {
+        atomic_write_local(&stat.path, &bytes).await
+    } else {
+        let r = ssh::exec_with_input(tgt, &save_command(&pq.path), &bytes, Duration::from_secs(20)).await;
+        if r.ok {
+            Ok(())
+        } else {
+            Err(trim300(if r.stderr.trim().is_empty() { "save failed" } else { &r.stderr }))
+        }
+    };
+    match result {
+        Ok(()) => Ok(Json(json!({ "ok": true, "saved": stat.path }))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": trim300(&e) })))),
+    }
+}
+
 fn with_type(mut base: Value, ty: &str, text: Option<String>) -> Value {
     base["type"] = json!(ty);
     if let Some(t) = text {
