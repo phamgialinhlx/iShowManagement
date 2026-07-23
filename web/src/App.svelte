@@ -497,10 +497,6 @@
 <svelte:window onkeydowncapture={onGlobalKeydown} />
 
 <div class="app" class:collapsed={sideCollapsed}>
-  {#if sideCollapsed}
-    <button class="side-expand" title="Show sidebar (⌘B)" onclick={toggleSide}>»</button>
-  {/if}
-
   <!-- Sidebar -->
   <aside class="side">
     <div class="brand">
@@ -508,7 +504,6 @@
       <b>iShowManagement</b>
       <span class="spacer"></span>
       <button class="ico" title="Refresh from ~/.ssh/config" onclick={() => load(refreshServers)}>⟳</button>
-      <button class="ico" title="Hide sidebar (⌘B)" onclick={toggleSide}>«</button>
     </div>
 
     {#if error}<div class="err">{error}</div>{/if}
@@ -662,6 +657,8 @@
     proxies={tunnels.proxies.length}
     active={activeHost ? { name: activeHost.name, live: isLive } : undefined}
     onShowTunnels={() => (activeHostId = undefined)}
+    {sideCollapsed}
+    onToggleSide={toggleSide}
   />
 </div>
 
@@ -682,24 +679,6 @@
     visibility: hidden;
     border-right: none;
   }
-  .side-expand {
-    position: fixed;
-    top: 8px;
-    left: 8px;
-    z-index: 30;
-    width: 26px;
-    height: 26px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--surface-2, none);
-    color: var(--ink-faint);
-    cursor: pointer;
-    font-size: 13px;
-  }
-  .side-expand:hover {
-    color: var(--ink);
-  }
-
   /* Sidebar */
   .side {
     grid-row: 1 / 2;
