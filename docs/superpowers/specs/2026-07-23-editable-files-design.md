@@ -187,9 +187,17 @@ via a transaction rather than recreating the editor.
     `dirty` stays true, show a small `retry save` button. Do not discard edits.
   - Only one save in flight at a time.
 - **Switching files or changing host flushes the pending save first**: `open()`
-  awaits any in-flight or pending save (drains the debounce timer immediately) before
-  loading the next file. This means edits are never silently lost — without a
-  confirm dialog, matching the autosave choice.
+  and `load()` await any in-flight or pending save (draining the debounce timer
+  immediately) before the editor is destroyed. `load()` flushing covers the "up"
+  button and directory navigation too. This means edits are never silently lost —
+  without a confirm dialog, matching the autosave choice.
+  - **Accepted edge (confirmed 2026-07-27):** the one exception is a save that has
+    *already failed*. `flushSave` returns early when `saveError` is set, so the
+    switch proceeds and the failed file's edits are discarded without a notice —
+    the user must hit `retry` before switching. This is deliberate: forcing a
+    retry or warning on switch would reintroduce the blocking/confirm behavior the
+    autosave choice rejected. The `⚠ save failed: <err> [retry]` status is the
+    signal. Do not add a confirm dialog or a switch-blocking gate here.
 - A programmatic content set on file-switch is suppressed from triggering a save
   via a `loading` guard, so loading a file is not mistaken for an edit.
 - **Status line in `pv-head`**: `● unsaved` / `saving…` / `saved 12:03:45` /
