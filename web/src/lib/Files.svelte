@@ -1,12 +1,15 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import {
     listFiles,
     viewFile,
+    saveFile,
     downloadFileUrl,
     type Listing,
     type FileEntry,
     type FileView,
   } from './api'
+  import Editor from './Editor.svelte'
 
   interface Props {
     id: string
@@ -17,6 +20,18 @@
   let preview = $state<FileView>()
   let error = $state('')
   let loading = $state(false)
+
+  // --- autosave state for the editable text file currently open ---
+  let currentPath = $state('') // path loaded into the editor
+  let currentId = $state('') // host id of that file (so a host switch saves to the right host)
+  let currentText = $state('') // latest editor text (what the next save writes)
+  let dirty = $state(false) // unsaved edits exist
+  let saving = $state(false) // a save is in flight
+  let saveStatus = $state('') // '' | 'unsaved' | 'saving…' | 'saved HH:MM:SS' | '⚠ save failed: …'
+  let saveError = $state('')
+  let loadingFile = $state(false) // suppresses save during a programmatic load
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined
+  let inFlight: Promise<void> | null = null
 
   function fmtSize(n: number): string {
     if (!n) return ''
@@ -30,6 +45,9 @@
   }
 
   async function load(path = '') {
+    // Flush the file we're leaving before the preview pane is cleared — covers
+    // the "up" button and directory navigation, which both destroy the editor.
+    await flushSave()
     loading = true
     error = ''
     preview = undefined
@@ -45,23 +63,115 @@
   async function open(entry: FileEntry) {
     if (entry.type === 'dir') {
       await load(entry.path)
-    } else {
-      loading = true
-      error = ''
-      try {
-        preview = await viewFile(id, entry.path)
-      } catch (e) {
-        error = String(e)
-      } finally {
-        loading = false
+      return
+    }
+    // Flush the file we're leaving before switching.
+    await flushSave()
+    loadingFile = true
+    loading = true
+    error = ''
+    try {
+      preview = await viewFile(id, entry.path)
+      if (preview?.type === 'text') {
+        currentId = id
+        currentPath = preview.path
+        currentText = preview.text ?? ''
+        dirty = false
+        saving = false
+        saveError = ''
+        saveStatus = ''
       }
+    } catch (e) {
+      error = String(e)
+    } finally {
+      loading = false
+      loadingFile = false
     }
   }
 
-  // (Re)load when the target server changes.
+  // Editor reported a change → mark dirty and (re)start the debounce timer.
+  function onEdit(value: string) {
+    currentText = value
+    scheduleSave()
+  }
+
+  function scheduleSave() {
+    if (loadingFile) return // ignore the "edit" that is just us loading a file
+    dirty = true
+    saveError = ''
+    saveStatus = 'unsaved'
+    if (debounceTimer) clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(runSave, 800)
+  }
+
+  // Save once, using the current text. If a save is already in flight, bail:
+  // when it finishes it will see `dirty` still true (currentText differs from
+  // what it saved) and reschedule, so the latest edits are not lost.
+  async function runSave() {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+      debounceTimer = undefined
+    }
+    saveError = '' // clear so a retry (which calls runSave directly) doesn't
+                   // briefly show the old error color / retry button mid-save
+    if (inFlight || !currentPath) return
+    saving = true
+    saveStatus = 'saving…'
+    const saveId = currentId
+    const path = currentPath
+    const text = currentText // capture exactly what we are saving
+    inFlight = (async () => {
+      try {
+        await saveFile(saveId, path, text)
+        saveError = ''
+      } catch (e) {
+        saveError = String(e)
+      }
+    })()
+    await inFlight
+    inFlight = null
+    saving = false
+    if (saveError) {
+      saveStatus = `⚠ save failed: ${saveError}`
+      // dirty stays true so the retry button / next edit can re-attempt
+    } else {
+      // Only clear dirty if the editor did not move on while we were saving.
+      dirty = currentText !== text
+      saveStatus = dirty ? 'unsaved' : `saved ${clock()}`
+    }
+    if (dirty && !saveError) scheduleSave() // edits landed during the save
+  }
+
+  // Force pending edits to disk before switching files / hosts. Bypasses the
+  // debounce and drains until quiet or an error.
+  async function flushSave() {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+      debounceTimer = undefined
+    }
+    while (true) {
+      while (inFlight) await inFlight
+      if (!dirty || !currentPath || saveError) return
+      void runSave() // sets inFlight synchronously
+    }
+  }
+
+  function clock(): string {
+    return new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  }
+
+  // (Re)load when the target server changes. `load` flushes the outgoing file
+  // (saving to its original host via `currentId`) before listing the new one.
+  // untrack keeps this effect dependent on `id` only, not the save state.
   $effect(() => {
-    id
-    load('')
+    const _ = id
+    untrack(() => {
+      void load('')
+    })
   })
 </script>
 
@@ -95,11 +205,35 @@
       <div class="pv-head">
         <span class="pv-name">{preview.name}</span>
         <span class="muted">{preview.mime} · {fmtSize(preview.size)}</span>
+        {#if preview.type === 'text' && preview.editable}
+          <span
+            class="save-status"
+            class:unsaved={dirty && !saving && !saveError}
+            class:saving={saving}
+            class:err={!!saveError}
+          >
+            {saveStatus}
+            {#if saveError}
+              <button class="retry" onclick={() => void runSave()}>retry</button>
+            {/if}
+          </span>
+        {/if}
         <a class="dl" href={downloadFileUrl(id, preview.path)}>download</a>
       </div>
       <div class="pv-body">
         {#if preview.type === 'text'}
-          <pre>{preview.text}</pre>
+          {#if preview.editable}
+            {#key preview.path}
+              <!-- `?? ''` is a type narrowing fix, not a behavior change: the
+                 backend always sets `text` for type === 'text' (FileView.text is
+                 optional only because image/too_large/unsupported omit it; the
+                 {#if type === 'text'} guard does not narrow the sibling field). -->
+              <Editor text={preview.text ?? ''} name={preview.name} onchange={onEdit} />
+            {/key}
+          {:else}
+            <pre>{preview.text}</pre>
+            <div class="muted ro-note">not editable: not UTF-8 — download to edit externally.</div>
+          {/if}
         {:else if preview.type === 'image'}
           <img src={preview.dataUrl} alt={preview.name} />
         {:else if preview.type === 'too_large'}
@@ -227,4 +361,37 @@
   .muted { color: var(--ink-faint); }
   .err { color: var(--danger); padding: 0.5rem 0.7rem; font-size: 12px; }
   .pad { padding: 1rem; }
+  .save-status {
+    margin-left: 0.5rem;
+    font-size: 11.5px;
+    font-family: var(--font-mono);
+    color: var(--ink-faint);
+  }
+  .save-status.unsaved {
+    color: var(--accent);
+  }
+  .save-status.saving {
+    color: var(--ink-dim);
+  }
+  .save-status.err {
+    color: var(--danger);
+  }
+  .retry {
+    margin-left: 0.4rem;
+    background: none;
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    border-radius: 6px;
+    padding: 0.05rem 0.4rem;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .retry:hover {
+    background: rgba(211, 121, 111, 0.12);
+  }
+  .ro-note {
+    padding: 0.4rem 0.9rem 0;
+    font-size: 12px;
+  }
 </style>

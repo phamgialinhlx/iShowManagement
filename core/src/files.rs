@@ -285,11 +285,57 @@ pub async fn view(
         v["dataUrl"] = json!(data_url);
         return Ok(Json(v));
     }
-    // Text: decode base64 to bytes → utf8 (lossy).
+    // Text: decode base64 → bytes → utf8 (lossy for display, strict flag for editability).
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(cleaned.as_bytes()).unwrap_or_default();
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    Ok(Json(with_type(base, "text", Some(text))))
+    let (text, valid) = decode_text(&bytes);
+    let mut v = with_type(base, "text", Some(text));
+    if is_editable(&stat, valid) {
+        v["editable"] = json!(true);
+    }
+    Ok(Json(v))
+}
+
+// ------------------------------------------------------------ save ----
+
+/// `POST /api/servers/{id}/files/save?path=…` — body is the new file contents
+/// (text/plain, UTF-8). Writes atomically: locally via temp+rename, remotely by
+/// piping stdin into the save command. Rejects directories and oversized files.
+pub async fn save(
+    State(_): State<AppState>,
+    Path(id): Path<String>,
+    Query(pq): Query<PathQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tgt = target(&id).ok_or(err(StatusCode::BAD_REQUEST, "bad server id"))?;
+    if pq.path.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "path is required"));
+    }
+    if body.len() as u64 > TEXT_LIMIT {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file too large to edit"));
+    }
+    let stat = stat_path(tgt, &pq.path).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
+    if stat.kind == "dir" {
+        return Err(err(StatusCode::BAD_REQUEST, "cannot save a directory"));
+    }
+    if stat.size > TEXT_LIMIT {
+        return Err(err(StatusCode::BAD_REQUEST, "file too large to edit"));
+    }
+    let bytes = body.to_vec();
+    let result = if is_local(&id) {
+        atomic_write_local(&stat.path, &bytes).await
+    } else {
+        let r = ssh::exec_with_input(tgt, &save_command(&pq.path, bytes.len() as u64), &bytes, Duration::from_secs(20)).await;
+        if r.ok {
+            Ok(())
+        } else {
+            Err(trim300(if r.stderr.trim().is_empty() { "save failed" } else { &r.stderr }))
+        }
+    };
+    match result {
+        Ok(()) => Ok(Json(json!({ "ok": true, "saved": stat.path }))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": trim300(&e) })))),
+    }
 }
 
 fn with_type(mut base: Value, ty: &str, text: Option<String>) -> Value {
@@ -567,6 +613,73 @@ fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
     (code, Json(json!({ "error": msg })))
 }
 
+/// Decode bytes as text for display: the lossy string plus whether the input
+/// was *strictly* valid UTF-8. The strict flag drives editability — saving
+/// lossy text would corrupt the original bytes, so invalid-UTF-8 files are
+/// shown read-only even when they look like text.
+fn decode_text(bytes: &[u8]) -> (String, bool) {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => (s.to_string(), true),
+        Err(_) => (String::from_utf8_lossy(bytes).into_owned(), false),
+    }
+}
+
+/// A file is editable when it's a regular text file under the size limit with
+/// valid UTF-8 (see the spec's editable rule).
+fn is_editable(stat: &Stat, valid_utf8: bool) -> bool {
+    stat.kind == "file"
+        && stat.size <= TEXT_LIMIT
+        && is_text_preview(&stat.name, &stat.mime)
+        && valid_utf8
+}
+
+/// The remote save command: stream stdin into a temp in the same directory
+/// (so the `mv` is an atomic rename), verify the FULL payload landed, preserve
+/// the original mode, then move it over the target. `chmod --reference` is GNU
+/// — consistent with `list`'s `find -printf` assumption.
+///
+/// The size guard is load-bearing: the steps are `;`-joined, so the shell's
+/// exit status is `mv`'s. Without verifying `cat` wrote `expected_len` bytes
+/// before the rename, a short write (remote disk full, or a transport drop
+/// that closes stdin with a clean EOF after a partial send) would let `mv`
+/// replace the original with the truncated temp while `exec_with_input`
+/// reports success — silently losing data. `exit` aborts the shell so
+/// `chmod`/`mv` never run, and the temp is removed so the original is untouched.
+fn save_command(target_path: &str, expected_len: u64) -> String {
+    [
+        format!("p={}", q(target_path)),
+        r#"dir=$(dirname "$p")"#.into(),
+        r#"tmp=$(mktemp "$dir/.ism-XXXXXX")"#.into(),
+        r#"cat > "$tmp""#.into(),
+        r#"n=$(wc -c < "$tmp" | tr -d "[:space:]")"#.into(),
+        format!(r#"[ "$n" -eq {expected_len} ] || {{ rm -f "$tmp"; echo "short write: got $n of {expected_len}" >&2; exit 120; }}"#),
+        r#"chmod --reference="$p" "$tmp" 2>/dev/null"#.into(),
+        r#"mv -f "$tmp" "$p""#.into(),
+    ]
+    .join("; ")
+}
+
+/// Write `bytes` to `path` atomically on the local machine: a temp file in the
+/// same directory, the original mode copied onto it, then an atomic rename.
+/// Assumes `path` already exists (the caller stats it first).
+async fn atomic_write_local(path: &str, bytes: &[u8]) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let base = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".ism-{}-{}-{}", std::process::id(), n, base));
+    tokio::fs::write(&tmp, bytes).await.map_err(|e| e.to_string())?;
+    // Preserve the original mode across the inode swap.
+    let perms = tokio::fs::metadata(path).await.map_err(|e| e.to_string())?.permissions();
+    tokio::fs::set_permissions(&tmp, perms).await.map_err(|e| e.to_string())?;
+    tokio::fs::rename(&tmp, path).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,5 +740,105 @@ mod tests {
     fn safe_download_name_strips_separators() {
         assert_eq!(safe_download_name("a/b\\c", "x"), "a_b_c");
         assert_eq!(safe_download_name("  ", "fallback"), "fallback");
+    }
+
+    #[tokio::test]
+    async fn atomic_write_local_replaces_content_and_preserves_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ism-awt-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("target.txt");
+        tokio::fs::write(&path, b"old").await.unwrap();
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .unwrap();
+        atomic_write_local(&path.to_string_lossy(), b"new content")
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "new content");
+        let mode = tokio::fs::metadata(&path).await.unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode should be preserved across rename");
+        // No leftover temp file in the directory.
+        let mut rd = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut left = Vec::new();
+        while let Some(e) = rd.next_entry().await.unwrap() {
+            left.push(e);
+        }
+        assert_eq!(left.len(), 1, "only the target should remain");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn decode_text_valid_and_invalid_utf8() {
+        let (text, ok) = decode_text(b"hello");
+        assert_eq!(text, "hello");
+        assert!(ok);
+        let (text, ok) = decode_text(&[0xff, 0xfe, 0xfd]);
+        assert!(!ok);
+        assert!(text.contains('\u{fffd}'), "lossy text has replacement char");
+    }
+
+    #[test]
+    fn is_editable_enforces_all_conditions() {
+        let mk = |kind: &str, size: u64, name: &str, mime: &str| Stat {
+            kind: kind.into(),
+            size,
+            mime: mime.into(),
+            name: name.into(),
+            path: name.into(),
+        };
+        assert!(is_editable(&mk("file", 100, "a.txt", "text/plain"), true));
+        assert!(!is_editable(&mk("dir", 100, "a", "text/plain"), true), "dirs not editable");
+        assert!(
+            !is_editable(&mk("file", TEXT_LIMIT + 1, "a.txt", "text/plain"), true),
+            "over limit not editable"
+        );
+        assert!(
+            !is_editable(&mk("file", 100, "a.bin", "application/octet-stream"), true),
+            "binary not editable"
+        );
+        assert!(
+            !is_editable(&mk("file", 100, "a.txt", "text/plain"), false),
+            "invalid utf8 not editable"
+        );
+    }
+
+    #[test]
+    fn save_command_shape() {
+        let cmd = save_command("/home/u/notes.txt", 42);
+        assert!(cmd.contains("/home/u/notes.txt"), "path present: {cmd}");
+        assert!(cmd.contains("mktemp"), "writes to a temp: {cmd}");
+        assert!(cmd.contains("cat > "), "reads stdin into temp: {cmd}");
+        assert!(cmd.contains("wc -c"), "verifies payload size before rename: {cmd}");
+        assert!(cmd.contains("-eq 42"), "compares against expected length: {cmd}");
+        assert!(cmd.contains("chmod --reference="), "preserves mode: {cmd}");
+        assert!(cmd.contains("mv -f "), "atomic rename: {cmd}");
+    }
+
+    #[tokio::test]
+    async fn save_command_rejects_short_write_and_preserves_original() {
+        use crate::ssh::{exec_with_input, Target};
+        let dir = std::env::temp_dir().join(format!("ism-sc-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("target.txt");
+        tokio::fs::write(&path, b"original content").await.unwrap();
+        // Claim 99 bytes but send 5 → cat writes 5, the size guard fails, the
+        // shell exits 120, and `mv` never runs — so the original is untouched.
+        let cmd = save_command(&path.to_string_lossy(), 99);
+        let out = exec_with_input(Target::Local, &cmd, b"short", std::time::Duration::from_secs(5)).await;
+        assert!(!out.ok, "a short write must fail the save (exit 120), stderr: {}", out.stderr);
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "original content",
+            "the original must be untouched when the save is rejected"
+        );
+        // No leftover temp in the directory.
+        let mut rd = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut count = 0;
+        while rd.next_entry().await.unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 1, "only the target should remain (no leftover temp)");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

@@ -201,6 +201,7 @@ export interface FileView {
   text?: string
   dataUrl?: string
   limit?: number
+  editable?: boolean
 }
 
 export const listFiles = (id: string, path = ''): Promise<Listing> =>
@@ -211,6 +212,13 @@ export const viewFile = (id: string, path: string): Promise<FileView> =>
 
 export const downloadFileUrl = (id: string, path: string): string =>
   `${base(id)}/files/download?path=${enc(path)}`
+
+export const saveFile = (id: string, path: string, content: string): Promise<Response> =>
+  fetch(`${base(id)}/files/save?path=${enc(path)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+    body: content,
+  }).then(ok)
 
 // -- Forward + Browser ----------------------------------------------------
 
