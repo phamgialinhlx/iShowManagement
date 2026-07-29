@@ -8,7 +8,7 @@ processes), a **Files** browser, per-host **port forwarding**, and a server-side
 It drives the system `ssh` binary through a PTY, so your existing `~/.ssh/config`,
 keys, agent, and `ProxyJump` all work as-is — no separate connection setup.
 
-> Inspired by [**tsmanager**](https://github.com/) (a Node/Electron SSH session
+> Inspired by [**tsmanager**](https://github.com/vietrux/tsmanager) (a Node/Electron SSH session
 > manager). iShowManagement is a ground-up **Rust port**, built most-basic-feature-first
 > as a series of vertical slices. The goal is the same workflow in a single native
 > binary: no Electron runtime, no plugin host, no bundled AI client.
