@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="desktop/icons/icon.png" alt="iShowManagement logo" width="128" />
+</p>
+
 # iShowManagement
 
 A lean, single-binary desktop app for managing SSH hosts and everything running on

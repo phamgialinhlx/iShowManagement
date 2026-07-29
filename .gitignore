@@ -11,3 +11,4 @@ node_modules
 .claude/settings.local.json
 
 references/
+tmp/
