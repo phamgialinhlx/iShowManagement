@@ -85,7 +85,52 @@ cd web && npm run build            # build the frontend into web/dist
 cd desktop && npx tauri build      # compiles core + bundles the app
 ```
 
-Outputs land in `target/release/bundle/` (`macos/iShowManagement.app` and a `.dmg`).
+Outputs land in `target/release/bundle/` (`macos/iShowManagement.app` and a `.dmg`;
+on Windows, `msi/*.msi` and `nsis/*-setup.exe`).
 
 > The bundle is unsigned (ad-hoc), so on first launch macOS Gatekeeper will block
 > it — right-click the app and choose **Open** to allow it.
+
+## Installing on Windows
+
+Windows support is **new and partial** — see the limitations below. Builds are x64;
+there is no ARM64 Windows build.
+
+### Before you install
+
+Nothing to install in the common case. The installer is self-contained: the C
+runtime is linked statically (see `.cargo/config.toml`), so no "Visual C++
+Redistributable" is needed, and WebView2 is fetched automatically if missing (it
+already ships with Windows 11 and current Windows 10).
+
+What you do need:
+
+| Requirement | Notes |
+| --- | --- |
+| **Windows 10 64-bit** or newer | x64 only |
+| **OpenSSH client** | Included and enabled by default since Windows 10 1809. Verify with `ssh -V`; if absent, add it via Settings → System → Optional features. |
+| **`C:\Users\<you>\.ssh\config`** | **Required** — the host list is read from it. With no config file the app starts but shows no hosts. |
+| Internet on first install | Only if WebView2 is not already present. |
+| Docker Desktop | Only for the docker manager. |
+
+### Install
+
+The installers are unsigned, so SmartScreen shows "Windows protected your PC" on
+first run — click **More info** → **Run anyway**.
+
+### What does not work yet on Windows
+
+- **Local**-host file browsing and command execution. These shell out to `sh -c`
+  with GNU coreutils (`find -printf`, `mktemp`, `chmod --reference`). Managing
+  **remote** Linux hosts is unaffected — those commands run on the remote host.
+- Local tmux sessions (remote tmux works).
+- Desktop notification banners.
+- **Remote commands are slower than on macOS/Linux.** Windows OpenSSH has no
+  ControlMaster multiplexing, so every call re-authenticates instead of reusing
+  one connection.
+
+### Alternative: WSL2
+
+For full feature parity today, run the server under WSL2 (`cargo run -p core`) and
+open <http://127.0.0.1:7070> in any Windows browser. Inside WSL2 everything above
+works, because it is Linux.
