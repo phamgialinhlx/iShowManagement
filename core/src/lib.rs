@@ -42,6 +42,52 @@ use store::Store;
 /// Default loopback port.
 pub const DEFAULT_PORT: u16 = 7070;
 
+/// Env var naming the host alias whose stored password an askpass invocation
+/// should print. Its presence is what puts a binary into askpass mode.
+pub const ASKPASS_ALIAS_ENV: &str = "ISM_ASKPASS_ALIAS";
+
+/// Per-user data dir, holding `state.json` and the file-backed secret vault.
+/// Survives version upgrades (macOS: `~/Library/Application Support/`; Windows:
+/// `%APPDATA%`). Shared by the server and by askpass mode so both resolve the
+/// *same* vault — they must not drift.
+pub fn data_dir() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("iShowManagement")
+}
+
+/// If this process was spawned by `ssh` as its `SSH_ASKPASS` helper, print the
+/// stored password for the requested alias and return `true` so the caller exits
+/// immediately — before starting a server or opening a window.
+///
+/// Why this exists: `exec` runs `ssh` non-interactively, so on Unix it relies on
+/// the console's ControlMaster for an already-authenticated connection. Windows
+/// OpenSSH has no multiplexing, so a password-authenticated host had no way to
+/// authenticate at all and every background command failed with
+/// `Permission denied`. Pointing `SSH_ASKPASS` at ourselves lets ssh obtain the
+/// password without a TTY, keeping stdin/stdout free for command data (the file
+/// save path pipes raw bytes through them).
+///
+/// Reading the vault here — rather than passing the password through argv or the
+/// environment — keeps it out of process listings. This is not a new exposure:
+/// any process already running as this user can read the vault directly.
+///
+/// Exits non-zero (prints nothing) when no password is stored, which ssh treats
+/// as "no password available" and aborts, rather than retrying an empty one.
+pub fn run_askpass_if_requested() -> bool {
+    let Ok(alias) = std::env::var(ASKPASS_ALIAS_ENV) else {
+        return false;
+    };
+    let store = SecretStore::open(&data_dir());
+    match store.get(&secrets::pw_key(&alias)) {
+        Some(pw) => {
+            println!("{pw}");
+            true
+        }
+        None => std::process::exit(1),
+    }
+}
+
 /// The Svelte build, embedded into the binary at compile time so the app is a
 /// single self-contained file — no `web/dist` on disk at runtime. In debug
 /// builds rust-embed reads the folder live (fast dev iteration); release builds
@@ -105,10 +151,7 @@ pub async fn serve_on(listener: std::net::TcpListener) -> anyhow::Result<()> {
 /// Assemble the axum app (state, ssh-host discovery, routes, middleware). Shared
 /// by [`serve`] and [`serve_on`].
 async fn build_router() -> Router {
-    // Per-user data dir survives version upgrades (macOS: ~/Library/Application Support/).
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("iShowManagement");
+    let data_dir = data_dir();
 
     let state = AppState {
         store: Arc::new(Mutex::new(Store::load(&data_dir))),

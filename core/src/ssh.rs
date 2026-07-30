@@ -103,12 +103,55 @@ pub struct ExecOutput {
 /// argv for a non-interactive `exec` over the shared connection. `BatchMode=yes`
 /// means it reuses an existing ControlMaster and *fails fast* rather than
 /// hanging on a password prompt if no master is up (open a Console first).
+///
+/// Windows has no ControlMaster to reuse, so `BatchMode` there would reject
+/// every password-authenticated host outright. Instead we allow password auth
+/// and supply it through `SSH_ASKPASS` (see [`askpass_env`]), bounding the
+/// attempt with `NumberOfPasswordPrompts=1` so a wrong or absent password fails
+/// immediately instead of retrying.
 pub(crate) fn exec_args(alias: &str) -> Vec<String> {
     let mut a = control_args(alias);
-    a.push("-o".into());
-    a.push("BatchMode=yes".into());
+    #[cfg(unix)]
+    {
+        a.push("-o".into());
+        a.push("BatchMode=yes".into());
+    }
+    #[cfg(not(unix))]
+    {
+        a.push("-o".into());
+        a.push("NumberOfPasswordPrompts=1".into());
+    }
     a.push(alias.to_string());
     a
+}
+
+/// Environment for a non-interactive `ssh` so it can obtain a stored password
+/// without a terminal: point `SSH_ASKPASS` at our own executable, which prints
+/// the vault entry for `alias` (see `run_askpass_if_requested`).
+///
+/// `SSH_ASKPASS_REQUIRE=force` is the explicit opt-in (OpenSSH 8.4+). `DISPLAY`
+/// is set as well because older OpenSSH only consults the helper when a display
+/// is configured and stdin is not a TTY; its value is never used.
+///
+/// Empty on Unix — the ControlMaster path already carries authentication there,
+/// and leaving it alone avoids changing behavior on a working platform.
+#[cfg(unix)]
+pub(crate) fn askpass_env(_alias: &str) -> Vec<(String, String)> {
+    Vec::new()
+}
+
+/// Windows implementation — see the Unix stub above.
+#[cfg(not(unix))]
+pub(crate) fn askpass_env(alias: &str) -> Vec<(String, String)> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    vec![
+        ("SSH_ASKPASS".into(), exe.to_string_lossy().into_owned()),
+        ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
+        ("DISPLAY".into(), "localhost:0".into()),
+        (crate::ASKPASS_ALIAS_ENV.into(), alias.to_string()),
+    ]
 }
 
 /// `-o` options (no alias) for scp/rsync: reuse the ControlMaster, fail fast.
@@ -199,6 +242,9 @@ pub async fn exec(target: Target<'_>, command: &str, timeout: std::time::Duratio
             for a in exec_args(alias) {
                 c.arg(a);
             }
+            for (k, v) in askpass_env(alias) {
+                c.env(k, v);
+            }
             c.arg(command); // ssh runs this as the remote command
             c
         }
@@ -244,6 +290,9 @@ pub async fn exec_with_input(
             let mut c = Command::new("ssh");
             for a in exec_args(alias) {
                 c.arg(a);
+            }
+            for (k, v) in askpass_env(alias) {
+                c.env(k, v);
             }
             c.arg(command); // ssh runs this as the remote command
             c
@@ -341,6 +390,37 @@ mod tests {
         let a = ssh_args("h", false);
         assert!(!a.contains(&"-tt".to_string()));
         assert_eq!(a.last().unwrap(), "h");
+    }
+
+    /// Unix keeps BatchMode: exec must fail fast rather than prompt, because the
+    /// ControlMaster already carries authentication.
+    #[cfg(unix)]
+    #[test]
+    fn exec_args_use_batchmode_and_no_askpass_on_unix() {
+        let joined = exec_args("myhost").join(" ");
+        assert!(joined.contains("BatchMode=yes"), "{joined}");
+        assert!(askpass_env("myhost").is_empty(), "no askpass on unix");
+    }
+
+    /// Windows has no ControlMaster, so BatchMode would reject every
+    /// password-authenticated host. Password auth must be allowed, bounded to a
+    /// single attempt, and fed from the vault via our own binary.
+    #[cfg(not(unix))]
+    #[test]
+    fn exec_args_allow_password_via_askpass_on_windows() {
+        let joined = exec_args("myhost").join(" ");
+        assert!(!joined.contains("BatchMode"), "{joined}");
+        assert!(joined.contains("NumberOfPasswordPrompts=1"), "{joined}");
+
+        let env: std::collections::HashMap<_, _> = askpass_env("myhost").into_iter().collect();
+        assert_eq!(env.get("SSH_ASKPASS_REQUIRE").map(String::as_str), Some("force"));
+        assert_eq!(
+            env.get(crate::ASKPASS_ALIAS_ENV).map(String::as_str),
+            Some("myhost"),
+            "the helper needs to know which alias's password to print"
+        );
+        assert!(env.contains_key("SSH_ASKPASS"), "helper path must be set");
+        assert!(env.contains_key("DISPLAY"), "older OpenSSH requires a display");
     }
 
     #[cfg(unix)]

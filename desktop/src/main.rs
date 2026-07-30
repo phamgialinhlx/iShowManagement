@@ -22,6 +22,13 @@ mod notify;
 const PORT: u16 = ismcore::DEFAULT_PORT;
 
 fn main() {
+    // `ssh` may spawn this executable as its SSH_ASKPASS helper (Windows has no
+    // ControlMaster to carry authentication). That must print the password and
+    // exit before anything else — emphatically before opening a window.
+    if ismcore::run_askpass_if_requested() {
+        return;
+    }
+
     // Finder-launched apps get launchd's minimal PATH, which breaks
     // ~/.ssh/config ProxyCommands that live in Homebrew (cloudflared →
     // "Connection closed by UNKNOWN port 65535"). Adopt the login shell's
