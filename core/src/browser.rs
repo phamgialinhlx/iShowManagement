@@ -135,10 +135,23 @@ fn launch_browser(flags: &[String]) -> std::io::Result<()> {
         cmd.args(flags);
         cmd
     } else {
-        let browser = std::env::var("ISM_BROWSER").unwrap_or_else(|_| "Google Chrome".into());
-        let mut cmd = tokio::process::Command::new("open");
-        cmd.arg("-na").arg(browser).arg("--args").args(flags);
-        cmd
+        #[cfg(unix)]
+        {
+            let browser = std::env::var("ISM_BROWSER").unwrap_or_else(|_| "Google Chrome".into());
+            let mut cmd = tokio::process::Command::new("open");
+            cmd.arg("-na").arg(browser).arg("--args").args(flags);
+            cmd
+        }
+        #[cfg(not(unix))]
+        {
+            // No `open` equivalent that also forwards flags: routing through
+            // `cmd /C start` would let a `&` inside a URL flag terminate the
+            // command. Resolve chrome.exe and spawn it directly instead — no
+            // intermediate shell, so flags pass through verbatim.
+            let mut cmd = tokio::process::Command::new(windows_chrome_path()?);
+            cmd.args(flags);
+            cmd
+        }
     };
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let mut child = cmd.spawn()?;
@@ -147,6 +160,31 @@ fn launch_browser(flags: &[String]) -> std::io::Result<()> {
         let _ = child.wait().await;
     });
     Ok(())
+}
+
+/// First Chrome install that actually exists, honoring `ISM_BROWSER` as an
+/// explicit exe path. `CreateProcess` (unlike `ShellExecute`) does not consult
+/// the App Paths registry, so a bare `chrome.exe` would not resolve — the full
+/// path is required.
+#[cfg(not(unix))]
+fn windows_chrome_path() -> std::io::Result<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("ISM_BROWSER") {
+        return Ok(std::path::PathBuf::from(p));
+    }
+    const SUFFIX: &str = r"Google\Chrome\Application\chrome.exe";
+    let roots = ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"];
+    for root in roots {
+        if let Ok(dir) = std::env::var(root) {
+            let p = std::path::Path::new(&dir).join(SUFFIX);
+            if p.is_file() {
+                return Ok(p);
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "Chrome not found; set ISM_BROWSER to chrome.exe or ISM_BROWSER_CMD to a launcher",
+    ))
 }
 
 fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {

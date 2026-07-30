@@ -264,7 +264,14 @@ pub(crate) async fn deliver_banner(title: String, body: String, subtitle: Option
     if native {
         return true;
     }
+    osascript_notify(&title, &body, subtitle.as_deref()).await
+}
 
+/// AppleScript fallback for the banner. Platform-specific, so it is split out:
+/// there is no portable `display notification`, and on other platforms the
+/// host-registered notifier above is the only delivery path.
+#[cfg(target_os = "macos")]
+async fn osascript_notify(title: &str, body: &str, subtitle: Option<&str>) -> bool {
     fn esc(s: &str) -> String {
         s.chars()
             .filter(|c| !c.is_control())
@@ -278,10 +285,10 @@ pub(crate) async fn deliver_banner(title: String, body: String, subtitle: Option
     }
     let mut script = format!(
         "display notification \"{}\" with title \"{}\"",
-        esc(&body),
-        esc(&title),
+        esc(body),
+        esc(title),
     );
-    if let Some(sub) = subtitle.as_deref() {
+    if let Some(sub) = subtitle {
         script.push_str(&format!(" subtitle \"{}\"", esc(sub)));
     }
     script.push_str(" sound name \"Ping\"");
@@ -302,6 +309,13 @@ pub(crate) async fn deliver_banner(title: String, body: String, subtitle: Option
             false
         }
     }
+}
+
+/// Non-macOS: no portable banner mechanism, so report the notification as
+/// undelivered rather than spawning a binary that does not exist.
+#[cfg(not(target_os = "macos"))]
+async fn osascript_notify(_title: &str, _body: &str, _subtitle: Option<&str>) -> bool {
+    false
 }
 
 /// `DELETE /api/servers/{alias}/password` — clear a stored password.

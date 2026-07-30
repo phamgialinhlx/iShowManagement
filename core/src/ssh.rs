@@ -5,12 +5,15 @@
 //! means Console authenticates once and later exec/forward/SOCKS calls reuse the
 //! same connection. Mirrors `references/tsmanager/server/ssh.js`.
 
+#[cfg(unix)]
 use std::path::PathBuf;
 
 use portable_pty::CommandBuilder;
 
 /// Unix-socket path for this alias's ControlMaster connection. Scoped by pid so
-/// concurrent app instances don't collide.
+/// concurrent app instances don't collide. Unix-only — Windows OpenSSH has no
+/// multiplexing, so nothing there builds a control path.
+#[cfg(unix)]
 pub fn control_path(alias: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!("ism-{}-{}.ctl", std::process::id(), alias));
@@ -18,18 +21,28 @@ pub fn control_path(alias: &str) -> PathBuf {
 }
 
 /// Base `ssh` options shared by interactive sessions and (later) `exec`.
+///
+/// ControlMaster multiplexing is Unix-only — it needs a Unix domain socket, which
+/// Windows OpenSSH does not implement. On Windows we omit those options and each
+/// invocation dials (and re-authenticates) its own connection: correct, but
+/// slower, and a keyboard-interactive host will prompt per call.
 fn control_args(alias: &str) -> Vec<String> {
-    let cp = control_path(alias);
-    vec![
-        "-o".into(),
-        "ControlMaster=auto".into(),
-        "-o".into(),
-        format!("ControlPath={}", cp.display()),
-        "-o".into(),
-        "ControlPersist=60".into(),
-        "-o".into(),
-        "ServerAliveInterval=30".into(),
-    ]
+    let mut args: Vec<String> = Vec::new();
+    #[cfg(unix)]
+    {
+        let cp = control_path(alias);
+        args.push("-o".into());
+        args.push("ControlMaster=auto".into());
+        args.push("-o".into());
+        args.push(format!("ControlPath={}", cp.display()));
+        args.push("-o".into());
+        args.push("ControlPersist=60".into());
+    }
+    #[cfg(not(unix))]
+    let _ = alias;
+    args.push("-o".into());
+    args.push("ServerAliveInterval=30".into());
+    args
 }
 
 /// argv (after the program name) for an interactive session to `alias`.
@@ -140,6 +153,14 @@ pub fn socks_command(alias: &str, port: u16) -> CommandBuilder {
 /// "disables multiplexing" and dials independently, and that dial is intermittently
 /// torn down ("Connection closed by UNKNOWN port 65535") and leaks an orphaned
 /// cloudflared. If no master appears (no live console), we just proceed.
+///
+/// No-op on Windows: `control_args` omits ControlMaster there, so no master can
+/// ever appear and polling would burn the full timeout on every single exec.
+#[cfg(not(unix))]
+pub(crate) async fn wait_for_master(_alias: &str, _max: std::time::Duration) {}
+
+/// Unix implementation — see the Windows no-op stub above.
+#[cfg(unix)]
 pub(crate) async fn wait_for_master(alias: &str, max: std::time::Duration) {
     use tokio::process::Command;
     let cp = control_path(alias);
@@ -285,6 +306,7 @@ pub async fn exec_with_input(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn ssh_args_include_multiplexing_and_keepalive() {
         let a = ssh_args("myhost", true);
@@ -298,6 +320,22 @@ mod tests {
         assert_eq!(a.last().unwrap(), "myhost");
     }
 
+    /// Windows OpenSSH has no connection multiplexing, so those options must be
+    /// absent — passing ControlPath there fails the connection outright. The
+    /// keepalive and argument shape still apply.
+    #[cfg(not(unix))]
+    #[test]
+    fn ssh_args_omit_multiplexing_on_windows() {
+        let a = ssh_args("myhost", true);
+        let joined = a.join(" ");
+        assert!(!joined.contains("ControlMaster"), "{joined}");
+        assert!(!joined.contains("ControlPath"), "{joined}");
+        assert!(!joined.contains("ControlPersist"), "{joined}");
+        assert!(joined.contains("ServerAliveInterval=30"), "{joined}");
+        assert!(a.contains(&"-tt".to_string()));
+        assert_eq!(a.last().unwrap(), "myhost");
+    }
+
     #[test]
     fn non_interactive_omits_tt() {
         let a = ssh_args("h", false);
@@ -305,6 +343,7 @@ mod tests {
         assert_eq!(a.last().unwrap(), "h");
     }
 
+    #[cfg(unix)]
     #[test]
     fn control_path_is_pid_scoped_under_tmp() {
         let p = control_path("web");
