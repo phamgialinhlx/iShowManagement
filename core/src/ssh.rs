@@ -155,10 +155,23 @@ pub(crate) fn askpass_env(alias: &str) -> Vec<(String, String)> {
 }
 
 /// `-o` options (no alias) for scp/rsync: reuse the ControlMaster, fail fast.
+///
+/// Mirrors [`exec_args`]: Windows has no master to reuse, so `BatchMode` would
+/// reject every password-authenticated host. Callers must also apply
+/// [`askpass_env`] to the spawned command's environment, or transfers there will
+/// have no way to authenticate.
 pub fn transfer_opts(alias: &str) -> Vec<String> {
     let mut a = control_args(alias);
-    a.push("-o".into());
-    a.push("BatchMode=yes".into());
+    #[cfg(unix)]
+    {
+        a.push("-o".into());
+        a.push("BatchMode=yes".into());
+    }
+    #[cfg(not(unix))]
+    {
+        a.push("-o".into());
+        a.push("NumberOfPasswordPrompts=1".into());
+    }
     a
 }
 

@@ -8,6 +8,7 @@
     sideCollapsed: boolean
     onToggleSide: () => void
   }
+  import { toggleSideLabel } from './platform'
   let { sessions, forwards, proxies, active, onShowTunnels, sideCollapsed, onToggleSide }: Props = $props()
 </script>
 
@@ -15,7 +16,7 @@
   <button
     class="dock"
     class:on={!sideCollapsed}
-    title={sideCollapsed ? 'Show sidebar (⌘B)' : 'Hide sidebar (⌘B)'}
+    title={`${sideCollapsed ? 'Show' : 'Hide'} sidebar (${toggleSideLabel})`}
     aria-label="Toggle sidebar"
     onclick={onToggleSide}
   >

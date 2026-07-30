@@ -7,6 +7,7 @@
   import StatusBar from './lib/StatusBar.svelte'
   import HostTmuxTree from './lib/HostTmuxTree.svelte'
   import Home from './lib/Home.svelte'
+  import { isMac } from './lib/platform'
   import ClaudeNotifySetup from './lib/ClaudeNotifySetup.svelte'
   import Dialog from './lib/Dialog.svelte'
   import { confirmDialog, promptDialog } from './lib/dialogs.svelte'
@@ -437,6 +438,20 @@
 
   // Sidebar / topbar host actions -------------------------------------------
 
+  // Bumped per session to force a Terminal remount. The PTY receives the
+  // password when ssh is spawned, so a session opened before one was stored sits
+  // at its prompt forever — storing a password can only take effect on a fresh
+  // connection. Cheap for tmux sessions: the remote tmux server keeps them
+  // alive, so reattaching restores the panes.
+  let termEpoch = $state<Record<number, number>>({})
+  function reconnectHostTerminals(hostId: string) {
+    for (const s of sessions) {
+      if (s.hostId === hostId && s.kind !== 'browser') {
+        termEpoch[s.key] = (termEpoch[s.key] ?? 0) + 1
+      }
+    }
+  }
+
   async function managePassword() {
     const s = activeHost
     if (!s) return
@@ -451,6 +466,9 @@
     if (pw) {
       await setPassword(s.id, pw)
       await load(listServers)
+      // Reconnect so the stored password is used straight away, instead of
+      // leaving the user to type it into a shell already sitting at a prompt.
+      reconnectHostTerminals(s.id)
     }
   }
 
@@ -468,17 +486,27 @@
   let menuPos = $state({ x: 0, y: 0 })
   let plusBtn: HTMLButtonElement | undefined
 
-  // Sidebar collapse — ⌘B (never Ctrl+B: that's the tmux prefix).
+  // Sidebar collapse — ⌘B on macOS, Ctrl+B elsewhere (no Cmd key there).
+  //
+  // Ctrl+B is tmux's prefix, so on non-Mac the key is left alone while the
+  // terminal has focus and forwarded to the remote tmux; intercepting it
+  // globally would cost pane/window switching, which is the point of the app.
+  // The shortcut still works anywhere else in the UI. macOS needs no such
+  // carve-out, since tmux never sees Cmd.
   let sideCollapsed = $state(localStorage.getItem('sideCollapsed') === '1')
   function toggleSide() {
     sideCollapsed = !sideCollapsed
     localStorage.setItem('sideCollapsed', sideCollapsed ? '1' : '0')
   }
   function onGlobalKeydown(e: KeyboardEvent) {
-    if (e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'b') {
-      e.preventDefault()
-      toggleSide()
-    }
+    if (e.key !== 'b' || e.altKey) return
+    const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey
+    if (!mod) return
+    // `.term` is our own container class, so this does not depend on xterm's
+    // internal class names.
+    if (!isMac && (e.target as HTMLElement | null)?.closest?.('.term')) return
+    e.preventDefault()
+    toggleSide()
   }
 
   function toggleAddMenu() {
@@ -606,7 +634,11 @@
       {#each terminalSessions as s (s.key)}
         {@const p = termProps(s, servers.find((h) => h.id === s.hostId)?.isLocal ?? false)}
         <div class="layer term-layer" style:display={isActiveTerm(s) ? 'block' : 'none'}>
-          <Terminal mode={p.mode} alias={p.alias} cid={p.cid} session={p.session} onStatus={(st) => (termStatus[s.key] = st)} />
+          <!-- Remounts on epoch bump, dropping the old socket and respawning ssh
+               so a newly stored password takes effect. -->
+          {#key termEpoch[s.key] ?? 0}
+            <Terminal mode={p.mode} alias={p.alias} cid={p.cid} session={p.session} onStatus={(st) => (termStatus[s.key] = st)} />
+          {/key}
         </div>
       {/each}
 
