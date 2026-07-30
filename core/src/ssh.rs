@@ -360,6 +360,10 @@ mod tests {
         );
     }
 
+    // Local exec runs `sh -c`, so these two are Unix-only. The remote path they
+    // stand in for is unaffected: it executes on the Linux host regardless of
+    // client OS.
+    #[cfg(unix)]
     #[tokio::test]
     async fn exec_with_input_pipes_stdin_to_cat() {
         let out = exec_with_input(
@@ -373,6 +377,7 @@ mod tests {
         assert_eq!(out.stdout, "hello world");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exec_with_input_handles_large_payload() {
         // ~240 KB of valid UTF-8 — larger than the OS pipe buffer (64 KB), so

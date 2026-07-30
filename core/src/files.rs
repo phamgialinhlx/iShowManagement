@@ -840,6 +840,11 @@ mod tests {
         assert!(cmd.contains("mv -f "), "atomic rename: {cmd}");
     }
 
+    // Runs the remote save command through a local `sh` with GNU coreutils
+    // (mktemp/wc/dirname), so it is Unix-only. That is not a Windows coverage
+    // gap for the guard itself: the command always executes on the remote Linux
+    // host, and macOS/Linux CI exercises it on every run.
+    #[cfg(unix)]
     #[tokio::test]
     async fn save_command_rejects_short_write_and_preserves_original() {
         use crate::ssh::{exec_with_input, Target};
