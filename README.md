@@ -118,6 +118,28 @@ What you do need:
 The installers are unsigned, so SmartScreen shows "Windows protected your PC" on
 first run — click **More info** → **Run anyway**.
 
+### Password-authenticated hosts: use "Set password"
+
+If a host authenticates by password rather than a key, open it and click **Set
+password** (the host shows a 🔒 once stored). **Typing the password at the Console
+prompt is not enough** — only that button writes it to the encrypted vault, and
+background features read it from there.
+
+Why it matters more on Windows: on macOS/Linux the Console leaves behind a shared
+authenticated connection (ControlMaster) that background commands reuse for free.
+Windows OpenSSH has no such multiplexing, so the tmux list, managers, and Files
+pane authenticate on their own — via `SSH_ASKPASS`, reading that stored password.
+Without it they fail with `Permission denied (publickey,password)` even while the
+Console is happily connected.
+
+Key-based authentication avoids this entirely and is faster. From PowerShell:
+
+```powershell
+ssh-keygen -t ed25519          # only if you have no key yet
+# Windows has no ssh-copy-id, so pipe the public key across
+type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh user@host "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
+```
+
 ### What does not work yet on Windows
 
 - **Local**-host file browsing and command execution. These shell out to `sh -c`
@@ -126,8 +148,8 @@ first run — click **More info** → **Run anyway**.
 - Local tmux sessions (remote tmux works).
 - Desktop notification banners.
 - **Remote commands are slower than on macOS/Linux.** Windows OpenSSH has no
-  ControlMaster multiplexing, so every call re-authenticates instead of reusing
-  one connection.
+  ControlMaster multiplexing, so every call opens and authenticates its own
+  connection instead of reusing one. Key auth keeps this cheaper than a password.
 
 ### Alternative: WSL2
 
