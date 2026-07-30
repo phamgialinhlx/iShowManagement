@@ -14,6 +14,9 @@ use std::time::Duration;
 
 use tauri::{Url, WebviewUrl, WebviewWindowBuilder};
 
+// Native `UNUserNotificationCenter` bindings. macOS-only; elsewhere the server's
+// own notification path applies and this module isn't compiled.
+#[cfg(target_os = "macos")]
 mod notify;
 
 const PORT: u16 = ismcore::DEFAULT_PORT;
@@ -23,12 +26,15 @@ fn main() {
     // ~/.ssh/config ProxyCommands that live in Homebrew (cloudflared →
     // "Connection closed by UNKNOWN port 65535"). Adopt the login shell's
     // PATH before anything spawns so ssh/pty children see terminal-equivalent
-    // tools. Must run before the server thread starts.
+    // tools. Must run before the server thread starts. Unix-only: Windows has
+    // no login shell, and its PATH is already inherited from the user profile.
+    #[cfg(unix)]
     adopt_login_shell_path();
 
     // Route the server's banner requests through UNUserNotificationCenter (our
     // bundle → correct icon, click focuses the app). Falls back to osascript in
     // core when this reports failure (e.g. running unbundled in dev).
+    #[cfg(target_os = "macos")]
     ismcore::set_notifier(|n| notify::post(&n.title, &n.body, n.subtitle.as_deref()));
 
     // Bind our own loopback socket BEFORE loading the window, so the app always
@@ -70,6 +76,7 @@ fn main() {
             // launching — the notification machinery isn't ready during
             // `setup()`, so a request there is silently dropped.
             if let tauri::RunEvent::Ready = event {
+                #[cfg(target_os = "macos")]
                 notify::request_authorization();
             }
         });
@@ -78,6 +85,7 @@ fn main() {
 /// Replace this process's PATH with the user's login-shell PATH. The marker
 /// isolates the value from anything shell startup files print. Falls back to
 /// appending the standard Homebrew dirs if the shell can't be queried.
+#[cfg(unix)]
 fn adopt_login_shell_path() {
     const MARKER: &str = "__ISM_PATH__";
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
@@ -102,6 +110,7 @@ fn adopt_login_shell_path() {
     }
 }
 
+#[cfg(unix)]
 fn extract_path(stdout: &str, marker: &str) -> Option<String> {
     let p = stdout.split(marker).nth(1)?.trim();
     (!p.is_empty()).then(|| p.to_string())
@@ -128,7 +137,9 @@ fn wait_for_server(port: u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_loopback, extract_path};
+    use super::bind_loopback;
+    #[cfg(unix)]
+    use super::extract_path;
 
     #[test]
     fn bind_loopback_falls_back_when_preferred_port_is_taken() {
@@ -140,6 +151,7 @@ mod tests {
         assert_ne!(fallback.local_addr().unwrap().port(), taken);
     }
 
+    #[cfg(unix)]
     #[test]
     fn extracts_path_after_marker_despite_rc_noise() {
         let out = "welcome banner from .zprofile\n__M__/opt/homebrew/bin:/usr/bin:/bin";
@@ -149,6 +161,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_missing_or_empty_path() {
         assert_eq!(extract_path("no marker here", "__M__"), None);

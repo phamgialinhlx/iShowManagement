@@ -178,12 +178,31 @@ fn target_for(alias: &str) -> Option<bool> {
 }
 
 /// A `sh -c <cmd>` command to run in a local PTY.
+#[cfg(unix)]
 fn local_sh(cmd: &str) -> CommandBuilder {
     let mut c = CommandBuilder::new("sh");
     c.arg("-c");
     c.arg(cmd);
     c.env("TERM", "xterm-256color");
     if let Ok(home) = std::env::var("HOME") {
+        c.cwd(home);
+    }
+    c
+}
+
+/// Windows counterpart. PowerShell — not `cmd.exe` — because the docker-exec
+/// line passes `sh -c 'bash || sh'`: PowerShell treats the single-quoted part as
+/// one literal argument, so `||` reaches the container's shell, whereas `cmd.exe`
+/// would parse it as its own operator and split the command.
+#[cfg(not(unix))]
+fn local_sh(cmd: &str) -> CommandBuilder {
+    let mut c = CommandBuilder::new("powershell.exe");
+    c.arg("-NoLogo");
+    c.arg("-NoProfile");
+    c.arg("-Command");
+    c.arg(cmd);
+    c.env("TERM", "xterm-256color");
+    if let Ok(home) = std::env::var("USERPROFILE") {
         c.cwd(home);
     }
     c

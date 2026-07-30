@@ -13,6 +13,10 @@ tauri = { version = "2", features = [] }
 # Package is `core`; its library target is `ismcore` (avoids the std `core` clash).
 ismcore = { path = "../core", package = "core" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+
+# Apple-framework bindings for the native `UNUserNotificationCenter` path in
+# `notify.rs`. macOS-only — on other targets the module isn't compiled at all.
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSBundle"] }
 objc2-user-notifications = "0.3"

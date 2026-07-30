@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -169,10 +170,17 @@ fn load_map(enc_path: &Path, key: &[u8; 32]) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Write `bytes` to `path` with mode 0600, via a temp file + rename.
+/// Write `bytes` to `path` with owner-only access, via a temp file + rename.
+///
+/// On Unix that means an explicit mode 0600 — the data dir can fall back to a
+/// world-readable `/tmp`, so the key file must restrict itself. On Windows the
+/// file inherits its parent's ACL, and `dirs::data_dir()` (`%APPDATA%`) already
+/// grants access only to the owning user, SYSTEM, and Administrators; there is
+/// no portable `from_mode` there. Tightening that ACL explicitly is deferred.
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, bytes)?;
+    #[cfg(unix)]
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
     fs::rename(&tmp, path)?;
     Ok(())

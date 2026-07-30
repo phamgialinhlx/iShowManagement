@@ -48,3 +48,38 @@ jobs:
       # compile); the release build exercises that path.
       - name: Test core
         run: cargo test -p core
+
+  # Guard the Windows build. The platform-specific paths in core (ssh
+  # ControlMaster, local PTY, clipboard, browser, notify) are `cfg`-gated, and
+  # nothing else here would catch a gate breaking — the macOS job compiles only
+  # the Unix side. Tests that need a local POSIX `sh` are `#[cfg(unix)]`, so this
+  # runs the portable subset.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # core embeds ../web/dist via rust-embed, so the folder must exist first.
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - name: Test core
+        run: cargo test -p core

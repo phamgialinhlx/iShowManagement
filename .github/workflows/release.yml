@@ -1,12 +1,12 @@
-# Build and release the iShowManagement desktop app (macOS).
+# Build and release the iShowManagement desktop app (macOS + Windows).
 #
-# Builds three .dmg flavors — Apple Silicon (aarch64), Intel (x64), and a
-# universal binary that runs on both. The app targets macOS 14 (Sonoma) and up,
-# so it runs on Sonoma, Sequoia, and newer.
+# macOS: three .dmg flavors — Apple Silicon (aarch64), Intel (x64), and a
+# universal binary that runs on both. Targets macOS 14 (Sonoma) and up.
+# Windows: an .msi and an NSIS .exe for x64, targeting Windows 10 and up.
 #
 # Trigger a release by pushing a version tag:
 #     git tag v0.2.0 && git push origin v0.2.0
-# A manual "Run workflow" (workflow_dispatch) builds the same .dmgs as run
+# A manual "Run workflow" (workflow_dispatch) builds the same installers as run
 # artifacts without creating a Release.
 name: Release
 
@@ -97,15 +97,82 @@ jobs:
           path: dist/*.dmg
           if-no-files-found: error
 
-  # Gather every arch's .dmg and publish one Release (only on a tag).
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      # Same version sync as the macOS job. `jq` is preinstalled on the runner;
+      # bash is used explicitly because the default shell here is PowerShell.
+      - name: Sync app version to tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          tmp=$(mktemp)
+          jq --arg v "$VER" '.version = $v' desktop/tauri.conf.json > "$tmp"
+          mv "$tmp" desktop/tauri.conf.json
+          echo "Set app version to $VER"
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build desktop app (Windows x64)
+        working-directory: desktop
+        # The Tauri CLI is a devDependency of web/, so invoke it from there.
+        run: ../web/node_modules/.bin/tauri build --target x86_64-pc-windows-msvc
+        # The installers ship unsigned, so SmartScreen will warn on first run.
+        # To sign, add these repo secrets and uncomment — Tauri picks them up:
+        # env:
+        #   WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}                 # base64 of a code-signing .pfx
+        #   WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi dist/
+          cp target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe dist/
+          ls -lh dist
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            dist/*.msi
+            dist/*.exe
+          if-no-files-found: error
+
+  # Gather every platform's installers and publish one Release (only on a tag).
   release:
-    needs: build
+    needs: [build, build-windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write # needed to create the GitHub Release
     steps:
-      - name: Download all .dmgs
+      - name: Download all installers
         uses: actions/download-artifact@v4
         with:
           path: dist
@@ -116,16 +183,23 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.dmg
+          files: |
+            dist/*.dmg
+            dist/*.msi
+            dist/*.exe
           fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
             ### Downloads
+
+            **macOS** — requires macOS 14 (Sonoma) or newer.
             - **`…_universal.dmg`** — runs on any Mac (Apple Silicon + Intel).
             - **`…_aarch64.dmg`** — Apple Silicon only.
             - **`…_x64.dmg`** — Intel only.
 
-            Requires macOS 14 (Sonoma) or newer.
+            **Windows** — requires Windows 10 (64-bit) or newer.
+            - **`…_x64-setup.exe`** — recommended installer.
+            - **`…_x64_en-US.msi`** — for managed/scripted deployment.
 
             ### Install (macOS)
             The app is **unsigned**, so macOS blocks it on first launch — on
@@ -140,3 +214,20 @@ jobs:
             Then open it normally. (Alternative: System Settings → Privacy &
             Security → scroll down → **Open Anyway**. The old right-click → Open
             trick no longer works on Sequoia.)
+
+            ### Install (Windows)
+            The installers are **unsigned**, so SmartScreen shows "Windows
+            protected your PC" on first run — click **More info** → **Run
+            anyway**. WebView2 is fetched by the installer if not already
+            present (it ships with Windows 11 and current Windows 10).
+
+            **Windows support is new and partial.** Remote host management works;
+            these do not yet:
+            - **Local**-host file browsing and command execution (they rely on
+              GNU coreutils — `find -printf`, `mktemp`, `chmod --reference`).
+              Managing *remote* Linux hosts is unaffected.
+            - Local tmux sessions.
+            - Desktop notification banners.
+
+            Remote commands are also slower than on macOS/Linux: Windows OpenSSH
+            has no ControlMaster multiplexing, so each call re-authenticates.

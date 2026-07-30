@@ -130,7 +130,32 @@ pub fn copy_to_clipboard(text: &str) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Write `text` to the Windows clipboard via `clip.exe`. Blocking — call from
+/// `spawn_blocking`. Failures are logged, never fatal to the session.
+///
+/// `clip.exe` decodes stdin as the console codepage unless given a BOM, so the
+/// text is prefixed with a UTF-16LE BOM and encoded to UTF-16LE; otherwise
+/// non-ASCII (accents, CJK, box-drawing) arrives mangled.
+#[cfg(windows)]
+pub fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let run = || -> std::io::Result<()> {
+        let mut bytes = vec![0xff, 0xfe]; // UTF-16LE BOM
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let mut child = Command::new("clip.exe").stdin(Stdio::piped()).spawn()?;
+        child.stdin.take().expect("piped stdin").write_all(&bytes)?;
+        child.wait()?;
+        Ok(())
+    };
+    if let Err(e) = run() {
+        eprintln!("clipboard: clip.exe failed: {e}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn copy_to_clipboard(_text: &str) {}
 
 #[cfg(test)]

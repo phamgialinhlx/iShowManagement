@@ -1,0 +1,13 @@
+# Statically link the MSVC C runtime on Windows.
+#
+# Rust's windows-msvc target links the CRT dynamically by default, which makes
+# the installed app depend on `vcruntime140.dll` from the "Visual C++
+# Redistributable". `ucrtbase.dll` ships with Windows 10+, but the vcruntime DLL
+# does not — a clean machine can hit a missing-DLL error on launch. Linking it
+# statically removes that prerequisite so the installer is self-contained.
+#
+# Safe here because nothing in the Windows dependency tree compiles C (the `cc`
+# crate is absent from `cargo tree --target x86_64-pc-windows-msvc`), so there is
+# no second, dynamically-linked CRT to conflict with.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

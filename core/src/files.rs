@@ -742,6 +742,10 @@ mod tests {
         assert_eq!(safe_download_name("  ", "fallback"), "fallback");
     }
 
+    // Unix-only: asserts mode preservation across the rename, and Windows has no
+    // `PermissionsExt`/`from_mode`. The content and leftover-temp assertions are
+    // covered on Windows by `atomic_write_local_replaces_content` below.
+    #[cfg(unix)]
     #[tokio::test]
     async fn atomic_write_local_replaces_content_and_preserves_mode() {
         use std::os::unix::fs::PermissionsExt;
@@ -759,6 +763,27 @@ mod tests {
         let mode = tokio::fs::metadata(&path).await.unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "mode should be preserved across rename");
         // No leftover temp file in the directory.
+        let mut rd = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut left = Vec::new();
+        while let Some(e) = rd.next_entry().await.unwrap() {
+            left.push(e);
+        }
+        assert_eq!(left.len(), 1, "only the target should remain");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Portable half of the above: content is replaced and no temp file is left
+    /// behind. Runs everywhere, so Windows still covers `atomic_write_local`.
+    #[tokio::test]
+    async fn atomic_write_local_replaces_content() {
+        let dir = std::env::temp_dir().join(format!("ism-awtp-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("target.txt");
+        tokio::fs::write(&path, b"old").await.unwrap();
+        atomic_write_local(&path.to_string_lossy(), b"new content")
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "new content");
         let mut rd = tokio::fs::read_dir(&dir).await.unwrap();
         let mut left = Vec::new();
         while let Some(e) = rd.next_entry().await.unwrap() {
@@ -815,6 +840,11 @@ mod tests {
         assert!(cmd.contains("mv -f "), "atomic rename: {cmd}");
     }
 
+    // Runs the remote save command through a local `sh` with GNU coreutils
+    // (mktemp/wc/dirname), so it is Unix-only. That is not a Windows coverage
+    // gap for the guard itself: the command always executes on the remote Linux
+    // host, and macOS/Linux CI exercises it on every run.
+    #[cfg(unix)]
     #[tokio::test]
     async fn save_command_rejects_short_write_and_preserves_original() {
         use crate::ssh::{exec_with_input, Target};
