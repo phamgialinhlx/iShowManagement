@@ -367,6 +367,7 @@ fn unique_tmp(suffix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("ism-dl-{}-{}-{}", std::process::id(), n, suffix))
 }
 
+#[cfg(unix)]
 async fn command_exists(cmd: &str) -> bool {
     tokio::process::Command::new("sh")
         .arg("-c")
@@ -375,6 +376,15 @@ async fn command_exists(cmd: &str) -> bool {
         .await
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Windows has no POSIX `sh` to probe with, and the only caller is looking for
+/// rsync, which is not part of a standard Windows install. Report absent so the
+/// transfer goes straight to `scp` (bundled with Windows OpenSSH) instead of
+/// spawning a shell that does not exist.
+#[cfg(not(unix))]
+async fn command_exists(_cmd: &str) -> bool {
+    false
 }
 
 /// Stream a response body from an in-memory buffer with download headers.
@@ -465,12 +475,15 @@ async fn stage_remote(alias: &str, src: &str, stage: &std::path::Path) -> Result
 
     if command_exists("rsync").await {
         let ssh_e = format!("ssh {}", opts.iter().map(|o| q(o)).collect::<Vec<_>>().join(" "));
-        let out = tokio::process::Command::new("rsync")
-            .args(["-az", "--protect-args", "-e", &ssh_e, &remote])
-            .arg(format!("{}/", stage.display()))
-            .output()
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut cmd = tokio::process::Command::new("rsync");
+        cmd.args(["-az", "--protect-args", "-e", &ssh_e, &remote])
+            .arg(format!("{}/", stage.display()));
+        // Inherited by the ssh rsync spawns, so it can obtain a stored password
+        // where there is no ControlMaster (Windows).
+        for (k, v) in ssh::askpass_env(alias) {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().await.map_err(|e| e.to_string())?;
         if out.status.success() {
             return Ok(());
         }
@@ -481,6 +494,9 @@ async fn stage_remote(alias: &str, src: &str, stage: &std::path::Path) -> Result
     cmd.arg("-r");
     for o in &opts {
         cmd.arg(o);
+    }
+    for (k, v) in ssh::askpass_env(alias) {
+        cmd.env(k, v);
     }
     cmd.arg(&remote).arg(stage);
     let out = cmd.output().await.map_err(|e| e.to_string())?;
@@ -587,6 +603,9 @@ async fn upload_paste(alias: &str, bytes: &[u8], name: &str) -> Result<String, S
     let mut cmd = tokio::process::Command::new("scp");
     for o in ssh::transfer_opts(alias) {
         cmd.arg(o);
+    }
+    for (k, v) in ssh::askpass_env(alias) {
+        cmd.env(k, v);
     }
     // Fail fast on unreachable hosts: the paste UX is a dialog on error, not
     // a POST hanging for the OS TCP timeout.
