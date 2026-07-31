@@ -20,18 +20,13 @@
     unforwardPort,
     stopProxy,
     getTunnels,
-    setWatching,
-    getNotifyStatus,
-    installNotify,
-    uninstallNotify,
     tmuxSelect,
     getFeatures,
     type Server,
     type Tunnels,
-    type NotifyStatus,
-    type NotifyEvent,
     type ClaudeInstance,
   } from './lib/api'
+  import { NotifyStore } from './lib/stores/notify.svelte'
 
   type Kind = 'shell' | 'tmux' | 'docker-logs' | 'docker-exec' | 'browser'
   type Panel = 'overview' | 'docker' | 'ports' | 'processes' | 'files'
@@ -64,16 +59,6 @@
   // Drives suppression: if you're not seeing the app, you get the banner even when
   // the Claude session is the active tab.
   let appVisible = $state(true)
-
-  // Claude notifications, per host. Status/badges drive UI; cursor is internal.
-  let notifyStatus = $state<Record<string, NotifyStatus>>({})
-  let notifyBadges = $state<Record<string, number>>({})
-  let notifyDismissed = $state<Record<string, boolean>>({})
-  let notifyInstalling = $state<Record<string, boolean>>({})
-  let notifyError = $state<Record<string, string>>({})
-  // Open notify WebSockets, keyed by host id. Core pushes Claude events over these;
-  // onmessage fires even when the window is hidden (unlike a throttled poll timer).
-  const notifyWs: Record<string, WebSocket> = {}
 
   const visible = $derived(servers.filter((s) => !s.hidden))
   const liveHostIds = $derived(new Set(sessions.map((s) => s.hostId)))
@@ -139,16 +124,29 @@
   // Terminals stay mounted across host switches; only the active one is shown.
   const terminalSessions = $derived(sessions.filter((s) => s.kind !== 'browser'))
   const isLive = $derived(!!activeHostId && liveHostIds.has(activeHostId))
-  // Offer the setup card once a remote host is live, reachable, and lacks the hook
-  // (until the user installs or dismisses it this session).
-  const showNotifySetup = $derived(
-    !!activeHost &&
-      !activeHost.isLocal &&
-      isLive &&
-      notifyStatus[activeHost.id]?.reachable === true &&
-      notifyStatus[activeHost.id]?.installed === false &&
-      !notifyDismissed[activeHost.id],
-  )
+  // The active tab is a live terminal (shell/tmux/docker), not a browser/dashboard —
+  // the signal for whether the app is genuinely "watching" this host.
+  const activeIsTerminal = $derived.by(() => {
+    if (activeState?.type !== 'session') return false
+    const s = sessions.find((x) => x.key === activeState.key)
+    return !!s && s.kind !== 'browser'
+  })
+
+  const notify = new NotifyStore({
+    connectedHostIds: () => connectedHostIds,
+    activeHostId: () => activeHostId,
+    activeHost: () => activeHost,
+    isLive: () => isLive,
+    appVisible: () => appVisible,
+    activeIsTerminal: () => activeIsTerminal,
+    openTmuxByHost: () => {
+      const m: Record<string, string[]> = {}
+      for (const s of sessions) {
+        if (s.kind === 'tmux' && s.session) (m[s.hostId] ??= []).push(s.session)
+      }
+      return m
+    },
+  })
 
   async function load(fn: () => Promise<Server[]>) {
     try {
@@ -177,16 +175,12 @@
     getFeatures().then((f) => (embeddedBrowser = f.embeddedBrowser)).catch(() => {})
     const t = setInterval(() => {
       refreshTunnels()
-      // Learn install status for connected hosts (reuses the ControlMaster), then
-      // reconcile the notify sockets. The sockets themselves push events; this timer
-      // only opens/heals them, so background throttling can't drop notifications.
-      for (const id of connectedHostIds) ensureNotifyStatus(id)
-      reconcileNotifyWs()
+      notify.tick()
     }, 4000)
 
     const updVisible = () => {
       appVisible = document.visibilityState === 'visible' && document.hasFocus()
-      pushWatching() // report immediately on focus/blur (fires while JS is still live)
+      notify.pushWatching() // report immediately on focus/blur (fires while JS is still live)
     }
     updVisible()
     window.addEventListener('focus', updVisible)
@@ -195,7 +189,7 @@
 
     // Fast heartbeat (< core's 5s TTL) so the watched-host report stays fresh
     // while the app is up; it naturally stops when the webview is suspended.
-    const hb = setInterval(pushWatching, 2000)
+    const hb = setInterval(() => notify.pushWatching(), 2000)
 
     return () => {
       clearInterval(t)
@@ -203,118 +197,9 @@
       window.removeEventListener('focus', updVisible)
       window.removeEventListener('blur', updVisible)
       document.removeEventListener('visibilitychange', updVisible)
-      for (const id of Object.keys(notifyWs)) closeNotifyWs(id)
+      notify.teardown()
     }
   })
-
-  // --- Claude notifications -------------------------------------------------
-
-  async function ensureNotifyStatus(id: string) {
-    if (id === '__local__' || notifyStatus[id]) return
-    try {
-      const st = await getNotifyStatus(id)
-      notifyStatus = { ...notifyStatus, [id]: st }
-      // Auto-update: the hook is wired but its script predates this app version
-      // (e.g. lacks the pane-location column). Silently reinstall to refresh it —
-      // install is idempotent, so this just rewrites the script and re-merges.
-      if (st.installed && st.current === false) {
-        installNotify(id)
-          .then(() => (notifyStatus = { ...notifyStatus, [id]: { ...st, current: true } }))
-          .catch(() => {
-            /* leave it stale; the user can reinstall manually */
-          })
-      }
-    } catch {
-      /* transient — retry next tick */
-    }
-  }
-
-  // Keep a live notify WebSocket open for every connected host that has the hook
-  // installed; close the rest. Called every tick, so a dropped socket reopens.
-  function reconcileNotifyWs() {
-    const desired = new Set([...connectedHostIds].filter((id) => notifyStatus[id]?.installed))
-    for (const id of desired) if (!notifyWs[id]) openNotifyWs(id)
-    for (const id of Object.keys(notifyWs)) if (!desired.has(id)) closeNotifyWs(id)
-  }
-
-  function openNotifyWs(id: string) {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${location.host}/ws/notify?id=${encodeURIComponent(id)}`)
-    notifyWs[id] = ws
-    ws.onmessage = (e) => {
-      try {
-        fireNotify(id, JSON.parse(e.data) as NotifyEvent)
-      } catch {
-        /* ignore a malformed frame */
-      }
-    }
-    ws.onclose = () => {
-      if (notifyWs[id] === ws) delete notifyWs[id] // reconcile reopens if still wanted
-    }
-    ws.onerror = () => ws.close()
-  }
-
-  function closeNotifyWs(id: string) {
-    const ws = notifyWs[id]
-    delete notifyWs[id]
-    ws?.close()
-  }
-
-  // The host whose live terminal is genuinely on screen: app focused AND visible
-  // AND its active tab is a terminal (shell/tmux/docker) on that host. `null` for
-  // any doubt (unfocused, hidden, minimized, another Space, a browser/dashboard
-  // tab) — core then fires that host's banner.
-  function watchedHost(): string | null {
-    if (!appVisible || !activeHostId) return null
-    if (activeState?.type !== 'session') return null
-    const s = sessions.find((x) => x.key === activeState.key)
-    return s && s.kind !== 'browser' ? activeHostId : null
-  }
-
-  // Heartbeat our watched host to core. When the app is backgrounded the webview
-  // suspends and these stop, so core (never suspended) fires the banner itself.
-  function pushWatching() {
-    // Report which tmux sessions are open (as tabs) per host, so core scopes
-    // Claude notifications to only the sessions the user has attached.
-    const openTmux: Record<string, string[]> = {}
-    for (const s of sessions) {
-      if (s.kind === 'tmux' && s.session) (openTmux[s.hostId] ??= []).push(s.session)
-    }
-    setWatching(watchedHost(), openTmux).catch(() => {})
-  }
-
-  function fireNotify(id: string, _ev: NotifyEvent) {
-    // Core raises the OS banner (works while backgrounded); the webview only
-    // badges the sidebar, and only when you're not already looking at that host.
-    if (activeHostId !== id) {
-      notifyBadges = { ...notifyBadges, [id]: (notifyBadges[id] ?? 0) + 1 }
-    }
-  }
-
-  async function installNotifyFor(id: string) {
-    notifyInstalling = { ...notifyInstalling, [id]: true }
-    notifyError = { ...notifyError, [id]: '' }
-    try {
-      await installNotify(id)
-      notifyStatus = { ...notifyStatus, [id]: { reachable: true, installed: true } }
-      reconcileNotifyWs() // open the stream now rather than waiting for the next tick
-    } catch (e) {
-      notifyError = { ...notifyError, [id]: String(e) }
-    } finally {
-      notifyInstalling = { ...notifyInstalling, [id]: false }
-    }
-  }
-
-  async function uninstallNotifyFor(id: string) {
-    if (!(await confirmDialog('Disable Claude notifications on this host? Removes the hook + helper script.', { okLabel: 'Disable', danger: true }))) return
-    try {
-      await uninstallNotify(id)
-      notifyStatus = { ...notifyStatus, [id]: { reachable: true, installed: false } }
-      notifyDismissed = { ...notifyDismissed, [id]: true } // don't immediately re-offer
-    } catch (e) {
-      notifyError = { ...notifyError, [id]: String(e) }
-    }
-  }
 
   function setActive(a: Active) {
     if (activeHostId) hostActive = { ...hostActive, [activeHostId]: a }
@@ -330,7 +215,7 @@
     // You're looking at this host now — clear its badge. (Notify status is fetched
     // by the poll loop once a terminal connects, so we don't open a second
     // connection here that would race the console on a ProxyCommand host.)
-    if (notifyBadges[s.id]) notifyBadges = { ...notifyBadges, [s.id]: 0 }
+    notify.clearBadge(s.id)
     if (!sessions.some((x) => x.hostId === s.id)) {
       openShell(s.id)
     } else if (!hostActive[s.id]) {
@@ -549,7 +434,7 @@
             <span class="dot" class:on={liveHostIds.has(s.id)}></span>
             <span class="name">{s.name}</span>
             {#if s.hasPassword}<span class="lock" title="Password stored">🔒</span>{/if}
-            {#if notifyBadges[s.id]}<span class="nbadge" title="Claude notifications">{notifyBadges[s.id]}</span>{/if}
+            {#if notify.badges[s.id]}<span class="nbadge" title="Claude notifications">{notify.badges[s.id]}</span>{/if}
             {#if sessionCounts[s.id]}<span class="count">{sessionCounts[s.id]}</span>{/if}
           </span>
         </button>
@@ -585,16 +470,14 @@
         </div>
         <div class="top-actions">
           {#if !activeHost.isLocal}
-            {@const on = notifyStatus[activeHost.id]?.installed === true}
+            {@const on = notify.status[activeHost.id]?.installed === true}
             <button
               class="iconbtn bell"
               class:on
               title={on ? 'Claude notifications on — click to disable' : 'Enable Claude notifications'}
               aria-label="Claude notifications"
               onclick={() =>
-                on
-                  ? uninstallNotifyFor(activeHost.id)
-                  : (notifyDismissed = { ...notifyDismissed, [activeHost.id]: false })}
+                on ? notify.uninstall(activeHost.id) : notify.reoffer(activeHost.id)}
             >
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
@@ -677,13 +560,13 @@
         {/if}
       {/if}
 
-      {#if showNotifySetup && activeHost}
+      {#if notify.showSetup && activeHost}
         <ClaudeNotifySetup
           hostName={activeHost.name}
-          installing={!!notifyInstalling[activeHost.id]}
-          error={notifyError[activeHost.id]}
-          onInstall={() => installNotifyFor(activeHost.id)}
-          onDismiss={() => (notifyDismissed = { ...notifyDismissed, [activeHost.id]: true })}
+          installing={!!notify.installing[activeHost.id]}
+          error={notify.error[activeHost.id]}
+          onInstall={() => notify.install(activeHost.id)}
+          onDismiss={() => notify.dismiss(activeHost.id)}
         />
       {/if}
     </div>
