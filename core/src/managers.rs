@@ -229,16 +229,25 @@ pub struct TmuxSession {
     pub created: String,
 }
 
-/// One tab-separated `name\twindows\tattached\tcreated` line per session.
+/// One `name::windows::attached::created` line per session.
+///
+/// The format is deliberately a single unquoted, whitespace-free word, because
+/// the remote shell is not always POSIX. A Windows host serving sshd through
+/// cmd.exe neither strips the single quotes nor keeps a tab-separated string in
+/// one argument, so a quoted-with-tabs format arrived as `-F '#{session_name}`
+/// plus stray words and every session came back named `'0`, `'1`, … The value
+/// rides attached to `-F` so the word starts with `-F` rather than `#`, which
+/// would otherwise open a comment in sh, and `::` is an unambiguous separator
+/// because tmux rejects `:` in session names.
 const TMUX_LS_CMD: &str =
-    "tmux list-sessions -F '#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}'";
+    "tmux list-sessions -F#{session_name}::#{session_windows}::#{session_attached}::#{session_created}";
 
 fn parse_tmux(stdout: &str) -> Vec<TmuxSession> {
     stdout
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| {
-            let mut it = l.split('\t');
+            let mut it = l.split("::");
             let name = it.next()?.to_string();
             Some(TmuxSession {
                 name,
@@ -557,14 +566,15 @@ mod tests {
 
     #[test]
     fn tmux_sessions_parse() {
-        let out = "work\t3\t1\t1700000000\nscratch\t1\t0\t1700000500\n\n";
+        let out = "work::3::1::1700000000\nmy scratch::1::0::1700000500\n\n";
         let s = parse_tmux(out);
         assert_eq!(s.len(), 2, "blank line dropped");
         assert_eq!(s[0].name, "work");
         assert_eq!(s[0].windows, 3);
         assert!(s[0].attached);
         assert_eq!(s[0].created, "1700000000");
-        assert_eq!(s[1].name, "scratch");
+        // Session names may contain spaces; only `::` separates fields.
+        assert_eq!(s[1].name, "my scratch");
         assert!(!s[1].attached);
     }
 
