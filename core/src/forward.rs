@@ -31,15 +31,6 @@ pub struct ForwardReq {
     pub target: Option<String>,
 }
 
-/// A hostname/IP is safe to splice into the `-L` spec when it's non-empty and
-/// only letters, digits, `.` and `-` — so it can't smuggle extra `:` fields (which
-/// would change what the tunnel points at) or spaces.
-fn safe_host(h: &str) -> bool {
-    !h.is_empty()
-        && h.len() <= 255
-        && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-}
-
 /// `POST /api/servers/{id}/ports/{port}/forward`
 pub async fn forward(
     State(state): State<AppState>,
@@ -53,8 +44,10 @@ pub async fn forward(
         return err(StatusCode::BAD_REQUEST, "bad port");
     }
     let manual = req.local.is_some();
+    // `target` is spliced into the `-L` spec; `safe_name` rejects `:`, spaces and a
+    // leading `-`, so it can't smuggle extra fields or an ssh option flag.
     let target = req.target.as_deref().unwrap_or("127.0.0.1");
-    if !safe_host(target) {
+    if !safe_name(target) {
         return err(StatusCode::BAD_REQUEST, "bad target host");
     }
     let fkey = key(&id, port);

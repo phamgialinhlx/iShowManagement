@@ -19,6 +19,16 @@ function ok(r: Response): Response {
   return r
 }
 
+// Like `ok`, but on failure throws the server's `{error}` message (falling back to
+// status text) so callers can surface the cause inline instead of a bare status.
+async function okBody(r: Response): Promise<Response> {
+  if (!r.ok) {
+    const msg = await r.json().then((j) => j.error, () => '')
+    throw new Error(msg || `${r.status} ${r.statusText}`)
+  }
+  return r
+}
+
 const json = { 'content-type': 'application/json' }
 const enc = encodeURIComponent
 
@@ -235,11 +245,7 @@ export const forwardPort = async (
     headers: json,
     body: JSON.stringify(opts),
   })
-  if (!r.ok) {
-    const msg = await r.json().then((j) => j.error, () => '')
-    throw new Error(msg || `${r.status} ${r.statusText}`)
-  }
-  return r.json()
+  return (await okBody(r)).json()
 }
 
 export const unforwardPort = (id: string, port: number): Promise<Response> =>
@@ -366,9 +372,5 @@ export const pasteImage = async (id: string, blob: Blob): Promise<string> => {
     headers: { 'content-type': blob.type || 'image/png' },
     body: blob,
   })
-  if (!r.ok) {
-    const msg = await r.json().then((j) => j.error, () => '')
-    throw new Error(msg || `${r.status} ${r.statusText}`)
-  }
-  return (await r.json()).path
+  return (await (await okBody(r)).json()).path
 }
