@@ -266,7 +266,7 @@
                   {@const d = display(inst, s.name)}
                   <button
                     class="cnode"
-                    title={`${d} · pane ${inst.paneId ?? ''} (win ${inst.window ?? 0}·pane ${inst.pane ?? 0})`}
+                    title={`${d}${d === 'waiting' && inst.waitingFor ? ` — ${inst.waitingFor}` : ''} · pane ${inst.paneId ?? ''} (win ${inst.window ?? 0}·pane ${inst.pane ?? 0})`}
                     onclick={() => onAttachClaude(s.name, inst)}
                   >
                     <span class="cbody">
@@ -566,6 +566,12 @@
     font-size: 10.5px;
     color: var(--ink-faint);
     margin-top: 0.1rem;
+    min-width: 0;
+  }
+  /* The win·pane label stays whole; the right side truncates instead. */
+  .cloc > span:first-child {
+    flex: none;
+    white-space: nowrap;
   }
   /* Right side of the location line: waiting reason and/or context size. */
   .cright {
@@ -573,9 +579,16 @@
     align-items: baseline;
     gap: 0.45rem;
     min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
   }
+  /* A long waiting reason ellipsizes rather than overflowing the row. */
   .cwait {
-    flex: none;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--warn);
     font-variant-numeric: tabular-nums;
   }
