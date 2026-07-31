@@ -225,6 +225,17 @@ pub async fn get_tunnels(State(state): State<AppState>) -> Json<TunnelsDto> {
     Json(TunnelsDto { forwards, proxies })
 }
 
+#[derive(Serialize)]
+pub struct PortFreeDto {
+    pub free: bool,
+}
+
+/// `GET /api/local-port-free/{port}` — is a local TCP port free to bind? Powers the
+/// manual-forward form's live local-port suggestion (the browser can't probe this).
+pub async fn local_port_free(Path(port): Path<u16>) -> Json<PortFreeDto> {
+    Json(PortFreeDto { free: !crate::net::is_port_open(port).await })
+}
+
 #[derive(Deserialize)]
 pub struct NotifyReq {
     pub title: String,

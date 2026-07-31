@@ -179,15 +179,17 @@ pub fn transfer_opts(alias: &str) -> Vec<String> {
     a
 }
 
-/// A background `ssh -N -L 127.0.0.1:<local>:127.0.0.1:<remote>` command (port forward).
-pub fn forward_command(alias: &str, local: u16, remote: u16) -> CommandBuilder {
+/// A background `ssh -N -L 127.0.0.1:<local>:<target>:<remote>` command (port forward).
+/// `target` is the host the tunnel points at *from the server's side* — `127.0.0.1`
+/// for a service on the server itself, or a third host only the server can reach.
+pub fn forward_command(alias: &str, local: u16, target: &str, remote: u16) -> CommandBuilder {
     let mut cmd = CommandBuilder::new("ssh");
     for a in control_args(alias) {
         cmd.arg(a);
     }
     cmd.arg("-N");
     cmd.arg("-L");
-    cmd.arg(format!("127.0.0.1:{local}:127.0.0.1:{remote}"));
+    cmd.arg(format!("127.0.0.1:{local}:{target}:{remote}"));
     cmd.arg(alias);
     cmd.env("TERM", "xterm-256color");
     cmd

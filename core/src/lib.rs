@@ -171,6 +171,7 @@ async fn build_router() -> Router {
         .route("/api/features", get(features))
         .route("/api/servers", get(api::get_servers))
         .route("/api/tunnels", get(api::get_tunnels))
+        .route("/api/local-port-free/{port}", get(api::local_port_free))
         .route("/api/notify", post(api::notify))
         .route("/api/watching", post(notify::set_watching))
         .route("/api/servers/refresh", post(api::refresh_servers))

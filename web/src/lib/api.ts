@@ -221,11 +221,33 @@ export const saveFile = (id: string, path: string, content: string): Promise<Res
 
 // -- Forward + Browser ----------------------------------------------------
 
-export const forwardPort = (id: string, port: number): Promise<{ ok: boolean; localPort: number }> =>
-  fetch(`${base(id)}/ports/${port}/forward`, { method: 'POST' }).then(ok).then((r) => r.json())
+// Establish an `ssh -L` forward of remote `port`. Without opts the backend
+// auto-picks the local port (discovery path); with `local` it honors that exact
+// port (manual path) and errors if it's busy or the remote is already forwarded.
+// Errors carry the server's message so the form can show the cause inline.
+export const forwardPort = async (
+  id: string,
+  port: number,
+  opts: { local?: number; target?: string } = {},
+): Promise<{ ok: boolean; localPort: number }> => {
+  const r = await fetch(`${base(id)}/ports/${port}/forward`, {
+    method: 'POST',
+    headers: json,
+    body: JSON.stringify(opts),
+  })
+  if (!r.ok) {
+    const msg = await r.json().then((j) => j.error, () => '')
+    throw new Error(msg || `${r.status} ${r.statusText}`)
+  }
+  return r.json()
+}
 
 export const unforwardPort = (id: string, port: number): Promise<Response> =>
   fetch(`${base(id)}/ports/${port}/forward`, { method: 'DELETE' }).then(ok)
+
+// Is a local TCP port free to bind? Drives the manual-forward form's suggestion.
+export const localPortFree = (port: number): Promise<boolean> =>
+  fetch(`/api/local-port-free/${port}`).then(ok).then((r) => r.json()).then((j) => j.free)
 
 export const openBrowser = (
   id: string,
