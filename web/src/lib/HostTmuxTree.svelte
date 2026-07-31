@@ -121,6 +121,11 @@
     return (inst.statusUpdatedAt ?? 0) > (seen[session] ?? 0) ? 'unread' : 'read'
   }
 
+  // Compact context-window size. No denominator — modern models run 1M+ windows,
+  // so the absolute figure is more meaningful than a % of a fixed cap.
+  const formatTokens = (n: number) =>
+    n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+
   $effect(() => {
     id
     reload()
@@ -270,9 +275,15 @@
                       </span>
                       <span class="cloc mono">
                         <span>win {inst.window ?? 0} · pane {inst.pane ?? 0}</span>
-                        {#if d === 'waiting' && inst.waitingFor}
-                          <span class="cwait">{inst.waitingFor}</span>
-                        {/if}
+                        <span class="cright">
+                          {#if d === 'waiting' && inst.waitingFor}
+                            <span class="cwait">{inst.waitingFor}</span>
+                          {/if}
+                          {#if inst.contextTokens != null}
+                            <span class="cctx" title={`context: ${inst.contextTokens.toLocaleString()} tokens`}
+                              >{formatTokens(inst.contextTokens)}</span>
+                          {/if}
+                        </span>
                       </span>
                     </span>
                     {@render statusIcon(d)}
@@ -556,10 +567,22 @@
     color: var(--ink-faint);
     margin-top: 0.1rem;
   }
-  /* When waiting, Claude's `waitingFor` reason sits at the row's right. */
+  /* Right side of the location line: waiting reason and/or context size. */
+  .cright {
+    display: flex;
+    align-items: baseline;
+    gap: 0.45rem;
+    min-width: 0;
+  }
   .cwait {
     flex: none;
     color: var(--warn);
+    font-variant-numeric: tabular-nums;
+  }
+  /* Context-window size — plain absolute figure, no denominator or tint. */
+  .cctx {
+    flex: none;
+    color: var(--ink-dim);
     font-variant-numeric: tabular-nums;
   }
   .tnote {

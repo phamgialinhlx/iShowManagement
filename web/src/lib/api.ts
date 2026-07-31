@@ -130,6 +130,9 @@ export interface ClaudeInstance {
   statusUpdatedAt?: number
   sessionId?: string
   project?: string
+  // How full the context window is (input + cache tokens on the last turn),
+  // from the session transcript. Absent when it can't be read.
+  contextTokens?: number
 }
 export interface ClaudeSession {
   name: string

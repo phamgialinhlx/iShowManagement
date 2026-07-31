@@ -417,6 +417,15 @@ pub async fn claude_inventory(
     // One round trip: Claude's session-status files (state), the live process
     // table (liveness + tty for mapping), then the live pane table (location).
     let cmd = "for f in \"$HOME\"/.claude/sessions/*.json; do [ -f \"$f\" ] && cat \"$f\" && echo; done 2>/dev/null; \
+        echo '===CTX==='; \
+        for f in \"$HOME\"/.claude/sessions/*.json; do [ -f \"$f\" ] || continue; \
+        sid=$(grep -o '\"sessionId\":\"[^\"]*\"' \"$f\" | head -1 | sed 's/.*:\"//;s/\"//'); [ -n \"$sid\" ] || continue; \
+        tp=$(ls \"$HOME\"/.claude/projects/*/\"$sid\".jsonl 2>/dev/null | head -1); [ -f \"$tp\" ] || continue; \
+        u=$(tail -n 400 \"$tp\" 2>/dev/null | grep '\"usage\"' | tail -1 | grep -o '\"usage\":{[^{]*'); [ -n \"$u\" ] || continue; \
+        it=$(printf '%s' \"$u\" | grep -o '\"input_tokens\":[0-9]*' | head -1 | sed 's/[^0-9]//g'); \
+        cr=$(printf '%s' \"$u\" | grep -o '\"cache_read_input_tokens\":[0-9]*' | head -1 | sed 's/[^0-9]//g'); \
+        cc=$(printf '%s' \"$u\" | grep -o '\"cache_creation_input_tokens\":[0-9]*' | head -1 | sed 's/[^0-9]//g'); \
+        echo \"$sid $(( ${it:-0} + ${cr:-0} + ${cc:-0} ))\"; done 2>/dev/null; \
         echo '===PS==='; \
         ps -eo pid,ppid,tty,comm 2>/dev/null; \
         echo '===PANES==='; \
@@ -432,9 +441,10 @@ pub async fn claude_inventory(
         };
         return (StatusCode::OK, Json(json!({ "available": false, "reason": hint })));
     }
-    let (sessions, rest) = r.stdout.split_once("===PS===").unwrap_or((r.stdout.as_str(), ""));
+    let (sessions, rest) = r.stdout.split_once("===CTX===").unwrap_or((r.stdout.as_str(), ""));
+    let (ctx, rest) = rest.split_once("===PS===").unwrap_or((rest, ""));
     let (ps, panes) = rest.split_once("===PANES===").unwrap_or((rest, ""));
-    (StatusCode::OK, Json(json!({ "available": true, "sessions": build_inventory(sessions, ps, panes) })))
+    (StatusCode::OK, Json(json!({ "available": true, "sessions": build_inventory(sessions, ctx, ps, panes) })))
 }
 
 /// A live pane from `tmux list-panes` (see the format in `claude_inventory`):
@@ -521,7 +531,20 @@ fn pane_via_ppid(
 /// reaching a `#{pane_pid}`. A file whose pid is dead (stale) or reused by a
 /// non-`claude` process is dropped; a Claude with no matching pane (a plain SSH
 /// shell, not tmux) is simply absent from the tree.
-fn build_inventory(sessions: &str, ps: &str, panes: &str) -> Vec<Value> {
+fn build_inventory(sessions: &str, ctx: &str, ps: &str, panes: &str) -> Vec<Value> {
+    // Context-window tokens by sessionId (`<sid> <n>` per line): input +
+    // cache-read + cache-creation from the transcript's last usage block — how
+    // full the window is (matches Claude Code's own context-length figure).
+    let mut ctx_by_sid: HashMap<String, u64> = HashMap::new();
+    for line in ctx.lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(sid), Some(n)) = (it.next(), it.next()) {
+            if let Ok(n) = n.parse::<u64>() {
+                ctx_by_sid.insert(sid.to_string(), n);
+            }
+        }
+    }
+
     // Live processes: pid -> {ppid, tty, comm}.
     let mut procs: HashMap<u32, ProcInfo> = HashMap::new();
     for line in ps.lines() {
@@ -603,6 +626,7 @@ fn build_inventory(sessions: &str, ps: &str, panes: &str) -> Vec<Value> {
             "statusUpdatedAt": sf.status_updated_at,
             "sessionId": sf.session_id,
             "project": project,
+            "contextTokens": ctx_by_sid.get(&sf.session_id).copied(),
         });
         by_sess.entry(info.session.clone()).or_default().push(c);
     }
@@ -957,7 +981,9 @@ s\t0\tmain\t0\t%1\t/dev/pts/1\t91
 s\t0\tmain\t1\t%2\t/dev/pts/2\t92
 s\t0\tmain\t2\t%3\t/dev/pts/3\t93
 s\t0\tmain\t3\t%4\t/dev/pts/4\t94";
-        let inv = build_inventory(sessions, ps, panes);
+        // Context tokens joined by sessionId; sessions without a line stay null.
+        let ctx = "a 128000\nc 42000";
+        let inv = build_inventory(sessions, ctx, ps, panes);
         assert_eq!(inv.len(), 1);
         assert_eq!(inv[0]["name"], "s");
         let claude = inv[0]["claude"].as_array().unwrap();
@@ -967,6 +993,9 @@ s\t0\tmain\t3\t%4\t/dev/pts/4\t94";
         assert_eq!(claude[2]["statusUpdatedAt"], 30);
         assert_eq!(claude[0]["project"], "alpha");
         assert_eq!(claude[0]["paneId"], "%1");
+        assert_eq!(claude[0]["contextTokens"], 128000);
+        assert_eq!(claude[2]["contextTokens"], 42000);
+        assert_eq!(claude[3]["contextTokens"], Value::Null);
     }
 
     // A Claude in a plain SSH shell (no tmux) has a live session file and pid but
@@ -983,7 +1012,7 @@ s\t0\tmain\t3\t%4\t/dev/pts/4\t94";
 54048 50310 ttys008  claude
 18502 18501 ttys007  -zsh";
         let panes = "hi\t0\t2.1.220\t0\t%0\t/dev/ttys007\t18502";
-        let inv = build_inventory(sessions, ps, panes);
+        let inv = build_inventory(sessions, "", ps, panes);
         assert_eq!(inv.len(), 1);
         assert_eq!(inv[0]["name"], "hi");
         let claude = inv[0]["claude"].as_array().unwrap();
@@ -1018,7 +1047,7 @@ s\t0\tmain\t3\t%4\t/dev/pts/4\t94";
 201  100 pts/1    vim
 100   99 pts/1    -bash";
         let panes = "s\t0\tmain\t0\t%1\t/dev/pts/1\t100";
-        assert!(build_inventory(sessions, ps, panes).is_empty());
+        assert!(build_inventory(sessions, "", ps, panes).is_empty());
     }
 
     // No controlling tty on the Claude pid (`??`) → fall back to the parent chain:
@@ -1031,7 +1060,7 @@ s\t0\tmain\t3\t%4\t/dev/pts/4\t94";
 300  100 ??       claude
 100   99 pts/9    -zsh";
         let panes = "s\t0\tmain\t0\t%9\t/dev/pts/9\t100";
-        let inv = build_inventory(sessions, ps, panes);
+        let inv = build_inventory(sessions, "", ps, panes);
         assert_eq!(inv[0]["claude"][0]["paneId"], "%9");
         assert_eq!(inv[0]["claude"][0]["status"], "working");
     }
@@ -1056,7 +1085,7 @@ zzz\t0\tmain\t0\t%9\t/dev/pts/9\t20
 aaa\t0\tmain\t0\t%0\t/dev/pts/0\t10
 aaa\t0\tmain\t1\t%1\t/dev/pts/1\t11
 aaa\t0\tmain\t2\t%2\t/dev/pts/2\t12";
-        let inv = build_inventory(sessions, ps, panes);
+        let inv = build_inventory(sessions, "", ps, panes);
         let names: Vec<&str> = inv.iter().map(|s| s["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["aaa", "zzz"]);
         let ids: Vec<&str> =
