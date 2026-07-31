@@ -9,7 +9,9 @@ rust-version.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `macos-proxy` routes the embedded browser's WebView through the host SOCKS
+# proxy (macOS 14+); `unstable` enables child webviews (`Window::add_child`).
+tauri = { version = "2", features = ["macos-proxy", "unstable"] }
 # Package is `core`; its library target is `ismcore` (avoids the std `core` clash).
 ismcore = { path = "../core", package = "core" }
 tokio = { version = "1", features = ["rt-multi-thread"] }

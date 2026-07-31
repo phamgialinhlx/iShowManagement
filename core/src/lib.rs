@@ -7,6 +7,7 @@
 mod api;
 mod bg;
 mod browser;
+pub use browser::{set_browser_controller, BrowserCommand, Rect};
 mod clipboard;
 mod discovery;
 mod files;
@@ -167,6 +168,7 @@ async fn build_router() -> Router {
 
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/features", get(features))
         .route("/api/servers", get(api::get_servers))
         .route("/api/tunnels", get(api::get_tunnels))
         .route("/api/notify", post(api::notify))
@@ -208,6 +210,8 @@ async fn build_router() -> Router {
         .route("/api/servers/{id}/claude-notify/events", get(notify::events))
         .route("/ws/notify", get(notify::notify_ws))
         .route("/api/servers/{id}/browser", post(browser::browser))
+        .route("/api/servers/{id}/browser/embed", post(browser::embed))
+        .route("/api/browser/control", post(browser::control))
         .route("/api/servers/{id}/proxy", delete(browser::stop_proxy))
         .route("/ws", get(ws::handler))
         .with_state(state)
@@ -251,6 +255,12 @@ async fn static_handler(uri: Uri) -> Response {
 
 async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok", "service": "ishowmanagement-core" }))
+}
+
+/// Runtime capabilities the frontend must branch on. `embeddedBrowser` is true
+/// only when the desktop shell has registered a child-webview controller.
+async fn features() -> impl IntoResponse {
+    Json(json!({ "embeddedBrowser": browser::embedded_browser_available() }))
 }
 
 /// Reject browser requests whose `Origin` isn't loopback — a remote page must

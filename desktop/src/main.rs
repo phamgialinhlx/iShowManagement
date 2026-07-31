@@ -14,6 +14,10 @@ use std::time::Duration;
 
 use tauri::{Url, WebviewUrl, WebviewWindowBuilder};
 
+// Embedded in-tab browser: a native child webview routed through the host SOCKS
+// proxy, driven via core's `browser_controller` hook.
+mod browser;
+
 // Native `UNUserNotificationCenter` bindings. macOS-only; elsewhere the server's
 // own notification path applies and this module isn't compiled.
 #[cfg(target_os = "macos")]
@@ -74,6 +78,8 @@ fn main() {
                 .title("iShowManagement")
                 .inner_size(1200.0, 800.0)
                 .build()?;
+            // Back the embedded in-tab browser with a native child webview.
+            browser::register(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())

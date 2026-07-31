@@ -25,6 +25,7 @@
     installNotify,
     uninstallNotify,
     tmuxSelect,
+    getFeatures,
     type Server,
     type Tunnels,
     type NotifyStatus,
@@ -166,9 +167,14 @@
     }
   }
 
+  // Desktop shell exposes a native in-tab browser; the plain-browser build falls
+  // back to launching external Chrome.
+  let embeddedBrowser = $state(false)
+
   onMount(() => {
     load(listServers)
     refreshTunnels()
+    getFeatures().then((f) => (embeddedBrowser = f.embeddedBrowser)).catch(() => {})
     const t = setInterval(() => {
       refreshTunnels()
       // Learn install status for connected hosts (reuses the ControlMaster), then
@@ -666,7 +672,7 @@
         {@const cur = sessions.find((x) => x.key === activeState.key)}
         {#if cur?.kind === 'browser'}
           <div class="layer">
-            <BrowserPanel id={activeHost.id} name={activeHost.name} onChanged={refreshTunnels} />
+            <BrowserPanel id={activeHost.id} name={activeHost.name} embedded={embeddedBrowser} onChanged={refreshTunnels} />
           </div>
         {/if}
       {/if}

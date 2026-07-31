@@ -13,7 +13,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::api::{AppState, ProxyEntry, LOCAL_ID};
@@ -189,4 +189,127 @@ fn windows_chrome_path() -> std::io::Result<std::path::PathBuf> {
 
 fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
     (code, Json(json!({ "error": msg })))
+}
+
+// ---------------------------------------------------------------------------
+// Embedded (in-tab) browser: a native child webview owned by the desktop shell,
+// routed through the same per-host SOCKS proxy. macOS bypasses that proxy for
+// loopback/private destinations, so this handles public + hostname browsing;
+// the server's own 127.0.0.1 services are reached via `ssh -L` forwards + the
+// tab navigating to `127.0.0.1:<local>` instead. Non-desktop builds register no
+// controller, so `embed` reports 501 and the UI falls back to external Chrome.
+// ---------------------------------------------------------------------------
+
+/// A rectangle in the frontend's logical (CSS) pixels, relative to the window's
+/// content area — where the desktop shell must place its child webview.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// A command the embedded-browser controller carries out against its single live
+/// child webview.
+pub enum BrowserCommand {
+    Open { url: String, socks_port: u16, rect: Rect },
+    Bounds { rect: Rect },
+    Navigate { url: String },
+    Back,
+    Forward,
+    Reload,
+    Show,
+    Hide,
+    Close,
+}
+
+type BrowserController = Box<dyn Fn(BrowserCommand) -> Result<(), String> + Send + Sync>;
+static BROWSER_CONTROLLER: std::sync::OnceLock<BrowserController> = std::sync::OnceLock::new();
+
+/// Register the host's embedded-browser controller. The Tauri shell installs one
+/// backed by a native child webview. First call wins.
+pub fn set_browser_controller<F>(f: F)
+where
+    F: Fn(BrowserCommand) -> Result<(), String> + Send + Sync + 'static,
+{
+    let _ = BROWSER_CONTROLLER.set(Box::new(f));
+}
+
+pub(crate) fn embedded_browser_available() -> bool {
+    BROWSER_CONTROLLER.get().is_some()
+}
+
+fn dispatch(cmd: BrowserCommand) -> Result<(), String> {
+    match BROWSER_CONTROLLER.get() {
+        Some(f) => f(cmd),
+        None => Err("embedded browser is only available in the desktop app".into()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EmbedReq {
+    #[serde(default)]
+    url: Option<String>,
+    rect: Rect,
+}
+
+/// `POST /api/servers/{id}/browser/embed` — ensure the host's SOCKS proxy, then
+/// tell the desktop shell to show a child webview (routed through it) over `rect`.
+/// 501 when no controller is registered so the UI can fall back to external Chrome.
+pub async fn embed(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<EmbedReq>,
+) -> (StatusCode, Json<Value>) {
+    if id == LOCAL_ID || !safe_name(&id) {
+        return err(StatusCode::BAD_REQUEST, "this is the local machine — just open a browser normally");
+    }
+    if !embedded_browser_available() {
+        return err(StatusCode::NOT_IMPLEMENTED, "embedded browser is only available in the desktop app");
+    }
+    let port = match ensure_proxy(&state, &id).await {
+        Ok(p) => p,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let url = req
+        .url
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "about:blank".into());
+    match dispatch(BrowserCommand::Open { url, socks_port: port, rect: req.rect }) {
+        Ok(_) => (StatusCode::OK, Json(json!({ "socksPort": port }))),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum ControlReq {
+    Bounds { rect: Rect },
+    Navigate { url: String },
+    Back,
+    Forward,
+    Reload,
+    Show,
+    Hide,
+    Close,
+}
+
+/// `POST /api/browser/control` — drive the single live embedded webview.
+pub async fn control(Json(req): Json<ControlReq>) -> (StatusCode, Json<Value>) {
+    let cmd = match req {
+        ControlReq::Bounds { rect } => BrowserCommand::Bounds { rect },
+        ControlReq::Navigate { url } => BrowserCommand::Navigate { url },
+        ControlReq::Back => BrowserCommand::Back,
+        ControlReq::Forward => BrowserCommand::Forward,
+        ControlReq::Reload => BrowserCommand::Reload,
+        ControlReq::Show => BrowserCommand::Show,
+        ControlReq::Hide => BrowserCommand::Hide,
+        ControlReq::Close => BrowserCommand::Close,
+    };
+    match dispatch(cmd) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
 }

@@ -47,6 +47,27 @@
         }
       }
       openSessions = new Set(openSessions)
+      // Seed sessions we've never seen as "caught up", and keep the active tab
+      // acknowledged so a Claude that finishes while you're watching it never
+      // flips unread. Watermark is the host-clock statusUpdatedAt (skew-free).
+      let dirty = false
+      for (const [name, insts] of Object.entries(map)) {
+        if (!(name in seen)) {
+          seen[name] = watermark(insts)
+          dirty = true
+        }
+      }
+      if (activeName && map[activeName]) {
+        const w = watermark(map[activeName])
+        if ((seen[activeName] ?? -1) < w) {
+          seen[activeName] = w
+          dirty = true
+        }
+      }
+      if (dirty) {
+        seen = { ...seen }
+        persistSeen()
+      }
     } catch (e) {
       reason = String(e)
     } finally {
@@ -70,14 +91,35 @@
     openSessions = new Set(openSessions)
   }
 
-  const badgeLabel = (s: ClaudeInstance['state']) =>
-    s === 'working' ? 'working' : s === 'needs' ? 'needs you' : s === 'done' ? 'done' : 'running'
-
-  // Claude's standard context window (the auto-compact threshold for Opus/Sonnet).
-  const CTX_WINDOW = 200_000
-  const ctxPct = (t: number) => Math.min(100, Math.round((t / CTX_WINDOW) * 100))
-  // Shown as the token count in thousands, 2 decimals — e.g. 106265 → "106.27k".
-  const ctxLabel = (t: number) => `${(t / 1000).toFixed(2)}k`
+  // READ/UNREAD is attention state the app owns. To stay correct across host↔client
+  // clock skew, the watermark is Claude's own `statusUpdatedAt` (host clock on both
+  // sides): a session is "read" up to the newest status change we've acknowledged.
+  // Seeded to the current watermark on first sight so startup isn't a wall of
+  // unread, and persisted per host. WORKING/WAITING come straight from the status.
+  let seen = $state<Record<string, number>>({})
+  const viewKey = () => `ism:claudeSeen:${id}`
+  function persistSeen() {
+    try {
+      localStorage.setItem(viewKey(), JSON.stringify(seen))
+    } catch {}
+  }
+  const watermark = (insts: ClaudeInstance[]) =>
+    insts.reduce((m, i) => Math.max(m, i.statusUpdatedAt ?? 0), 0)
+  function markSeen(name: string) {
+    const insts = claudeBySession[name]
+    if (!insts) return
+    const w = watermark(insts)
+    if ((seen[name] ?? -1) < w) {
+      seen[name] = w
+      seen = { ...seen }
+      persistSeen()
+    }
+  }
+  function display(inst: ClaudeInstance, session: string): 'working' | 'waiting' | 'unread' | 'read' {
+    if (inst.status === 'working') return 'working'
+    if (inst.status === 'waiting') return 'waiting'
+    return (inst.statusUpdatedAt ?? 0) > (seen[session] ?? 0) ? 'unread' : 'read'
+  }
 
   $effect(() => {
     id
@@ -91,7 +133,45 @@
     const t = setInterval(reload, 6000)
     return () => clearInterval(t)
   })
+
+  // Load persisted read-state when the host changes.
+  $effect(() => {
+    try {
+      seen = JSON.parse(localStorage.getItem(viewKey()) ?? '{}')
+    } catch {
+      seen = {}
+    }
+  })
+
+  // The active session is on screen → acknowledge it the moment it's switched to.
+  $effect(() => {
+    if (activeName) markSeen(activeName)
+  })
 </script>
+
+{#snippet statusIcon(d: 'working' | 'waiting' | 'unread' | 'read')}
+  {#if d === 'working'}
+    <!-- lucide: loader -->
+    <svg class="ci working" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 2v4" /><path d="m16.2 7.8 2.9-2.9" /><path d="M18 12h4" /><path d="m16.2 16.2 2.9 2.9" /><path d="M12 18v4" /><path d="m4.9 19.1 2.9-2.9" /><path d="M2 12h4" /><path d="m4.9 4.9 2.9 2.9" />
+    </svg>
+  {:else if d === 'waiting'}
+    <!-- lucide: circle-alert -->
+    <svg class="ci waiting" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" />
+    </svg>
+  {:else if d === 'unread'}
+    <!-- lucide: circle-check -->
+    <svg class="ci unread" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" /><path d="m9 12 2 2 4-4" />
+    </svg>
+  {:else}
+    <!-- lucide: circle-check, negative (filled disc, knocked-out check) -->
+    <svg class="ci read" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" /><path d="m9 12 2 2 4-4" fill="none" stroke="var(--bg)" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  {/if}
+{/snippet}
 
 <div class="tree">
   <div class="thead">
@@ -178,33 +258,24 @@
             {#if claude?.length && dropped}
               <div class="kids" transition:slide={{ duration: 140 }}>
                 {#each claude as inst (inst.paneId ?? `${inst.window}.${inst.pane}`)}
+                  {@const d = display(inst, s.name)}
                   <button
                     class="cnode"
-                    title={`Attach to pane ${inst.paneId ?? ''} (win ${inst.window ?? 0}·pane ${inst.pane ?? 0})`}
+                    title={`${d} · pane ${inst.paneId ?? ''} (win ${inst.window ?? 0}·pane ${inst.pane ?? 0})`}
                     onclick={() => onAttachClaude(s.name, inst)}
                   >
                     <span class="cbody">
                       <span class="cl1">
-                        <span class="cdot {inst.state}" aria-hidden="true"></span>
                         <span class="cdir">{inst.project ?? 'claude'}</span>
-                        <span class="cbadge {inst.state}">{badgeLabel(inst.state)}</span>
                       </span>
                       <span class="cloc mono">
                         <span>win {inst.window ?? 0} · pane {inst.pane ?? 0}</span>
-                        {#if inst.contextTokens != null}
-                          {@const pct = ctxPct(inst.contextTokens)}
-                          <span
-                            class="cctx"
-                            class:mid={pct >= 50 && pct < 80}
-                            class:hi={pct >= 80}
-                            title={`Context window: ${ctxLabel(inst.contextTokens)} / 200k tokens (${pct}%)`}
-                          >{ctxLabel(inst.contextTokens)}</span>
+                        {#if d === 'waiting' && inst.waitingFor}
+                          <span class="cwait">{inst.waitingFor}</span>
                         {/if}
                       </span>
-                      {#if inst.summary || inst.message}
-                        <span class="csum">{inst.message ?? inst.summary}</span>
-                      {/if}
                     </span>
+                    {@render statusIcon(d)}
                   </button>
                 {/each}
               </div>
@@ -417,7 +488,7 @@
   .cnode {
     position: relative;
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 0.5rem;
     width: 100%;
     text-align: left;
@@ -444,35 +515,25 @@
     align-items: center;
     gap: 0.5rem;
   }
-  /* Status dot — the at-a-glance colour. `working` breathes so a live Claude
-     reads as live; the rest are steady. */
-  .cdot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
+  /* Status icon — the at-a-glance state. `working` spins (lucide loader); `read`
+     is a quiet filled check; the rest are outlined and coloured. */
+  .ci {
+    width: 14px;
+    height: 14px;
     flex: none;
-    background: var(--ink-faint);
   }
-  .cdot.working {
-    background: var(--run);
-    animation: cpulse 1.4s ease-in-out infinite;
+  .ci.working {
+    color: var(--accent);
+    animation: spin 0.9s linear infinite;
   }
-  .cdot.needs {
-    background: var(--warn);
+  .ci.waiting {
+    color: var(--warn);
   }
-  .cdot.done {
-    background: var(--run);
+  .ci.unread {
+    color: var(--run);
   }
-  @keyframes cpulse {
-    0%,
-    100% {
-      box-shadow: 0 0 0 0 rgba(163, 190, 140, 0.45);
-      opacity: 1;
-    }
-    50% {
-      box-shadow: 0 0 0 3px rgba(163, 190, 140, 0);
-      opacity: 0.55;
-    }
+  .ci.read {
+    color: var(--ink-faint);
   }
   /* Project folder — the primary label ("which project is this Claude in"). */
   .cdir {
@@ -495,52 +556,11 @@
     color: var(--ink-faint);
     margin-top: 0.1rem;
   }
-  /* Context-window fullness, pinned to the bottom-right of the row. Tints amber
-     past half-full and red past 80% so a nearly-compacting session stands out. */
-  .cctx {
+  /* When waiting, Claude's `waitingFor` reason sits at the row's right. */
+  .cwait {
     flex: none;
-    color: var(--ink-dim);
+    color: var(--warn);
     font-variant-numeric: tabular-nums;
-  }
-  .cctx.mid {
-    color: var(--warn);
-  }
-  .cctx.hi {
-    color: var(--danger);
-  }
-  .cbadge {
-    font-size: 8.5px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    padding: 0.05rem 0.3rem;
-    border-radius: 3px;
-    flex: none;
-  }
-  .cbadge.working {
-    color: var(--run);
-    background: rgba(163, 190, 140, 0.14);
-  }
-  .cbadge.needs {
-    color: var(--warn);
-    background: rgba(235, 203, 139, 0.14);
-  }
-  .cbadge.done {
-    color: var(--run);
-    background: rgba(163, 190, 140, 0.14);
-  }
-  .cbadge.unknown {
-    color: var(--ink-faint);
-    background: var(--surface-2);
-  }
-  .csum {
-    font-size: 11px;
-    color: var(--ink-dim);
-    margin-top: 0.2rem;
-    line-height: 1.35;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .tnote {
     padding: 0.3rem 0.45rem;

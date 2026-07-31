@@ -120,20 +120,16 @@ export interface ClaudeInstance {
   window?: number
   windowName?: string
   pane?: number
-  // State = kind of the most recent hook event:
-  //   'working' = generating now (last event a UserPromptSubmit)
-  //   'needs'   = blocked on a permission prompt
-  //   'done'    = finished its turn (a Stop or idle prompt)
-  //   'unknown' = process alive but no events (e.g. started before the hook)
-  state: 'working' | 'needs' | 'done' | 'unknown'
-  kind?: string
-  notificationType?: string
-  message?: string
-  summary?: string
+  // Objective state from Claude's own ~/.claude/sessions/<pid>.json:
+  //   'working' = busy/shell (generating or running a tool)
+  //   'waiting' = blocked on a HITL prompt (see waitingFor)
+  //   'idle'    = at the prompt; the tree derives read/unread from statusUpdatedAt
+  status: 'working' | 'waiting' | 'idle'
+  waitingFor?: string
+  // Epoch ms Claude last changed status — the pivot for read/unread.
+  statusUpdatedAt?: number
+  sessionId?: string
   project?: string
-  // Context-window tokens on the last turn (input + cache). Absent when the
-  // pane was found by command scan only (no hook event to read the transcript).
-  contextTokens?: number
 }
 export interface ClaudeSession {
   name: string
@@ -238,6 +234,34 @@ export const openBrowser = (
 
 export const stopProxy = (id: string): Promise<Response> =>
   fetch(`${base(id)}/proxy`, { method: 'DELETE' }).then(ok)
+
+// -- Embedded (in-tab) browser — desktop shell only ----------------------
+
+export interface Rect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/** Runtime capabilities the UI branches on; `embeddedBrowser` is desktop-only. */
+export const getFeatures = (): Promise<{ embeddedBrowser: boolean }> =>
+  fetch('/api/features').then(ok).then((r) => r.json())
+
+/** Ensure the host SOCKS proxy and show the native child webview over `rect`. */
+export const embedBrowser = (id: string, url: string, rect: Rect): Promise<{ socksPort: number }> =>
+  fetch(`${base(id)}/browser/embed`, { method: 'POST', headers: json, body: JSON.stringify({ url, rect }) })
+    .then(ok)
+    .then((r) => r.json())
+
+type BrowserControl =
+  | { action: 'bounds'; rect: Rect }
+  | { action: 'navigate'; url: string }
+  | { action: 'back' | 'forward' | 'reload' | 'show' | 'hide' | 'close' }
+
+/** Drive the single live embedded webview. */
+export const browserControl = (body: BrowserControl): Promise<Response> =>
+  fetch('/api/browser/control', { method: 'POST', headers: json, body: JSON.stringify(body) }).then(ok)
 
 // -- Tunnels (global) -----------------------------------------------------
 

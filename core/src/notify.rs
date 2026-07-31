@@ -399,17 +399,14 @@ pub async fn events(
 }
 
 /// `GET /api/servers/{id}/tmux/claude` — Claude instances grouped by tmux
-/// session, for the nested sidebar tree. A pane counts as Claude if tmux reports
-/// its command as `claude` **or** it has fired a hook event — the command scan
-/// catches long-lived sessions that started before the hook was installed (which
-/// events alone miss entirely), while events add live `state`/summary. Location
-/// comes from the live pane list (correct even after a window rename). `state` is
-/// the kind of the most recent event: `working` (a `prompt` or `tool` — generating
-/// now, incl. resumed after a permission was approved), `needs` (a permission
-/// prompt — blocked), `done` (a `stop`/idle prompt — your move), or `unknown`
-/// (process alive but no events, e.g. it started before the hook). Sessions
-/// without any live Claude are simply absent (the UI
-/// merges this with the full session list from `/tmux`).
+/// session, for the nested sidebar tree. State comes from Claude's own live
+/// status file, `~/.claude/sessions/<pid>.json` (`status`): `working` (`busy` or
+/// `shell` — generating or running a tool), `waiting` (a blocking HITL prompt,
+/// with `waitingFor` detail), or `idle` (at the prompt — the frontend splits idle
+/// into read/unread against `statusUpdatedAt`). Each file is correlated to a pane
+/// via the Claude pid's tty (matching `#{pane_tty}`) or its parent chain reaching
+/// a `#{pane_pid}`; a Claude in a plain shell (no tmux) has no pane and is absent.
+/// The UI merges this with the full session list from `/tmux`.
 pub async fn claude_inventory(
     State(_): State<AppState>,
     Path(id): Path<String>,
@@ -417,13 +414,14 @@ pub async fn claude_inventory(
     if let Err(e) = guard(&id) {
         return e;
     }
-    // One round trip: recent notify lines, a marker, then the live pane table.
-    // 1500 lines (not 500) so a single tool-chatty pane can't scroll another
-    // pane's latest state event out of the window before we read it.
-    let cmd = "tail -n 1500 \"$HOME/.ism/notify.jsonl\" 2>/dev/null; \
+    // One round trip: Claude's session-status files (state), the live process
+    // table (liveness + tty for mapping), then the live pane table (location).
+    let cmd = "for f in \"$HOME\"/.claude/sessions/*.json; do [ -f \"$f\" ] && cat \"$f\" && echo; done 2>/dev/null; \
+        echo '===PS==='; \
+        ps -eo pid,ppid,tty,comm 2>/dev/null; \
         echo '===PANES==='; \
         tmux list-panes -a -F \
-        '#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}' \
+        '#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_tty}\t#{pane_pid}' \
         2>/dev/null";
     let r = ssh::exec(Target::Remote(&id), cmd, Duration::from_secs(15)).await;
     if !r.ok && r.stdout.trim().is_empty() {
@@ -434,121 +432,177 @@ pub async fn claude_inventory(
         };
         return (StatusCode::OK, Json(json!({ "available": false, "reason": hint })));
     }
-    let (log, panes) = r.stdout.split_once("===PANES===").unwrap_or((&r.stdout, ""));
-    (StatusCode::OK, Json(json!({ "available": true, "sessions": build_inventory(log, panes) })))
+    let (sessions, rest) = r.stdout.split_once("===PS===").unwrap_or((r.stdout.as_str(), ""));
+    let (ps, panes) = rest.split_once("===PANES===").unwrap_or((rest, ""));
+    (StatusCode::OK, Json(json!({ "available": true, "sessions": build_inventory(sessions, ps, panes) })))
 }
 
-/// A live pane from `tmux list-panes` (see the format in `claude_inventory`).
+/// A live pane from `tmux list-panes` (see the format in `claude_inventory`):
+/// `session \t window_index \t window_name \t pane_index \t pane_id \t pane_tty
+/// \t pane_pid`.
 struct PaneInfo {
     session: String,
     window: u32,
     window_name: String,
     pane: u32,
-    command: String,
-    /// `pane_current_path` — the pane's live cwd, so an idle Claude still shows
-    /// its project folder even with no hook event to read a cwd from.
-    path: String,
 }
 
-/// Pure core of `claude_inventory`, split out so it's testable without SSH: given
-/// the raw notify log and the live pane table, return the `sessions` array. A pane
-/// is Claude if its command is `claude` or it has a matching event; the event (if
-/// any) supplies state + summary, the live pane supplies location.
-fn build_inventory(log: &str, panes: &str) -> Vec<Value> {
-    // Live panes, in tmux's own order (used as a stable tiebreaker).
+/// A live process row from `ps -eo pid,ppid,tty,comm`.
+struct ProcInfo {
+    ppid: u32,
+    /// Controlling tty, normalized (no `/dev/` prefix).
+    tty: String,
+    comm: String,
+}
+
+/// A parsed Claude session-status file, `~/.claude/sessions/<pid>.json`. Claude
+/// writes and live-updates this itself — the authoritative state signal.
+#[derive(Deserialize)]
+struct SessionFile {
+    pid: u32,
+    #[serde(default)]
+    status: String,
+    #[serde(rename = "waitingFor", default)]
+    waiting_for: Option<String>,
+    #[serde(default)]
+    cwd: String,
+    #[serde(rename = "statusUpdatedAt", default)]
+    status_updated_at: u64,
+    #[serde(rename = "sessionId", default)]
+    session_id: String,
+}
+
+/// Strip a leading `/dev/` so `ps` ttys (`ttys007`, `pts/3`) and tmux
+/// `#{pane_tty}` (`/dev/ttys007`, `/dev/pts/3`) compare equal.
+fn norm_tty(t: &str) -> String {
+    t.trim().trim_start_matches("/dev/").to_string()
+}
+
+/// Executable basename of a `ps` comm, without a login shell's leading `-`.
+fn comm_base(comm: &str) -> &str {
+    comm.trim().rsplit('/').next().unwrap_or("").trim_start_matches('-')
+}
+
+/// Claude's `status` → our tree state. `busy`/`shell` (generating or running a
+/// tool) are both `working`; `waiting` is a blocking HITL prompt; anything else
+/// (`idle`, empty) is `idle` — the frontend splits idle into read/unread.
+fn map_status(status: &str) -> &'static str {
+    match status {
+        "busy" | "shell" => "working",
+        "waiting" => "waiting",
+        _ => "idle",
+    }
+}
+
+/// Walk `pid`'s parent chain until an ancestor is some pane's `pane_pid` — the
+/// fallback mapping when a Claude process has no controlling tty to match on.
+fn pane_via_ppid(
+    mut pid: u32,
+    procs: &HashMap<u32, ProcInfo>,
+    by_pane_pid: &HashMap<u32, String>,
+) -> Option<String> {
+    for _ in 0..32 {
+        if let Some(pane) = by_pane_pid.get(&pid) {
+            return Some(pane.clone());
+        }
+        let pr = procs.get(&pid)?;
+        if pr.ppid == 0 || pr.ppid == pid {
+            return None;
+        }
+        pid = pr.ppid;
+    }
+    None
+}
+
+/// Pure core of `claude_inventory`, split out so it's testable without SSH.
+/// Correlates Claude's own session-status files (state) with the live process
+/// table (liveness + tty) and tmux panes (location): a session file maps to a
+/// pane by matching the Claude pid's tty to `#{pane_tty}`, or by its parent chain
+/// reaching a `#{pane_pid}`. A file whose pid is dead (stale) or reused by a
+/// non-`claude` process is dropped; a Claude with no matching pane (a plain SSH
+/// shell, not tmux) is simply absent from the tree.
+fn build_inventory(sessions: &str, ps: &str, panes: &str) -> Vec<Value> {
+    // Live processes: pid -> {ppid, tty, comm}.
+    let mut procs: HashMap<u32, ProcInfo> = HashMap::new();
+    for line in ps.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(ppid), Some(tty)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else { continue }; // skips the header row
+        let comm = it.collect::<Vec<_>>().join(" ");
+        procs.insert(pid, ProcInfo { ppid: ppid.parse().unwrap_or(0), tty: norm_tty(tty), comm });
+    }
+
+    // Live panes, in tmux's own order (a stable child order), plus tty/pane_pid
+    // lookup tables for mapping.
     let mut order: Vec<String> = Vec::new();
     let mut by_pane: HashMap<String, PaneInfo> = HashMap::new();
+    let mut by_tty: HashMap<String, String> = HashMap::new();
+    let mut by_pane_pid: HashMap<u32, String> = HashMap::new();
     for l in panes.lines() {
         let f: Vec<&str> = l.split('\t').collect();
-        if f.len() < 6 {
+        if f.len() < 7 {
             continue;
         }
-        let pid = f[4].trim().to_string();
-        if pid.is_empty() {
+        let pane_id = f[4].trim().to_string();
+        if pane_id.is_empty() {
             continue;
         }
-        order.push(pid.clone());
+        order.push(pane_id.clone());
+        by_tty.insert(norm_tty(f[5]), pane_id.clone());
+        if let Ok(pp) = f[6].trim().parse::<u32>() {
+            by_pane_pid.insert(pp, pane_id.clone());
+        }
         by_pane.insert(
-            pid,
+            pane_id,
             PaneInfo {
                 session: f[0].to_string(),
                 window: f[1].trim().parse().unwrap_or(0),
                 window_name: f[2].to_string(),
                 pane: f[3].trim().parse().unwrap_or(0),
-                command: f[5].trim().to_string(),
-                path: f.get(6).map(|s| s.trim().to_string()).unwrap_or_default(),
             },
         );
     }
 
-    // Latest event per pane id (a later line overwrites the earlier one).
-    let mut ev_by_pane: HashMap<String, NotifyEvent> = HashMap::new();
-    for line in log.lines() {
-        let Some(ev) = parse_event(line) else { continue };
-        let Some(pid) = ev.pane_id.clone() else { continue };
-        ev_by_pane.insert(pid, ev);
-    }
-
-    // Build instances for every live Claude pane, grouped by session. Children
-    // keep tmux's own pane order (the order `order` was read from list-panes) so a
-    // row never jumps position when its state changes — it stays where it sits in
-    // the actual tmux layout.
-    let mut by_sess: HashMap<String, Vec<Value>> = HashMap::new();
-    for pid in &order {
-        let info = &by_pane[pid];
-        let ev = ev_by_pane.get(pid);
-        if info.command != "claude" && ev.is_none() {
+    // Map each live Claude session file to a pane (1:1 — one pty per pane).
+    let mut sess_by_pane: HashMap<String, SessionFile> = HashMap::new();
+    for line in sessions.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
             continue;
         }
-        // State = the kind of the pane's most recent event.
-        let (state, kind, notif, message, summary, project) = match ev {
-            Some(e) => {
-                let st = match e.kind.as_str() {
-                    // A prompt (turn started) or a tool that just ran (turn still
-                    // going, e.g. resumed after you approved a permission) → busy.
-                    "prompt" | "tool" => "working",
-                    // A permission prompt blocks Claude; an idle prompt just means
-                    // it's been waiting on you — treat idle like "done" (your move).
-                    "notification" => {
-                        if e.notification_type.as_deref() == Some("permission_prompt") {
-                            "needs"
-                        } else {
-                            "done"
-                        }
-                    }
-                    "stop" => "done",
-                    _ => "unknown",
-                };
-                (
-                    st,
-                    Some(e.kind.clone()),
-                    e.notification_type.clone(),
-                    e.message.clone(),
-                    e.summary.clone(),
-                    e.project.clone(),
-                )
-            }
-            None => ("unknown", None, None, None, None, None),
-        };
-        // Folder name: the live pane cwd's basename (always available), falling
-        // back to the event's project. This is the "which project" label.
-        let dir = info.path.rsplit('/').next().map(str::trim).filter(|s| !s.is_empty());
-        let project = dir.map(String::from).or(project);
-        // How full the context window is — from the pane's latest event (the hook
-        // reads it off the transcript). `null` for command-scan-only panes.
-        let context = ev.and_then(|e| e.context_tokens);
+        let Ok(sf) = serde_json::from_str::<SessionFile>(line) else { continue };
+        // Liveness + recycled-pid guard: the pid must be an alive `claude`.
+        let Some(pr) = procs.get(&sf.pid) else { continue };
+        if comm_base(&pr.comm) != "claude" {
+            continue;
+        }
+        let pane = by_tty
+            .get(&pr.tty)
+            .cloned()
+            .or_else(|| pane_via_ppid(sf.pid, &procs, &by_pane_pid));
+        if let Some(pane_id) = pane {
+            sess_by_pane.entry(pane_id).or_insert(sf);
+        }
+    }
+
+    // Emit instances in tmux pane order, grouped by session.
+    let mut by_sess: HashMap<String, Vec<Value>> = HashMap::new();
+    for pane_id in &order {
+        let Some(sf) = sess_by_pane.get(pane_id) else { continue };
+        let info = &by_pane[pane_id];
+        let project = sf.cwd.rsplit('/').next().map(str::trim).filter(|s| !s.is_empty());
         let c = json!({
-            "paneId": pid,
+            "paneId": pane_id,
             "window": info.window,
             "windowName": info.window_name,
             "pane": info.pane,
-            "state": state,
-            "kind": kind,
-            "notificationType": notif,
-            "message": message,
-            "summary": summary,
+            "status": map_status(&sf.status),
+            "waitingFor": sf.waiting_for,
+            "statusUpdatedAt": sf.status_updated_at,
+            "sessionId": sf.session_id,
             "project": project,
-            "contextTokens": context,
         });
         by_sess.entry(info.session.clone()).or_default().push(c);
     }
@@ -883,68 +937,59 @@ mod tests {
         assert_eq!(empty.context_tokens, None);
     }
 
-    // Modelled on real capture from host jtl-anhnguyen: `pham` runs two Claude
-    // panes that never fired the (recently installed) hook, plus an event-bearing
-    // wrapper session. The command scan must surface pham; events supply state.
+    // Real capture (2026-07-31, CLI 2.1.220): the four `status` values map to the
+    // three host states, each session file correlated to its pane by tty.
     #[test]
-    fn inventory_surfaces_running_claude_without_events() {
+    fn session_file_status_maps_to_states() {
+        let sessions = "\
+{\"pid\":101,\"cwd\":\"/home/u/alpha\",\"status\":\"busy\",\"statusUpdatedAt\":10,\"sessionId\":\"a\"}
+{\"pid\":102,\"cwd\":\"/home/u/beta\",\"status\":\"shell\",\"statusUpdatedAt\":20,\"sessionId\":\"b\"}
+{\"pid\":103,\"cwd\":\"/home/u/gamma\",\"status\":\"waiting\",\"waitingFor\":\"input needed\",\"statusUpdatedAt\":30,\"sessionId\":\"c\"}
+{\"pid\":104,\"cwd\":\"/home/u/delta\",\"status\":\"idle\",\"statusUpdatedAt\":40,\"sessionId\":\"d\"}";
+        let ps = "\
+  PID  PPID TTY      COMM
+  101   91 pts/1    claude
+  102   92 pts/2    claude
+  103   93 pts/3    claude
+  104   94 pts/4    claude";
         let panes = "\
-pham\t0\teditor\t0\t%3\tclaude\t/home/anhnguyen/webshop
-pham\t0\teditor\t1\t%21\tclaude\t/home/anhnguyen/webshop
-pham\t1\tshell\t0\t%27\tbash\t/home/anhnguyen
-rcw-24798257\t0\tbash\t0\t%0\tbash\t/home/anhnguyen/JTLInfra
-khoa\t0\tmain\t0\t%6\tclaude\t/home/anhnguyen/khoa-proj";
-        // Only the wrapper session ever fired an event (with a pane location).
-        let log = "stop\trcw-24798257\t0|bash|0|%0\t{\"cwd\":\"/home/anhnguyen/JTLInfra\",\"last_assistant_message\":\"all done\"}";
-        let sessions = build_inventory(log, panes);
-
-        // Sessions present: khoa, pham, rcw-24798257 (sorted); shell-only sessions absent.
-        let names: Vec<&str> = sessions.iter().map(|s| s["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["khoa", "pham", "rcw-24798257"]);
-
-        // pham: two Claude panes, both `unknown` (running, no event), bash pane excluded.
-        let pham = &sessions[1]["claude"];
-        assert_eq!(pham.as_array().unwrap().len(), 2);
-        assert_eq!(pham[0]["state"], "unknown");
-        // Folder name comes from the live pane cwd, even with no event.
-        assert_eq!(pham[0]["project"], "webshop");
-        let pham_panes: Vec<&str> = pham.as_array().unwrap().iter().map(|c| c["paneId"].as_str().unwrap()).collect();
-        assert!(pham_panes.contains(&"%3") && pham_panes.contains(&"%21"));
-        assert!(!pham_panes.contains(&"%27"));
-
-        // The wrapper session carries its event state + summary.
-        let rcw = &sessions[2]["claude"];
-        assert_eq!(rcw[0]["state"], "done");
-        assert_eq!(rcw[0]["summary"], "all done");
+s\t0\tmain\t0\t%1\t/dev/pts/1\t91
+s\t0\tmain\t1\t%2\t/dev/pts/2\t92
+s\t0\tmain\t2\t%3\t/dev/pts/3\t93
+s\t0\tmain\t3\t%4\t/dev/pts/4\t94";
+        let inv = build_inventory(sessions, ps, panes);
+        assert_eq!(inv.len(), 1);
+        assert_eq!(inv[0]["name"], "s");
+        let claude = inv[0]["claude"].as_array().unwrap();
+        let states: Vec<&str> = claude.iter().map(|c| c["status"].as_str().unwrap()).collect();
+        assert_eq!(states, ["working", "working", "waiting", "idle"]);
+        assert_eq!(claude[2]["waitingFor"], "input needed");
+        assert_eq!(claude[2]["statusUpdatedAt"], 30);
+        assert_eq!(claude[0]["project"], "alpha");
+        assert_eq!(claude[0]["paneId"], "%1");
     }
 
-    // The whole point of the UserPromptSubmit hook: a `prompt` as the pane's most
-    // recent event means Claude is generating *right now* — distinct from `done`
-    // (its last event was a Stop) even though the process is alive in both.
+    // A Claude in a plain SSH shell (no tmux) has a live session file and pid but
+    // no pane on its tty → absent from the tmux-grouped tree. Modelled on the real
+    // capture: pid 18987 (tmux, ttys007) shows; pid 54048 (this agent, ttys008, no
+    // pane) does not. `pane_current_command` is the `2.1.220` title — never matched.
     #[test]
-    fn most_recent_event_drives_state_working_needs_done() {
-        let panes = "\
-work\t0\tmain\t0\t%1\tclaude\t/home/u/alpha
-wait\t0\tmain\t0\t%2\tclaude\t/home/u/beta
-fin\t0\tmain\t0\t%3\tclaude\t/home/u/gamma";
-        // %1: prompt after its stop → working. %2: permission prompt → needs.
-        // %3: a stop that came after an earlier prompt → done (recency wins).
-        let log = "\
-stop\twork\t0|main|0|%1\t{\"cwd\":\"/home/u/alpha\"}
-prompt\twork\t0|main|0|%1\t{\"cwd\":\"/home/u/alpha\"}
-notification\twait\t0|main|0|%2\t{\"cwd\":\"/home/u/beta\",\"notification_type\":\"permission_prompt\"}
-prompt\tfin\t0|main|0|%3\t{\"cwd\":\"/home/u/gamma\"}
-stop\tfin\t0|main|0|%3\t106265\t{\"cwd\":\"/home/u/gamma\",\"last_assistant_message\":\"finished\"}";
-        let sessions = build_inventory(log, panes);
-        let by = |name: &str| {
-            sessions.iter().find(|s| s["name"] == name).unwrap()["claude"][0].clone()
-        };
-        assert_eq!(by("work")["state"], "working");
-        assert_eq!(by("wait")["state"], "needs");
-        assert_eq!(by("fin")["state"], "done");
-        assert_eq!(by("fin")["summary"], "finished");
-        // The context-window size rides along on the pane's latest event.
-        assert_eq!(by("fin")["contextTokens"], 106265);
+    fn non_tmux_claude_is_absent() {
+        let sessions = "\
+{\"pid\":18987,\"cwd\":\"/home/u/proj\",\"status\":\"waiting\",\"waitingFor\":\"input needed\",\"statusUpdatedAt\":5,\"sessionId\":\"x\"}
+{\"pid\":54048,\"cwd\":\"/home/u/proj\",\"status\":\"busy\",\"statusUpdatedAt\":9,\"sessionId\":\"y\"}";
+        let ps = "\
+18987 18502 ttys007  claude
+54048 50310 ttys008  claude
+18502 18501 ttys007  -zsh";
+        let panes = "hi\t0\t2.1.220\t0\t%0\t/dev/ttys007\t18502";
+        let inv = build_inventory(sessions, ps, panes);
+        assert_eq!(inv.len(), 1);
+        assert_eq!(inv[0]["name"], "hi");
+        let claude = inv[0]["claude"].as_array().unwrap();
+        assert_eq!(claude.len(), 1);
+        assert_eq!(claude[0]["paneId"], "%0");
+        assert_eq!(claude[0]["status"], "waiting");
     }
 
     #[test]
@@ -961,44 +1006,61 @@ stop\tfin\t0|main|0|%3\t106265\t{\"cwd\":\"/home/u/gamma\",\"last_assistant_mess
         assert!(removed.get("hooks").is_none(), "{removed}");
     }
 
-    // Children keep tmux's pane order no matter their state — a row must never
-    // jump position when it changes state. Panes here are laid out done, needs,
-    // working; the result must stay in that (tmux) order, not be state-sorted.
+    // Stale files (pid gone) and recycled pids (pid now a non-claude process) must
+    // never produce a phantom "running" Claude.
     #[test]
-    fn children_keep_tmux_pane_order_regardless_of_state() {
-        let panes = "\
-s\t0\tmain\t0\t%10\tclaude\t/home/u/a
-s\t0\tmain\t1\t%11\tclaude\t/home/u/b
-s\t0\tmain\t2\t%12\tclaude\t/home/u/c";
-        let log = "\
-stop\ts\t0|main|0|%10\t{\"cwd\":\"/home/u/a\"}
-notification\ts\t0|main|1|%11\t{\"cwd\":\"/home/u/b\",\"notification_type\":\"permission_prompt\"}
-prompt\ts\t0|main|2|%12\t{\"cwd\":\"/home/u/c\"}";
-        let claude = build_inventory(log, panes)[0]["claude"].clone();
-        let ids: Vec<&str> = claude.as_array().unwrap().iter().map(|c| c["paneId"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["%10", "%11", "%12"], "must follow tmux pane order");
-        let states: Vec<&str> = claude.as_array().unwrap().iter().map(|c| c["state"].as_str().unwrap()).collect();
-        assert_eq!(states, ["done", "needs", "working"]);
+    fn stale_and_recycled_pids_excluded() {
+        let sessions = "\
+{\"pid\":200,\"cwd\":\"/home/u/dead\",\"status\":\"busy\",\"statusUpdatedAt\":1,\"sessionId\":\"m\"}
+{\"pid\":201,\"cwd\":\"/home/u/reused\",\"status\":\"busy\",\"statusUpdatedAt\":2,\"sessionId\":\"n\"}";
+        // 200 is absent from ps (dead); 201 is alive but now `vim`, not claude.
+        let ps = "\
+201  100 pts/1    vim
+100   99 pts/1    -bash";
+        let panes = "s\t0\tmain\t0\t%1\t/dev/pts/1\t100";
+        assert!(build_inventory(sessions, ps, panes).is_empty());
     }
 
-    // The bug this fixes: after a permission notification (`needs`), approving it
-    // makes Claude run the tool — a `tool` event lands *after* the notification and
-    // must flip the pane back to `working`. Without the PostToolUse hook the state
-    // stayed stuck on `needs` until the turn's eventual Stop.
+    // No controlling tty on the Claude pid (`??`) → fall back to the parent chain:
+    // claude 300 -> ppid 100 == the pane's pane_pid.
     #[test]
-    fn tool_event_clears_a_pending_permission() {
-        let panes = "sess\t0\tmain\t0\t%5\tclaude\t/home/u/proj";
-        let needs_then_tool = "\
-notification\tsess\t0|main|0|%5\t{\"cwd\":\"/home/u/proj\",\"notification_type\":\"permission_prompt\"}
-tool\tsess\t0|main|0|%5\t\t{}";
-        let s = build_inventory(needs_then_tool, panes);
-        assert_eq!(s[0]["claude"][0]["state"], "working");
+    fn maps_via_ppid_when_tty_absent() {
+        let sessions =
+            "{\"pid\":300,\"cwd\":\"/home/u/proj\",\"status\":\"busy\",\"statusUpdatedAt\":1,\"sessionId\":\"p\"}";
+        let ps = "\
+300  100 ??       claude
+100   99 pts/9    -zsh";
+        let panes = "s\t0\tmain\t0\t%9\t/dev/pts/9\t100";
+        let inv = build_inventory(sessions, ps, panes);
+        assert_eq!(inv[0]["claude"][0]["paneId"], "%9");
+        assert_eq!(inv[0]["claude"][0]["status"], "working");
+    }
 
-        // Order matters: a tool *before* the permission must NOT hide the `needs`.
-        let tool_then_needs = "\
-tool\tsess\t0|main|0|%5\t\t{}
-notification\tsess\t0|main|0|%5\t{\"cwd\":\"/home/u/proj\",\"notification_type\":\"permission_prompt\"}";
-        let s = build_inventory(tool_then_needs, panes);
-        assert_eq!(s[0]["claude"][0]["state"], "needs");
+    // Children stay in tmux pane order; sessions are sorted by name.
+    #[test]
+    fn children_follow_pane_order_sessions_sorted() {
+        let sessions = "\
+{\"pid\":10,\"cwd\":\"/a\",\"status\":\"idle\",\"statusUpdatedAt\":1,\"sessionId\":\"1\"}
+{\"pid\":11,\"cwd\":\"/b\",\"status\":\"waiting\",\"statusUpdatedAt\":2,\"sessionId\":\"2\"}
+{\"pid\":12,\"cwd\":\"/c\",\"status\":\"busy\",\"statusUpdatedAt\":3,\"sessionId\":\"3\"}
+{\"pid\":20,\"cwd\":\"/z\",\"status\":\"busy\",\"statusUpdatedAt\":4,\"sessionId\":\"4\"}";
+        let ps = "\
+10 1 pts/0 claude
+11 1 pts/1 claude
+12 1 pts/2 claude
+20 1 pts/9 claude";
+        // zzz's pane is listed before aaa's; the session list must come back
+        // name-sorted, and aaa's three panes must stay in pane order 0,1,2.
+        let panes = "\
+zzz\t0\tmain\t0\t%9\t/dev/pts/9\t20
+aaa\t0\tmain\t0\t%0\t/dev/pts/0\t10
+aaa\t0\tmain\t1\t%1\t/dev/pts/1\t11
+aaa\t0\tmain\t2\t%2\t/dev/pts/2\t12";
+        let inv = build_inventory(sessions, ps, panes);
+        let names: Vec<&str> = inv.iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["aaa", "zzz"]);
+        let ids: Vec<&str> =
+            inv[0]["claude"].as_array().unwrap().iter().map(|c| c["paneId"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["%0", "%1", "%2"]);
     }
 }
