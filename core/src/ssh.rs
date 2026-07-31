@@ -15,7 +15,11 @@ use portable_pty::CommandBuilder;
 /// multiplexing, so nothing there builds a control path.
 #[cfg(unix)]
 pub fn control_path(alias: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
+    // macOS `$TMPDIR` is ~49 chars (`/var/folders/…/T/`), and `ssh` appends a
+    // random `.XXXXXXXXXXXXXXXX` suffix when creating the master socket. Together
+    // that overruns the 104-byte `sun_path` limit for longer aliases, so we use a
+    // short, fixed base dir instead of `std::env::temp_dir()`.
+    let mut p = PathBuf::from("/tmp");
     p.push(format!("ism-{}-{}.ctl", std::process::id(), alias));
     p
 }
