@@ -63,3 +63,35 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+---
+
+## Project ops: desktop build & install loop
+
+To see changes in the installed macOS app, rebuild and reinstall. The trap: `cargo tauri build` has **no `beforeBuildCommand`**, so it does **not** rebuild the frontend, and rust-embed (`Assets` in `core/src/lib.rs`, `#[folder = "../web/dist"]`) will **not** re-embed changed assets unless `core` recompiles.
+
+```bash
+# 1. Frontend  — ONLY if you changed web/**   (`npm run check` does NOT emit dist)
+cd web && npm run build
+# 2. Force re-embed — ONLY if web/dist changed
+touch core/src/lib.rs
+# 3. Bundle (from repo root; watch for "Compiling core")
+cargo tauri build
+# 4. Install + relaunch
+osascript -e 'tell application "iShowManagement" to quit'
+rm -rf /Applications/iShowManagement.app
+ditto target/release/bundle/macos/iShowManagement.app /Applications/iShowManagement.app
+open /Applications/iShowManagement.app
+# 5. Verify the running app serves the new build
+curl -s http://127.0.0.1:7070/ | grep -oE 'index-[A-Za-z0-9_]+\.js'
+```
+
+| Changed | Steps |
+|---|---|
+| Frontend only (`web/**`) | 1 → 2 → 3 → 4 |
+| Rust only (`core/`, `desktop/`) | 3 → 4 (cargo recompiles Rust automatically) |
+| Both | 1 → 2 → 3 → 4 |
+
+- **Verify via the running app** (`:7070`, step 5) or by `curl`-ing an asset — do **not** `grep` the built binary; embedded assets aren't greppable there.
+- **Claude tmux tree / status / context features only query remote hosts** (`claude_inventory` rejects the local host), so a connected remote host is needed to see them; pure UI tweaks show anywhere.
+- **Release:** bump `desktop/tauri.conf.json` version, commit, then `git tag vX.Y.Z && git push origin vX.Y.Z` — the tag triggers `release.yml` (which sets the version from the tag and builds the DMGs).
