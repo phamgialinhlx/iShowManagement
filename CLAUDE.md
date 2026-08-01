@@ -89,6 +89,37 @@ ui/                     React 19 + Tailwind 4 + motion
   list alone leaves them running with nothing able to reach them. `removeSession` sends
   `terminal_close` per tab and `claude_end_session` for `claude-<id>`.
 
+## Managing the host
+
+- **A pid crosses the IPC bridge as a `u32`.** This is the one place the operator points at
+  something on a machine and says "end that", so the argument must not be able to become a
+  shell fragment with a `kill` in front of it. Typing it out of the wire beats quoting it.
+  `0` and `1` are refused: `0` signals the whole process group, which would take out the
+  operator's own session.
+- **A kill reports its exit status, not just its output.** `kill` exits non-zero *and*
+  explains itself on stdout, so reading only the text — through `stdout_or_err`, which
+  refuses a non-zero status and yields nothing — reported a clean success for every failure.
+  On a shared dev box the usual failure is "Operation not permitted", and swallowing it makes
+  the row read as a process ignoring TERM rather than one never signalled. A test pins this
+  and fails when the check is reverted.
+- **`TERM` is the button and `KILL` is a separate, second choice.** `KILL` gives the process
+  no chance to flush or clean up, which on a dev host means a corrupted build or a stale lock.
+
+## Pasting an image into a remote Claude
+
+Claude Code reads images off the clipboard itself, which cannot work when it is on a server:
+that machine has no clipboard and no route to yours. So the bytes travel — the image is
+written to `~/.rmux/pastes` **on the target** (`0700` dir, `0600` file, because a pasted
+screenshot is frequently of something private), and its *path* is typed into the prompt.
+Claude reads a file you mention, which it can already do, identically local or remote — so
+there is no `if is_local` here.
+
+The bytes go through **stdin**, never argv: a screenshot is routinely a megabyte, base64
+inflates it by a third, and `ARG_MAX` caps a single argument at 128 KiB, so an argv version
+works for an icon and fails on anything real. Verified against a real host — same md5, `600`,
+recognised as a PNG. Like a browser report, the path is *typed* into the composer and never
+submitted.
+
 ## Design system — SIGNAL ROOM
 
 `ui/src/styles/signal-room.css` is the source of truth. Four rules, all load-bearing:

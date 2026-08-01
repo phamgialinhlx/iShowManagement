@@ -73,6 +73,9 @@ pub async fn metrics_processes(
     store: State<'_, MetricsStore>,
     target: TargetRef,
     by: SortBy,
+    // How many to return. The rail's donut labels five without its callouts
+    // colliding; the management view asks for many more.
+    limit: Option<usize>,
 ) -> Result<Vec<Process>, String> {
     let id = store.ensure(&target).await?;
     let mut monitored = store.inner().monitored.lock().await;
@@ -80,5 +83,25 @@ pub async fn metrics_processes(
     let entry = monitored.get_mut(&id).expect("just inserted");
     let Monitored { target, collector } = entry;
     // Five is what the donut can label without the callouts colliding.
-    collector.processes(target.as_ref(), by, 5).await.map_err(|e| e.to_string())
+    collector.processes(target.as_ref(), by, limit.unwrap_or(5)).await.map_err(|e| e.to_string())
+}
+
+/// Signal a process on the target.
+///
+/// `hard` picks `KILL` over `TERM`. Separate rather than a retry, because the
+/// difference matters on a dev host: `KILL` gives the process no chance to
+/// flush or clean up, which routinely means a corrupted build or a stale lock.
+#[tauri::command]
+pub async fn metrics_kill(
+    store: State<'_, MetricsStore>,
+    target: TargetRef,
+    pid: u32,
+    hard: bool,
+) -> Result<(), String> {
+    let id = store.ensure(&target).await?;
+    let mut monitored = store.inner().monitored.lock().await;
+
+    let entry = monitored.get_mut(&id).expect("just inserted");
+    let Monitored { target, collector } = entry;
+    collector.kill(target.as_ref(), pid, hard).await.map_err(|e| e.to_string())
 }

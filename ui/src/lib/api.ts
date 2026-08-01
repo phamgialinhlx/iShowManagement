@@ -317,8 +317,26 @@ export const api = {
   openSettings: () => call<void>("open_settings"),
 
   /** The heaviest processes on a host. Polled only while the widget is open. */
-  metricsProcesses: (target: TargetRef, by: "cpu" | "memory") =>
-    call<ProcessInfo[]>("metrics_processes", { target, by }),
+  metricsProcesses: (target: TargetRef, by: "cpu" | "memory", limit?: number) =>
+    call<ProcessInfo[]>("metrics_processes", { target, by, limit }),
+  /** Signal a process. `hard` sends KILL instead of TERM — see `Metrics::kill`. */
+  metricsKill: (target: TargetRef, pid: number, hard: boolean) =>
+    call<void>("metrics_kill", { target, pid, hard }),
+
+  /** What the target is listening on, so no port has to be known in advance. */
+  portsDiscover: (target: TargetRef) => call<ListeningPort[]>("ports_discover", { target }),
+  /** `ssh -L port:localhost:port`, making http://localhost:port reach the target. */
+  portForward: (target: TargetRef, port: number) =>
+    call<Forward>("port_forward", { target, port }),
+  portUnforward: (target: TargetRef, port: number) =>
+    call<void>("port_unforward", { target, port }),
+  portsForwarded: (target: TargetRef) => call<Forward[]>("ports_forwarded", { target }),
+  /** A SOCKS proxy onto the target — every port at once, plus its DNS. */
+  portProxy: (target: TargetRef) => call<number>("port_proxy", { target }),
+
+  /** Write a pasted image to the target; returns the path to mention to Claude. */
+  claudePasteImage: (target: TargetRef, data: string, kind: string) =>
+    call<{ path: string; bytes: number }>("claude_paste_image", { target, data, kind }),
 
   /** Jira connections the server has configured. Profile-level, so no
    *  server-side session row is required. */

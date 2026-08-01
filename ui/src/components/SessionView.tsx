@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { SessionSettings } from "./SessionSettings";
 import { JiraPanel } from "./JiraPanel";
+import { HostPanel } from "./HostPanel";
 import { invoke } from "@tauri-apps/api/core";
 
 import { ClaudePanel } from "./ClaudePanel";
@@ -30,7 +31,7 @@ import { gridLayout } from "../lib/grid";
 
 const TREE_KEY = "rmux.treeWidth";
 
-type View = "claude" | "transcript" | "files" | "terminal" | "jira" | "settings";
+type View = "claude" | "transcript" | "files" | "terminal" | "host" | "jira" | "settings";
 
 const readSize = (key: string, fallback: number) => {
   const raw = Number(localStorage.getItem(key));
@@ -423,6 +424,10 @@ export function SessionView({ session }: { session: Session }) {
         e.preventDefault();
         show("terminal");
       }
+      if (e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        show("host");
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -433,6 +438,7 @@ export function SessionView({ session }: { session: Session }) {
     { id: "transcript", label: "Transcript", hint: "⌘R" },
     { id: "files", label: "Files", hint: "⌘E" },
     { id: "terminal", label: "Terminal", hint: "⌘`" },
+    { id: "host", label: "Host", hint: "⌘H" },
     // Only once a project is assigned. A tab that is always there but empty for
     // most sessions is a tab everyone learns to ignore.
     ...(session.jiraProject
@@ -519,6 +525,15 @@ export function SessionView({ session }: { session: Session }) {
             style={{ display: view === "terminal" ? "block" : "none" }}
           >
             <TerminalsView session={session} />
+          </div>
+        )}
+
+        {visited.has("host") && (
+          <div
+            className="absolute inset-0"
+            style={{ display: view === "host" ? "block" : "none" }}
+          >
+            <HostPanel session={session} />
           </div>
         )}
 

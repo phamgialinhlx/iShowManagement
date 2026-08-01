@@ -26,3 +26,74 @@ impl TunnelStore {
         Arc::clone(&self.forwards)
     }
 }
+
+/// What the target is listening on.
+///
+/// Discovered rather than typed, because requiring the number up front leaves
+/// the manual step this whole feature exists to remove. Ports below 1024 are
+/// filtered out by `parse_listening` — they are the machine's own services, not
+/// the app the operator just started.
+#[tauri::command]
+pub async fn ports_discover(
+    claude_store: tauri::State<'_, crate::claude::ClaudeStore>,
+    target: crate::terminal::TargetRef,
+) -> Result<Vec<rmux_ssh::forward::ListeningPort>, String> {
+    let resolved = crate::claude::resolve(&claude_store, &target).await?;
+
+    let out = resolved
+        .exec(
+            &rmux_transport::CommandSpec::new("sh")
+                .arg("-c")
+                .arg(rmux_ssh::forward::DISCOVER_SCRIPT)
+                .tty(rmux_transport::Tty::None),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // A host with neither `ss` nor `netstat` is not an error — it has nothing
+    // to report, and a port can still be forwarded by number.
+    Ok(rmux_ssh::forward::parse_listening(out.stdout_or_err().unwrap_or("")))
+}
+
+/// Open `ssh -L port:localhost:port`, so `http://localhost:<port>` reaches it.
+#[tauri::command]
+pub async fn port_forward(
+    store: tauri::State<'_, TunnelStore>,
+    target: crate::terminal::TargetRef,
+    port: u16,
+) -> Result<rmux_ssh::forward::Forward, String> {
+    Ok(store.forwards().start(target.host.as_deref(), port).await)
+}
+
+#[tauri::command]
+pub async fn port_unforward(
+    store: tauri::State<'_, TunnelStore>,
+    target: crate::terminal::TargetRef,
+    port: u16,
+) -> Result<(), String> {
+    store.forwards().stop(target.host.as_deref(), port).await;
+    Ok(())
+}
+
+/// Every tunnel currently open for a target.
+#[tauri::command]
+pub async fn ports_forwarded(
+    store: tauri::State<'_, TunnelStore>,
+    target: crate::terminal::TargetRef,
+) -> Result<Vec<rmux_ssh::forward::Forward>, String> {
+    Ok(store.forwards().list(target.host.as_deref()).await)
+}
+
+/// A SOCKS proxy onto the target — every port at once, and its DNS too.
+///
+/// Exposed to the UI so the operator can see the port and point something at
+/// it. rmux's own webview deliberately does not use it: there is one of it, and
+/// proxying it would route the app's own interface through the operator's
+/// server. See `Forwards::socks`.
+#[tauri::command]
+pub async fn port_proxy(
+    store: tauri::State<'_, TunnelStore>,
+    target: crate::terminal::TargetRef,
+) -> Result<u16, String> {
+    store.forwards().socks(target.host.as_deref()).await
+}

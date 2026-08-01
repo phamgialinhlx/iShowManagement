@@ -9,6 +9,7 @@ import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
 import { contextLimit, sniffWindow } from "../lib/context-window";
 import { useSessions } from "../lib/sessions";
 import { CLAUDE_THEME } from "../lib/terminal-theme";
+import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { ContextMeter } from "./ContextMeter";
 import { BrowserReports } from "./BrowserReports";
 import { attachClipboard, copyAll, copySelection, copyViewport } from "../lib/terminal-clipboard";
@@ -168,6 +169,45 @@ export function ClaudePanel({
   const [state, setState] = useState<ClaudeState>({ prompt: null, working: false });
   const [error, setError] = useState<string | null>(null);
   const [answering, setAnswering] = useState(false);
+  // Image paste. `dropping` only drives the overlay; `sending` is what the
+  // operator needs to see, because a screenshot to a remote host takes long
+  // enough that silence reads as nothing having happened.
+  const [dropping, setDropping] = useState(false);
+  const [sending, setSending] = useState<string | null>(null);
+
+  /**
+   * Put images on the target and type their paths into Claude.
+   *
+   * The paths are *typed*, not submitted — same rule as a browser report. The
+   * operator says what to do with the screenshot; rmux only carries it.
+   */
+  const sendImages = async (images: File[]) => {
+    const id = runningRef.current;
+    if (!id) {
+      setError("Claude is not running in this session yet.");
+      return;
+    }
+
+    setError(null);
+    setSending(
+      images.length === 1 ? "Sending the image…" : `Sending ${images.length} images…`,
+    );
+
+    try {
+      // Sequential on purpose. Each upload streams its bytes over the same ssh
+      // connection, so firing them together would interleave several megabytes
+      // on one channel and finish no sooner.
+      const paths: string[] = [];
+      for (const image of images) {
+        paths.push((await uploadImage(target, image)).path);
+      }
+      await invoke("claude_write", { id, data: promptFor(paths) });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSending(null);
+    }
+  };
 
   useEffect(() => {
     const host = hostRef.current;
@@ -419,7 +459,38 @@ export function ClaudePanel({
   };
 
   return (
-    <div className="flex h-full flex-col">
+    <div
+      className="relative flex h-full flex-col"
+      // Capture, so this runs before xterm's own paste handling on the textarea.
+      // Text pastes are left entirely alone — `imagesFrom` returns nothing for
+      // them and `preventDefault` is never called, so xterm handles them as it
+      // always has. Intercepting text here would be a second implementation of
+      // paste, which is exactly the bug that made every paste arrive twice.
+      onPasteCapture={(e) => {
+        const images = imagesFrom(e.clipboardData);
+        if (!images.length) return;
+        e.preventDefault();
+        void sendImages(images);
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
+        e.preventDefault();
+        setDropping(true);
+      }}
+      onDragLeave={(e) => {
+        // Only when the pointer actually left the pane. `dragleave` also fires
+        // crossing into a child, which would flicker the overlay constantly.
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setDropping(false);
+      }}
+      onDrop={(e) => {
+        const images = imagesFrom(e.dataTransfer);
+        setDropping(false);
+        if (!images.length) return;
+        e.preventDefault();
+        void sendImages(images);
+      }}
+    >
       <header
         className="flex shrink-0 items-center gap-3 border-b px-3 py-1"
         style={{ borderColor: "var(--border)" }}
@@ -583,6 +654,40 @@ export function ClaudePanel({
       {/* What a connected browser sent back for this session. Empty, and takes
           no space, until something arrives. */}
       <BrowserReports sessionId={sessionId} claudeId={claudeId} />
+
+      {/* An image on its way to the target. Worth saying out loud: a screenshot
+          over ssh takes seconds, and Claude's pane looks identical while it
+          happens. */}
+      {sending && (
+        <div
+          className="flex shrink-0 items-center gap-2 border-b px-3 py-1"
+          style={{ borderColor: "var(--border)", background: "var(--hover)" }}
+        >
+          <span className="micro" style={{ color: "rgb(var(--busy))" }}>
+            {sending.toUpperCase()}
+          </span>
+          <span className="micro" style={{ color: "var(--text-faint)" }}>
+            → {target.host ?? "this machine"}
+          </span>
+        </div>
+      )}
+
+      {/* The drop target. Pointer-events off so it cannot swallow the drop it
+          is advertising. */}
+      {dropping && (
+        <div
+          className="pointer-events-none absolute inset-0 z-20 grid place-items-center"
+          style={{
+            background: "color-mix(in srgb, var(--app-panel) 70%, transparent)",
+            outline: "1px dashed var(--border-strong)",
+            outlineOffset: -6,
+          }}
+        >
+          <span className="micro" style={{ color: "var(--text)" }}>
+            DROP TO SEND TO {(target.host ?? "this machine").toUpperCase()}
+          </span>
+        </div>
+      )}
 
       <div className="relative min-h-0 flex-1">
         <div ref={hostRef} className="h-full w-full p-2" />

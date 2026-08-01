@@ -155,6 +155,73 @@ impl Collector {
         Ok(parse_processes(out.stdout_or_err()?, limit))
     }
 
+    /// Ask a process to stop, or make it.
+    ///
+    /// **The pid is a `u32`, and that is the security property.** This is the
+    /// one place in rmux where the operator points at something on a host and
+    /// says "end that", so the argument must not be able to become anything but
+    /// a number — a string here would be a shell injection with a `kill` in
+    /// front of it. Typing it out of the wire is a stronger guarantee than any
+    /// amount of quoting.
+    ///
+    /// `TERM` first, always. `KILL` is offered separately because it gives the
+    /// process no chance to flush, close sockets or remove its own files, and
+    /// on a dev host that routinely means a corrupted build or a stale lock —
+    /// so it is a deliberate second choice, never the default.
+    ///
+    /// Signals rather than `pkill`: a name pattern can match processes the
+    /// operator never saw, including their own shell.
+    pub async fn kill<T: Target + ?Sized>(
+        &self,
+        target: &T,
+        pid: u32,
+        hard: bool,
+    ) -> anyhow::Result<()> {
+        if pid <= 1 {
+            // `1` is init and `0` means "every process in my group" — a signal
+            // there would take out the operator's whole session, which is
+            // never what clicking one row meant.
+            anyhow::bail!("refusing to signal pid {pid}");
+        }
+
+        let signal = if hard { "KILL" } else { "TERM" };
+        let out = target
+            .exec(
+                &CommandSpec::new("sh")
+                    .arg("-c")
+                    // `2>&1` so the reason reaches the operator. "Operation not
+                    // permitted" is the common case — rmux is built for shared
+                    // dev boxes, where half the interesting processes belong to
+                    // someone else — and a signal that silently did nothing is
+                    // the worst outcome: the row stays, and it reads as the
+                    // process ignoring TERM rather than as never having been
+                    // sent one.
+                    .arg(format!("kill -{signal} {pid} 2>&1"))
+                    .tty(Tty::None),
+            )
+            .await?;
+
+        // **Both halves, and the status first.** `kill` exits non-zero *and*
+        // prints why, so reading only the text would report a clean success
+        // whenever `stdout_or_err` refused the non-zero status — verified
+        // against a real host, where `kill -TERM 999999` exits 1 with
+        // "No such process" on stdout. Trusting either signal alone is wrong.
+        if out.ok() {
+            return Ok(());
+        }
+
+        let said = out.stdout.trim();
+        let said = if said.is_empty() { out.stderr.trim() } else { said };
+        // `sh: 1: kill:` is the shell naming itself, which tells the operator
+        // nothing they did not already know.
+        let said = said.rsplit(": ").next().unwrap_or(said).trim();
+
+        anyhow::bail!(
+            "{}",
+            if said.is_empty() { format!("kill exited {}", out.status) } else { said.to_owned() }
+        )
+    }
+
     /// Ask the target what it is, caching the answer for later samples.
     async fn detect_platform<T: Target + ?Sized>(
         &mut self,
@@ -396,6 +463,49 @@ mod tests {
     use super::*;
 
     const PROC_STAT: &str = "cpu  1000 0 500 8000 500 0 0 0";
+
+    /// A kill that did not happen must not report that it did.
+    ///
+    /// This is the exact bug this test exists for, and it was real: `kill`
+    /// exits non-zero *and* explains itself on stdout, so reading only the
+    /// text — through a helper that refuses non-zero statuses and yields
+    /// nothing — reported a clean success for every failure. On a shared dev
+    /// box the common failure is "Operation not permitted", and silently
+    /// swallowing it makes the row look like a process ignoring TERM rather
+    /// than one that was never signalled.
+    ///
+    /// Run against `LocalTarget` rather than a stub: the behaviour under test
+    /// is what a real `sh` does with a real `kill`, which is precisely what a
+    /// stub would have to assume and could therefore get wrong.
+    #[tokio::test]
+    async fn a_kill_that_failed_is_reported_as_a_failure() {
+        let target = rmux_transport::local::LocalTarget::new();
+        let metrics = Collector::new();
+
+        // Comfortably past any real pid, so nothing is actually signalled.
+        let result = metrics.kill(&target, 4_000_000, false).await;
+
+        let error = result.expect_err("a kill of a nonexistent pid must not report success");
+        let message = error.to_string().to_lowercase();
+        assert!(
+            message.contains("no such process") || message.contains("kill"),
+            "the reason must survive to the operator, got: {error}"
+        );
+        // The shell naming itself is noise the operator cannot act on.
+        assert!(!message.starts_with("sh:"), "got: {error}");
+    }
+
+    /// Signalling pid 0 or 1 is never what clicking one row meant.
+    #[tokio::test]
+    async fn init_and_the_process_group_are_refused() {
+        let target = rmux_transport::local::LocalTarget::new();
+        let metrics = Collector::new();
+
+        // `0` means "every process in my group" — that would take out the
+        // operator's own session, and it would look like rmux crashed.
+        assert!(metrics.kill(&target, 0, false).await.is_err());
+        assert!(metrics.kill(&target, 1, true).await.is_err());
+    }
 
     #[test]
     fn the_first_sample_reports_no_cpu_figure() {

@@ -10,6 +10,7 @@ use serde::Serialize;
 
 mod askpass;
 mod control;
+mod paste;
 mod tunnels;
 pub mod agent;
 mod claude;
@@ -119,6 +120,13 @@ pub fn run() {
             files::fs_delete,
             metrics::metrics_sample,
             metrics::metrics_processes,
+            metrics::metrics_kill,
+            paste::claude_paste_image,
+            tunnels::ports_discover,
+            tunnels::port_forward,
+            tunnels::port_unforward,
+            tunnels::ports_forwarded,
+            tunnels::port_proxy,
             control::control_sync,
             control::control_open_url,
             control::control_info,
