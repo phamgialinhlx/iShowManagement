@@ -105,8 +105,18 @@ ui/                     React 19 + Tailwind 4 + motion
    the *bar*, never the printed number — animating a value invents data.
 3. **No emoji.** Inline SVG, Lucide-style, 1.5–1.7px strokes, square caps.
 
-Blur is **per-panel, not app-wide** — that is what keeps the backdrop sharp between panels
-and makes the material read as glass. Fonts (SFU Futura, IBM Plex Mono) are bundled, never
+**Panels tint; they must not `backdrop-filter`.** This one reads backwards and cost two
+wrong diagnoses. `backdrop-filter` filters *the page's own backdrop*, and the desktop behind
+this window is not page content — it is a macOS `underWindowBackground` NSVisualEffectView,
+behind the webview. The blur therefore sampled an empty transparent page, which WebKit
+composites to an opaque dark field that the panel then tinted on top of: a solid app inside a
+genuinely translucent window, unreachable by any Appearance setting. Removing it brought the
+wallpaper back; restoring it took it away again with the scrim thinned and the tint lowered.
+The blur we want already happened, in the compositor, before the webview drew anything. The
+cost is real and accepted — there is no per-panel frost, so the whole window shares one
+material. There is no Frost setting either, because it drove `--app-blur` and would now be a
+dead knob. Stored tints are clamped: a 64% saved against the old opaque blur layer looks
+nearly solid without it. Fonts (SFU Futura, IBM Plex Mono) are bundled, never
 fetched from a CDN; this app must look right with no network.
 
 ## Claude rendering — the one that caused the most grief

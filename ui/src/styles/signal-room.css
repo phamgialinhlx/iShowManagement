@@ -230,24 +230,40 @@ textarea,
 }
 
 /*
- * Per-panel frost — NOT a single app-wide blur.
+ * Panels tint. **They must not blur.**
  *
- * This is the detail that makes the material read as glass instead of as a grey
- * overlay: because each panel blurs independently, the backdrop stays SHARP in
- * the gaps between panels, so you can see it is a real photograph behind real
- * sheets. One full-screen blur loses that entirely.
+ * This is the rule that kept the whole window opaque, and it is worth stating
+ * exactly, because it reads as backwards.
+ *
+ * `backdrop-filter` filters *the page's own backdrop*. In a normal web page
+ * that is the content behind the element, which is what makes frosted glass
+ * work. rmux's window is `transparent: true` over a macOS
+ * `underWindowBackground` NSVisualEffectView — so the thing we want to blur,
+ * the operator's desktop, **is not page content at all**. It is native, behind
+ * the webview.
+ *
+ * So the blur sampled the only thing it could: an empty transparent page. In
+ * WebKit that composites to an opaque dark field, which the panel then tinted
+ * on top of. The result was a solid app in a window that was genuinely
+ * translucent underneath — and no Appearance setting could reach it, because
+ * the tint was never the problem. Proven twice: removing `backdrop-filter`
+ * brought the wallpaper straight back, and putting it back took it away again
+ * with the scrim already thinned and the tint already lowered.
+ *
+ * **The blur we want is already happening.** `underWindowBackground` is a
+ * blurred, saturated sample of the desktop, produced by the compositor before
+ * the webview draws. Doing it again in CSS is not redundant, it is destructive.
+ *
+ * What this costs, honestly: per-panel frost is gone, so the backdrop no longer
+ * stays sharp in the gaps between panels — the whole window shares one native
+ * material. That was a nice property and it was never actually visible here,
+ * since the blur was rendering a flat field rather than a photograph.
  */
 .panel {
-  /* Tint carries legibility, blur and saturation carry the material. Raising
-     the tint is what buys the headroom to let the scrim behind get thin: 9px
-     labels still need 4.5:1 over whatever wallpaper is behind them. */
-  background: color-mix(in srgb, var(--app-panel) var(--panel-tint, 64%), transparent);
-  /* `saturate` is the half that was missing. Blur alone desaturates whatever it
-     samples, so frosted colour turns to frosted grey — the exact "flat panel"
-     look. Pushing saturation back up is what makes the sheet read as glass with
-     light in it rather than as a dark card. */
-  backdrop-filter: blur(var(--app-blur)) saturate(1.5);
-  -webkit-backdrop-filter: blur(var(--app-blur)) saturate(1.5);
+  /* All that is left, and all that is needed: enough tint for 9px labels to
+     hold 4.5:1 over whatever wallpaper is behind them. Tunable in Settings ›
+     Appearance, because the right amount depends entirely on that wallpaper. */
+  background: color-mix(in srgb, var(--app-panel) var(--panel-tint, 38%), transparent);
   border: 1px solid var(--border);
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.08),
@@ -273,19 +289,24 @@ textarea,
   background-color: transparent !important;
 }
 
-/* Floating windows sit closer to opaque so stacked windows stay legible. */
+/*
+ * Floating windows and menus sit closer to opaque so stacked surfaces stay
+ * legible — and they blur nothing either, for the reason `.panel` explains.
+ *
+ * These two are the case where a CSS blur would be *legitimate*, since what
+ * sits behind them genuinely is page content. It is dropped anyway: at 92-94%
+ * tint there is almost nothing left to blur, and keeping it would leave the one
+ * property in this file that behaves differently depending on whether the
+ * surface happens to be over the desktop or over another panel.
+ */
 .window {
   background: color-mix(in srgb, var(--app-panel) var(--glass-pct), transparent);
-  backdrop-filter: blur(30px) saturate(1.4);
-  -webkit-backdrop-filter: blur(30px) saturate(1.4);
   border: 1px solid var(--border);
   box-shadow: 0 12px 40px rgb(0 0 0 / 0.5);
 }
 
 .menu {
   background: color-mix(in srgb, var(--app-panel) 92%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--border-strong);
   box-shadow: 0 24px 70px -30px rgb(0 0 0 / 0.8);
 }

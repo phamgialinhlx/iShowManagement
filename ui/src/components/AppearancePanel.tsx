@@ -21,11 +21,9 @@ const STORAGE_KEY = "rmux.appearance";
 type Appearance = {
   /** Panel opacity, 0–100. Lower shows more desktop. */
   tint: number;
-  /** Frost radius in px. Below about 10 it stops reading as glass. */
-  blur: number;
 };
 
-const DEFAULTS: Appearance = { tint: 64, blur: 20 };
+const DEFAULTS: Appearance = { tint: 38 };
 
 function load(): Appearance {
   try {
@@ -40,8 +38,12 @@ function load(): Appearance {
  *  before the first paint rather than flashing the defaults. */
 export function applyAppearance(a: Appearance = load()) {
   const root = document.documentElement;
-  root.style.setProperty("--panel-tint", `${a.tint}%`);
-  root.style.setProperty("--app-blur", `${a.blur}px`);
+  // Clamped, because a value stored by an older build was calibrated against a
+  // CSS blur that no longer exists — see `.panel` in signal-room.css. 64% used
+  // to sit on top of an opaque blur layer and looked like glass; on its own it
+  // is very nearly solid, so an old setting would leave the operator with the
+  // exact bug they just watched get fixed.
+  root.style.setProperty("--panel-tint", `${Math.min(a.tint, 60)}%`);
 }
 
 export function AppearancePanel() {
@@ -88,8 +90,8 @@ export function AppearancePanel() {
       <header className="flex flex-col gap-1">
         <h2 className="kicker">APPEARANCE</h2>
         <p className="data text-[11px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
-          The window is translucent over your desktop. These two decide how much of it you see —
-          the right setting depends on your wallpaper, so it is yours to pick.
+          The window is translucent over your desktop. How much of it you see is yours to pick —
+          the right amount depends entirely on your wallpaper.
         </p>
       </header>
 
@@ -103,15 +105,12 @@ export function AppearancePanel() {
         (tint) => setAppearance((a) => ({ ...a, tint })),
       )}
 
-      {row(
-        "FROST",
-        "How far the backdrop is blurred behind each panel. Below about 10px it reads as dirty transparency rather than glass.",
-        appearance.blur,
-        0,
-        60,
-        "px",
-        (blur) => setAppearance((a) => ({ ...a, blur })),
-      )}
+      <p className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+        There is no frost setting, and that is deliberate. The blur behind this window is macOS's
+        own <span style={{ color: "var(--text)" }}>underWindowBackground</span> material, applied by
+        the compositor before rmux draws anything. A CSS blur on top of it filtered the page rather
+        than the desktop — which is what made the whole app look solid.
+      </p>
 
       <button
         type="button"
