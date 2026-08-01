@@ -9,6 +9,8 @@ use tauri::Manager;
 use serde::Serialize;
 
 mod askpass;
+mod control;
+mod tunnels;
 pub mod agent;
 mod claude;
 mod claude_account;
@@ -17,6 +19,7 @@ mod auth;
 mod commands;
 mod face_models;
 mod lock;
+mod settings_window;
 pub mod files;
 pub mod metrics;
 pub mod terminal;
@@ -40,6 +43,27 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // Face model weights. See `face_models::SCHEME` for why this is a
+        // protocol of our own rather than Tauri's asset: handler.
+        .register_uri_scheme_protocol(face_models::SCHEME, |ctx, request| {
+            let name = request.uri().path().trim_start_matches('/').to_owned();
+            match face_models::serve(ctx.app_handle(), &name) {
+                Some(bytes) => tauri::http::Response::builder()
+                    .header("Content-Type", if name.ends_with(".json") {
+                        "application/json"
+                    } else {
+                        "application/octet-stream"
+                    })
+                    // `tauri://localhost` fetching `models://localhost` is a
+                    // *cross-origin* request, so without this the webview
+                    // rejects the response before the caller sees it — and
+                    // reports only "Load failed", with no mention of CORS.
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(bytes)
+                    .unwrap_or_else(|_| empty_response()),
+                None => empty_response(),
+            }
+        })
         .manage(auth::AuthStore::default())
         .manage(askpass::PromptStore::default())
         .manage(terminal::TerminalStore::default())
@@ -48,6 +72,8 @@ pub fn run() {
         .manage(claude::ClaudeStore::default())
         .manage(agent::AgentStore::default())
         .manage(claude_login::LoginStore::default())
+        .manage(tunnels::TunnelStore::default())
+        .manage(control::ControlState::default())
         .invoke_handler(tauri::generate_handler![
             commands::local_target,
             commands::run_on_target,
@@ -58,6 +84,14 @@ pub fn run() {
             auth::jira_poll,
             auth::resume_session,
             auth::sign_out,
+            auth::jira_profiles,
+            auth::jira_projects,
+            auth::jira_missions,
+            auth::jira_mission,
+            auth::jira_transitions,
+            auth::jira_transition,
+            auth::jira_comment,
+            settings_window::open_settings,
             lock::lock_status,
             lock::lock_enable,
             lock::lock_disable,
@@ -67,6 +101,7 @@ pub fn run() {
             lock::face_status,
             face_models::face_models_status,
             face_models::face_models_install,
+            face_models::face_model_file,
             terminal::terminal_open,
             terminal::terminal_attach,
             terminal::terminal_write,
@@ -83,6 +118,10 @@ pub fn run() {
             files::fs_rename,
             files::fs_delete,
             metrics::metrics_sample,
+            metrics::metrics_processes,
+            control::control_sync,
+            control::control_open_url,
+            control::control_info,
             claude::claude_start,
             claude::claude_list_sessions,
             claude::claude_transcript,
@@ -123,10 +162,32 @@ pub fn run() {
                     ),
                 }
             });
+
+            // The control socket, so other apps in the ecosystem can drive rmux.
+            // Also best-effort: nothing the workbench does needs it, and a
+            // machine where the socket cannot be created must still run.
+            let handle = app.handle().clone();
+            let forwards = app.state::<tunnels::TunnelStore>().forwards();
+            tauri::async_runtime::spawn(async move {
+                control::start(handle, forwards).await;
+            });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running rmux");
+        .build(tauri::generate_context!())
+        .expect("error while starting rmux")
+        // Clients are told rmux is going away rather than left to discover it
+        // by reconnect-looping into a socket that no longer answers.
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let handle = app.clone();
+                tauri::async_runtime::block_on(control::shutdown(&handle));
+            }
+        });
+}
+
+/// A 404 for the model protocol.
+fn empty_response() -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder().status(404).body(Vec::new()).expect("static response")
 }
 
 /// Re-exported so command handlers share one spec builder.

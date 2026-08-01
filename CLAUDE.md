@@ -33,7 +33,7 @@ crates/rmux-term        local PTY + scrollback; terminals outlive their views
 crates/rmux-fs          FileSystem trait: LocalFs | TargetFs (POSIX shell over ssh)
 crates/rmux-metrics     CPU/memory sampled over the existing connection
 crates/rmux-claude      Claude PTY control + screen parsing (not yet built)
-crates/rmux-browser     chromiumoxide CDP (not yet built)
+crates/rmux-control     the socket other apps drive rmux through (rbrowse and friends)
 crates/rmux-cowork      Cowork server client + OS keyring
 src-tauri/              thin IPC layer only — no logic
 ui/                     React 19 + Tailwind 4 + motion
@@ -77,6 +77,17 @@ ui/                     React 19 + Tailwind 4 + motion
 - **Create and rename refuse to clobber.** Silent overwrite is data loss the user did not ask for.
 - `alacritty_terminal` is pinned with `=` — it offers no stability guarantee across minor
   versions.
+- **xterm ships an opaque terminal.** `allowTransparency` plus a transparent theme is not
+  enough: xterm's own stylesheet paints `.xterm-viewport` solid `#000` ("required in order
+  for the scroll bar to appear fully opaque"), and that element spans the whole terminal
+  behind the rows. `signal-room.css` overrides it. Two rounds of changing rmux's *own*
+  backdrops changed nothing, because the opaque layer was never ours.
+  `ui/xterm-glass-check.html` asserts both halves — that xterm still ships the rule, and
+  that the override clears it under both renderers.
+- **Closing a session must kill its work.** Its shells and its Claude run under
+  `rmux-agent` on the target so they survive quitting the app; dropping the session from the
+  list alone leaves them running with nothing able to reach them. `removeSession` sends
+  `terminal_close` per tab and `claude_end_session` for `claude-<id>`.
 
 ## Design system — SIGNAL ROOM
 
@@ -121,6 +132,29 @@ because `/tui fullscreen` persists, so anyone who ran it once carries the proble
   interactive-terminal-only (`/compact`, `/context`, `/resume`, `/permissions`, `/plan`, …),
   so it would trade real capability for scrolling. Keeping the real TUI is what guarantees
   parity — it *is* the CLI.
+
+## rmux is a backend, and the browser is not part of it
+
+There is **no in-app browser**, and that is settled rather than pending. rmux's window is
+one WKWebView; a webview cannot be given a per-session proxy without proxying the app's own
+UI, so every page the old Browser tab showed needed a forwarded port typed in first — the
+manual step the feature existed to remove. The tab is gone.
+
+What replaces it is `crates/rmux-control`: NDJSON over `~/.rmux/control.sock` (`0600` in a
+`0700` directory, plus a per-run token in `~/.rmux/control.json`), so a **separate Chromium
+app** can do what a webview cannot. `OpenProxy` runs `ssh -D` and hands back a local SOCKS
+port; pointed at with `socks5h`, the far side resolves DNS too, so an internal hostname
+resolves on the server. That is the arrangement that actually delivers "no port forwarding".
+
+- **`-D` binds `127.0.0.1:` explicitly.** A bare `-D <port>` binds per the host's
+  `GatewayPorts`, and a SOCKS proxy into the operator's infrastructure reachable from the LAN
+  is a hole, not a convenience.
+- **Sessions live in the webview; Rust holds a mirror**, pushed by `control_sync` on every
+  change. Moving ownership into Rust would put an IPC round trip on renaming a tab.
+- **A `Report` from a browser is data, never an instruction.** It describes a page rmux did
+  not write, so a selection's note is *typed into Claude's composer* (`claude_write`) and
+  left for the operator to send — never submitted. Anything else is a prompt-injection path
+  straight from any page the operator happens to open.
 
 ## Claude credentials
 

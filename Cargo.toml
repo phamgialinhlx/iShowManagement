@@ -9,7 +9,7 @@ members = [
     "crates/rmux-term",
     "crates/rmux-claude",
     "crates/rmux-metrics",
-    "crates/rmux-browser",
+    "crates/rmux-control",
     "crates/rmux-cowork",
     "crates/rmux-core",
     "askpass",
@@ -33,7 +33,7 @@ rmux-term = { path = "crates/rmux-term" }
 rmux-claude = { path = "crates/rmux-claude" }
 rmux-agent = { path = "crates/rmux-agent" }
 rmux-metrics = { path = "crates/rmux-metrics" }
-rmux-browser = { path = "crates/rmux-browser" }
+rmux-control = { path = "crates/rmux-control" }
 rmux-cowork = { path = "crates/rmux-cowork" }
 rmux-core = { path = "crates/rmux-core" }
 

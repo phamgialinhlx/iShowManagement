@@ -1,0 +1,81 @@
+//! The Settings window.
+//!
+//! A **separate window**, not a panel in the rail. Account management, the app
+//! lock and the Claude credential are all things you visit occasionally, decide,
+//! and leave — squeezing them into a 240px sidebar next to a live terminal made
+//! each one feel like a widget rather than a decision, and the Claude sign-in in
+//! particular needs room for a URL and a pasted code.
+//!
+//! It is created on demand rather than declared in `tauri.conf.json`, because a
+//! window declared there is built at startup: the app would pay for a second
+//! webview on every launch to show something most sessions never open.
+
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+
+/// The window label. The UI reads it to decide which screen to render, so it is
+/// part of the contract with `ui/src/main.tsx`, not just a handle.
+pub const LABEL: &str = "settings";
+
+/// What the settings window loads. The query parameter is how the UI knows which
+/// screen to render — see `ui/src/main.tsx`.
+const WINDOW_URL: &str = "index.html?window=settings";
+
+/// Open Settings, or focus it if it is already open.
+///
+/// Focusing rather than building a second one matters: `WebviewWindowBuilder`
+/// fails on a duplicate label, so without this the second click would surface an
+/// error instead of the window the operator asked for.
+#[tauri::command]
+pub async fn open_settings(app: AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(LABEL) {
+        existing.unminimize().ok();
+        existing.show().map_err(|e| e.to_string())?;
+        existing.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    // The label is put in the query string so the UI can branch on it
+    // *synchronously*, before the first render. Asking Tauri for the label is
+    // async, and awaiting it would flash the workbench inside this window.
+    WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App(WINDOW_URL.into()))
+        .title("rmux — settings")
+        .inner_size(720.0, 620.0)
+        .min_inner_size(560.0, 460.0)
+        // Matching the main window's chrome, so the two read as one app.
+        //
+        // `transparent` and the window effect go **together**. On its own,
+        // transparency means literally see-through: the workbench behind showed
+        // straight through this window's content. The material under the webview
+        // is what the design is actually leaning on — the UI then paints its own
+        // backdrop layer on top (`.atmosphere`), exactly as the main window does.
+        .transparent(true)
+        .effects(tauri::utils::config::WindowEffectsConfig {
+            effects: vec![tauri::utils::WindowEffect::UnderWindowBackground],
+            state: Some(tauri::utils::WindowEffectState::Active),
+            radius: None,
+            color: None,
+        })
+        .decorations(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .build()
+        .map_err(|e| format!("could not open settings: {e}"))?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_label_matches_what_the_ui_switches_on() {
+        // `ui/src/main.tsx` renders Settings when the window label is this
+        // string. They are two halves of one contract, and a rename on either
+        // side alone would show the workbench in the settings window — twice the
+        // terminals, and no settings.
+        assert_eq!(LABEL, "settings");
+        // …and the query parameter the UI actually reads carries that label.
+        assert_eq!(WINDOW_URL, format!("index.html?window={LABEL}"));
+    }
+}

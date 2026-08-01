@@ -1,5 +1,3 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
-
 import { api } from "./api";
 
 /**
@@ -26,20 +24,63 @@ type FaceApi = typeof import("@vladmandic/face-api");
 
 let loading: Promise<FaceApi> | null = null;
 
+/** TFJS's manifest shape, narrowed to what loading needs. */
+type WeightsManifest = { paths: string[]; weights: unknown[] }[];
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 /**
- * The models the app needs, as a URL the webview may fetch.
+ * Load one network from bytes handed over IPC.
  *
- * `convertFileSrc` produces an `asset:` URL; both it and the models directory
- * are allow-listed in `tauri.conf.json`. A plain file path would be blocked, and
- * a `fetch` to the CDN from here would be blocked too — the CSP restricts
- * `connect-src` to this origin, which is why the download happens in Rust.
+ * **Deliberately not `loadFromUri`.** That fetches, and every URL this app can
+ * offer the webview failed: `asset:` does not compose with the
+ * base-plus-filename path face-api builds, and a custom scheme brings CSP and
+ * cross-origin rules with it. Each failure surfaced as WebKit's bare "Load
+ * failed", which says nothing about which of those it was.
+ *
+ * `loadFromWeightMap` is what `loadFromUri` calls once it has the bytes, so
+ * this is the same path with the fetch removed — and IPC is the channel every
+ * other command already uses.
  */
-async function modelUrl(): Promise<string> {
-  const status = await api.faceModelsStatus();
-  if (!status.installed) {
-    throw new Error("the face models are not installed yet");
+async function loadNet(
+  faceapi: FaceApi,
+  net: { loadFromWeightMap(map: unknown): void },
+  prefix: string,
+) {
+  const manifest = JSON.parse(
+    new TextDecoder().decode(base64ToBytes(await api.faceModelFile(`${prefix}-weights_manifest.json`))),
+  ) as WeightsManifest;
+
+  // A manifest may split its weights over several files; concatenating them in
+  // manifest order is what `tf.io` expects, and getting the order wrong yields
+  // tensors of the right shape holding the wrong numbers — which would fail as
+  // "no face recognised", never as a load error.
+  const parts: Uint8Array[] = [];
+  for (const group of manifest) {
+    for (const path of group.paths) {
+      parts.push(base64ToBytes(await api.faceModelFile(path)));
+    }
   }
-  return convertFileSrc(status.dir);
+
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const buffer = new Uint8Array(total);
+  let at = 0;
+  for (const part of parts) {
+    buffer.set(part, at);
+    at += part.length;
+  }
+
+  const specs = manifest.flatMap((group) => group.weights);
+  const tfio = (faceapi.tf as unknown as {
+    io: { decodeWeights(data: ArrayBuffer, specs: unknown[]): unknown };
+  }).io;
+
+  net.loadFromWeightMap(tfio.decodeWeights(buffer.buffer as ArrayBuffer, specs));
 }
 
 /**
@@ -49,11 +90,23 @@ async function modelUrl(): Promise<string> {
  * same moment — which is exactly what a lock screen with an auto-start camera
  * does — must not both start a load.
  */
+/** Told what the engine is doing, since the first load takes real time. */
+export let onLoadProgress: ((message: string) => void) | null = null;
+export function setLoadProgress(fn: ((message: string) => void) | null) {
+  onLoadProgress = fn;
+}
+
 export async function loadFaceEngine(): Promise<FaceApi> {
   if (loading) return loading;
 
   loading = (async () => {
-    const faceapi = await import("@vladmandic/face-api");
+    let faceapi: FaceApi;
+    try {
+      faceapi = await import("@vladmandic/face-api");
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      throw new Error(`could not load the face library — ${detail}`);
+    }
 
     // WebGL, because the WASM backend's binaries are not bundled and would be
     // another network fetch. CPU is the fallback and is slow but correct.
@@ -73,10 +126,30 @@ export async function loadFaceEngine(): Promise<FaceApi> {
     }
     await tf.ready();
 
-    const url = await modelUrl();
-    await faceapi.nets.tinyFaceDetector.loadFromUri(url);
-    await faceapi.nets.faceLandmark68Net.loadFromUri(url);
-    await faceapi.nets.faceRecognitionNet.loadFromUri(url);
+    const status = await api.faceModelsStatus();
+    if (!status.installed) {
+      throw new Error("the face models are not installed yet");
+    }
+
+    // Named as they load, so a failure says which of the three it was rather
+    // than leaving the next person to guess as I did.
+    const nets: [string, string, { loadFromWeightMap(map: unknown): void }][] = [
+      ["face detector", "tiny_face_detector_model", faceapi.nets.tinyFaceDetector],
+      ["landmark model", "face_landmark_68_model", faceapi.nets.faceLandmark68Net],
+      ["recogniser", "face_recognition_model", faceapi.nets.faceRecognitionNet],
+    ];
+    for (const [label, prefix, net] of nets) {
+      try {
+        // 6.7MB arrives over IPC as base64 and is decoded here; on a cold
+        // start that is seconds of nothing, which reads as the camera being
+        // broken rather than as work in progress.
+        onLoadProgress?.(`LOADING THE ${label.toUpperCase()}`);
+        await loadNet(faceapi, net, prefix);
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e);
+        throw new Error(`could not load the ${label} — ${detail}`);
+      }
+    }
 
     return faceapi;
   })();

@@ -645,3 +645,179 @@ mod tests {
         assert_eq!(cfg.org_name, None);
     }
 }
+
+/// A configured Jira connection on the server.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraProfile {
+    pub name: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+/// A project inside one of those.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraProject {
+    pub key: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+impl Session {
+    /// Jira connections this server has configured.
+    ///
+    /// **Profile-level, deliberately.** The server's issue endpoints hang off
+    /// `/sessions/:id/...` and 404 without a row in its own `sessions` table —
+    /// the table this architecture removed. These two are session-independent,
+    /// so they work as-is.
+    pub async fn jira_profiles(&self) -> Result<Vec<JiraProfile>, CoworkError> {
+        self.get("/jira/profiles").await
+    }
+
+    pub async fn jira_projects(&self, profile: &str) -> Result<Vec<JiraProject>, CoworkError> {
+        // The name is a path segment and may contain spaces.
+        let encoded = profile.replace(' ', "%20");
+        self.get(&format!("/jira/profiles/{encoded}/projects")).await
+    }
+
+    /// The signed-in account's assigned Jira issues.
+    ///
+    /// `/agency/missions`, which is where the deployed server actually keeps a
+    /// session-independent view of Jira. An earlier version of this client
+    /// invented profile-level issue routes and reported the resulting 404 as
+    /// "your server has no endpoint for this" — it does, under a name I had not
+    /// looked for. Everything here is a route that exists today.
+    ///
+    /// Scoped to the operator rather than to a project, because that is what
+    /// the server offers and it is also the more useful default: what a session
+    /// wants on screen is *my* work, not the whole board.
+    pub async fn jira_missions(&self) -> Result<Vec<JiraIssue>, CoworkError> {
+        self.get("/agency/missions").await
+    }
+
+    /// One issue in full, including its description and comments.
+    pub async fn jira_mission(&self, key: &str) -> Result<JiraIssueDetail, CoworkError> {
+        self.get(&format!("/agency/missions/{}", encode_segment(key))).await
+    }
+
+    /// The moves this issue's workflow currently permits.
+    ///
+    /// Asked per issue, never assumed. A Jira workflow decides which moves are
+    /// legal *from the current status*, and that differs by project and issue
+    /// type — a fixed list of statuses would offer moves the server rejects.
+    pub async fn jira_transitions(&self, key: &str) -> Result<Vec<JiraTransition>, CoworkError> {
+        self.get(&format!("/agency/missions/{}/transitions", encode_segment(key))).await
+    }
+
+    pub async fn jira_transition(&self, key: &str, transition: &str) -> Result<(), CoworkError> {
+        let _: serde_json::Value = self
+            .post_json(
+                &format!("/agency/missions/{}/transitions", encode_segment(key)),
+                &serde_json::json!({ "transitionId": transition }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Add a comment.
+    ///
+    /// **Comment rather than edit**, and that is the server's shape rather than
+    /// a preference: editing an issue's description is only exposed under
+    /// `PUT /sessions/:id/jira/issues/:key`, which needs a row in the server's
+    /// own sessions table. Commenting says the same thing without rewriting
+    /// what someone else wrote, and it is what the deployed API allows.
+    pub async fn jira_comment(&self, key: &str, body: &str) -> Result<(), CoworkError> {
+        let _: serde_json::Value = self
+            .post_json(
+                &format!("/agency/missions/{}/comment", encode_segment(key)),
+                &serde_json::json!({ "body": body }),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+/// A move the workflow currently permits.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraTransition {
+    pub id: String,
+    pub name: String,
+    /// The status this lands the issue in.
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+/// An issue with its long-form fields.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraIssueDetail {
+    #[serde(flatten)]
+    pub issue: JiraIssue,
+    /// Jira renders its own markup server-side; this is HTML.
+    #[serde(default)]
+    pub description_html: String,
+    /// The raw wiki-markup source, for anyone who would rather read that.
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub issue_type: String,
+    #[serde(default)]
+    pub comments: Vec<JiraComment>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraComment {
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub created: String,
+    #[serde(default)]
+    pub body_html: String,
+}
+
+/// Percent-encode one path segment.
+///
+/// Issue keys are `PROJ-123` in practice, but this is user data reaching a URL
+/// and a key that ever contained a slash would otherwise change which route was
+/// called.
+fn encode_segment(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+
+/// One issue, as much of it as anything here needs.
+///
+/// Deliberately shallow. Jira's issue document is enormous and versioned by
+/// someone else; binding to more of it than is displayed would turn a field
+/// rename into "the board is empty".
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraIssue {
+    pub key: String,
+    #[serde(default)]
+    pub summary: String,
+    /// The status name as Jira reports it — free text, because a Jira admin can
+    /// rename or add statuses at will.
+    #[serde(default)]
+    pub status: String,
+    /// Jira's own three-bucket categorisation: `new`, `indeterminate`, `done`.
+    /// The only status field that is safe to reason about, since the *names*
+    /// are per-project and the categories are not.
+    #[serde(default)]
+    pub status_category: Option<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+}

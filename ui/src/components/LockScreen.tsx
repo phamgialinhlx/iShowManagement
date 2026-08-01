@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 
-import { api, type LockStatus, type SignedIn } from "../lib/api";
-import { describeFace, faceRetryable, openCamera } from "../lib/face";
+import { api, type LockStatus, type Unlocked } from "../lib/api";
+import { describeFace, faceRetryable, openCamera, setLoadProgress } from "../lib/face";
 
 /**
  * The lock, on reopen.
@@ -38,7 +38,7 @@ export function LockScreen({
   onSignOut,
 }: {
   status: LockStatus;
-  onUnlocked: (session: SignedIn) => void;
+  onUnlocked: (result: Unlocked) => void;
   onSignOut: () => void;
 }) {
   const [phase, setPhase] = useState<Phase>(status.face ? "scanning" : "pin");
@@ -87,6 +87,7 @@ export function LockScreen({
     runningRef.current = true;
 
     const stop = () => {
+      setLoadProgress(null);
       runningRef.current = false;
       window.clearTimeout(timer);
       stream?.getTracks().forEach((t) => t.stop());
@@ -95,6 +96,9 @@ export function LockScreen({
 
     (async () => {
       try {
+        // Routed into the same line the capture loop uses, so the model load
+        // is visible rather than looking like a frozen camera.
+        setLoadProgress(setHint);
         setHint("STARTING THE CAMERA");
         stream = await openCamera();
         if (!runningRef.current) return stop();
@@ -167,7 +171,7 @@ export function LockScreen({
       animate={{ opacity: 1 }}
       transition={{ duration: 0.18 }}
       className="fixed inset-0 z-[200] grid place-items-center"
-      style={{ background: "var(--bg)" }}
+      style={{ background: "var(--app-bg)" }}
     >
       <div className="menu corner flex w-full max-w-[360px] flex-col gap-4 p-6">
         <header className="flex flex-col gap-1">

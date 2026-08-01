@@ -29,6 +29,16 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
+/// The scheme the webview loads models over.
+///
+/// A protocol of our own rather than Tauri's `asset:`. face-api takes a *base*
+/// URL and appends `/<name>-weights_manifest.json` to it, which does not
+/// compose with `asset:`'s percent-encoded absolute path — the fetch fails with
+/// nothing but WebKit's generic "Load failed". Serving a scheme whose paths are
+/// plain file names removes the encoding question entirely, and removes the
+/// scope-matching question with it.
+pub const SCHEME: &str = "models";
+
 use crate::auth::AuthError;
 
 /// Where the weights come from.
@@ -92,6 +102,39 @@ pub struct ModelsStatus {
     pub dir: String,
 }
 
+/// One model file, base64'd, over the IPC channel the app already has.
+///
+/// **Not a fetch.** Three attempts to serve these over a URL failed in ways the
+/// webview reported only as "Load failed" — `asset:` will not compose with the
+/// base-plus-filename path face-api builds, and a custom scheme adds CSP and
+/// cross-origin questions on top. IPC has none of those: it is the same channel
+/// every other command uses, already trusted, already same-origin.
+///
+/// The cost is that 6.4MB arrives as ~8.5MB of base64, once, the first time
+/// face unlock is used. That is a fair price for a path that cannot be broken
+/// by a CSP rule.
+#[tauri::command]
+pub async fn face_model_file(app: AppHandle, name: String) -> Result<String, AuthError> {
+    use base64::Engine as _;
+
+    let bytes = serve(&app, &name)
+        .ok_or_else(|| AuthError::message(format!("no model file called {name}")))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Serve one model file. Registered in `lib.rs`.
+///
+/// Only ever reads from the models directory and only by file name — a request
+/// carrying a path is refused rather than resolved, so this cannot be walked
+/// out of its directory into the rest of the disk.
+pub fn serve(app: &AppHandle, name: &str) -> Option<Vec<u8>> {
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        return None;
+    }
+    let dir = models_dir(app).ok()?;
+    std::fs::read(dir.join(name)).ok()
+}
+
 fn models_dir(app: &AppHandle) -> Result<PathBuf, AuthError> {
     let dir = app
         .path()
@@ -127,7 +170,9 @@ pub async fn face_models_status(app: AppHandle) -> Result<ModelsStatus, AuthErro
     Ok(ModelsStatus {
         installed,
         bytes: total_bytes(),
-        dir: dir.to_string_lossy().into_owned(),
+        // The base URL the webview loads from, not a filesystem path — the UI
+        // has no business knowing where on disk these live.
+        dir: format!("{SCHEME}://localhost"),
     })
 }
 

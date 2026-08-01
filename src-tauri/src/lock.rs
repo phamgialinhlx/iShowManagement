@@ -36,7 +36,7 @@ use rmux_cowork::{
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::auth::{AuthError, AuthStore, SignedIn};
+use crate::auth::{AuthError, AuthStore};
 
 /// What the UI needs to decide which screen to show, before anything is proved.
 #[derive(Debug, Default, Serialize)]
@@ -50,6 +50,18 @@ pub struct LockStatus {
     /// anyone holding the machine can already read the username off the lock
     /// screen of any OS, and unlocking blind helps nobody.
     pub username: String,
+    pub server_url: String,
+}
+
+/// The result of opening the vault.
+///
+/// `account` is `None` when the vault opened but the stored session no longer
+/// works — a lapsed token, or a server that cannot be reached. The app is
+/// unlocked either way; only the footer changes.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Unlocked {
+    pub account: Option<Account>,
     pub server_url: String,
 }
 
@@ -173,7 +185,7 @@ pub async fn lock_unlock(
     store: State<'_, AuthStore>,
     server_url: String,
     pin: String,
-) -> Result<SignedIn, AuthError> {
+) -> Result<Unlocked, AuthError> {
     let Some(Vault::Sealed(sealed)) = credentials::load_vault(&server_url)? else {
         return Err(AuthError::message("there is no locked session on this machine"));
     };
@@ -181,20 +193,36 @@ pub async fn lock_unlock(
     let key = VaultKey::for_vault(&sealed, &pin).map_err(|e| AuthError::message(e.to_string()))?;
     let creds = key.open(&sealed).map_err(|e| AuthError::message(e.to_string()))?;
 
+    // **The vault opened, so the app is unlocked.** Everything below is about
+    // the Cowork session, and none of it may gate getting in.
+    //
+    // This previously ended at `session.me().await?`, which meant a lapsed token
+    // or an unreachable server failed the unlock — presenting a correct PIN as
+    // a wrong one, and locking the operator out of a workbench that needs no
+    // account in the first place. Signing in again is a footer button; being
+    // unable to reach your own terminals is not recoverable from the lock
+    // screen.
     let session = Session::resume(&server_url, creds)?;
-    let account = session.me().await?;
 
-    // Re-seal: `me()` may have rotated the token, and the whole point of holding
-    // the key is that this does not need the PIN again.
-    let refreshed = session.credentials().await;
-    let resealed = key
-        .seal(&refreshed, sealed.face)
-        .map_err(|e| AuthError::message(e.to_string()))?;
-    credentials::save_vault(&server_url, &Vault::Sealed(resealed))?;
+    let account = match session.me().await {
+        Ok(account) => {
+            // The token may have been rotated by that call, so re-seal it. The
+            // held key is exactly what makes this possible without the PIN.
+            let refreshed = session.credentials().await;
+            if let Ok(resealed) = key.seal(&refreshed, sealed.face) {
+                credentials::save_vault(&server_url, &Vault::Sealed(resealed))?;
+            }
+            Some(account)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "unlocked, but the stored session is not usable");
+            None
+        }
+    };
 
     store.adopt(session, &server_url, Some(key)).await;
 
-    Ok(SignedIn { account, server_url })
+    Ok(Unlocked { account, server_url })
 }
 
 /// Open with a face: match, mint a new session, re-seal it under the old PIN.
@@ -206,11 +234,12 @@ pub async fn lock_unlock_face(
     store: State<'_, AuthStore>,
     server_url: String,
     descriptor: Vec<f64>,
-) -> Result<SignedIn, AuthError> {
+) -> Result<Unlocked, AuthError> {
     let trust = credentials::load_device(&server_url)?
         .ok_or_else(|| AuthError::message("this machine is not trusted for face unlock"))?;
 
     let (session, account) = face::face_login(&trust, &descriptor).await?;
+    let account = Some(account);
 
     // The vault stays sealed under a PIN nobody has typed, so it cannot be
     // rewritten with the new token. That is correct rather than unfortunate: the
@@ -218,7 +247,7 @@ pub async fn lock_unlock_face(
     // exists to avoid. The fresh session simply supersedes it for this run.
     store.adopt(session, &server_url, None).await;
 
-    Ok(SignedIn { account, server_url })
+    Ok(Unlocked { account, server_url })
 }
 
 /// Trust this machine for face unlock without turning the whole lock on.

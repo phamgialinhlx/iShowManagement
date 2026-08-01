@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import { isTauri, type TargetRef } from "../lib/api";
 import { attachClipboard } from "../lib/terminal-clipboard";
+import { TERMINAL_THEME } from "../lib/terminal-theme";
 import { PanelLoader } from "./PanelLoader";
 
 /**
@@ -23,29 +24,8 @@ import { PanelLoader } from "./PanelLoader";
  * caller's job.
  */
 
-const THEME = {
-  background: "rgba(0, 0, 0, 0)",
-  foreground: "#e8f4f2",
-  cursor: "#e8e6e1",
-  cursorAccent: "#0a0a0a",
-  selectionBackground: "rgba(230, 59, 46, 0.30)",
-  black: "#0a0a0a",
-  red: "#ff6b6b",
-  green: "#5ef2b0",
-  yellow: "#ffd166",
-  blue: "#54b6ff",
-  magenta: "#c792ff",
-  cyan: "#54e6ff",
-  white: "#e8e6e1",
-  brightBlack: "#5c5953",
-  brightRed: "#ff8b8b",
-  brightGreen: "#7ef5c4",
-  brightYellow: "#ffdd8a",
-  brightBlue: "#7cc7ff",
-  brightMagenta: "#d9b0ff",
-  brightCyan: "#8aefff",
-  brightWhite: "#ffffff",
-} as const;
+// One palette for every terminal — see `lib/terminal-theme.ts` for why the
+// dark slots are translucent now that the panes are glass.
 
 type Lifecycle = { type: "exited"; code: number } | { type: "lagged"; chunks: number };
 
@@ -103,7 +83,7 @@ export function TerminalView({
     let terminalId: string | null = null;
 
     const xterm = new Xterm({
-      theme: THEME,
+      theme: TERMINAL_THEME,
       allowTransparency: true,
       fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
       fontSize: 13,
@@ -237,7 +217,16 @@ export function TerminalView({
       <div ref={hostRef} className="h-full w-full" />
 
       {!ready && !error && (
-        <div className="absolute inset-0" style={{ background: "var(--app-panel)" }}>
+        <div
+            className="absolute inset-0"
+            // The *loader* only — the terminal's own transparency is settled in
+            // `signal-room.css`, by overriding the opaque `.xterm-viewport`
+            // xterm ships. Tinted rather than solid so this covers the panel
+            // consistently with it while the shell is opening.
+            style={{
+              background: "color-mix(in srgb, var(--app-panel) var(--panel-tint, 64%), transparent)",
+            }}
+          >
           <PanelLoader
             phase="OPENING SHELL"
             detail={target.host ?? "local"}

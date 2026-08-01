@@ -22,7 +22,16 @@ import type { Session } from "../lib/sessions";
  * the tail is fetched and "load more" doubles it rather than fetching the lot.
  */
 
-const TAIL_STEP = 512 * 1024;
+/**
+ * How much of the tail to read at a time.
+ *
+ * 512KB sounded generous and was not: most of a Claude transcript is plumbing
+ * — slash-command wrappers, caveat banners, system reminders — which this view
+ * demotes and hides. On a real 220MB transcript that budget surfaced a single
+ * visible message, which reads as "the transcript is broken" rather than "the
+ * window is small". 2MB is a few hundred KB of actual conversation.
+ */
+const TAIL_STEP = 2 * 1024 * 1024;
 
 const humanBytes = (bytes: number) => {
   const units = ["B", "KB", "MB", "GB"];
@@ -211,7 +220,7 @@ export function TranscriptView({ session }: { session: Session }) {
           pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
         }}
       >
-        <div className="mx-auto flex max-w-[840px] flex-col gap-4">
+        <div className="mx-auto flex max-w-[1100px] flex-col gap-4">
           {entries.map((entry, i) => (
             <Turn key={`${entry.timestamp ?? ""}-${i}`} entry={entry} />
           ))}

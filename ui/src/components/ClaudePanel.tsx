@@ -6,8 +6,11 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel, invoke } from "@tauri-apps/api/core";
 
 import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
-import { compactTokens, contextLimit } from "../lib/context-window";
+import { contextLimit, sniffWindow } from "../lib/context-window";
 import { useSessions } from "../lib/sessions";
+import { CLAUDE_THEME } from "../lib/terminal-theme";
+import { ContextMeter } from "./ContextMeter";
+import { BrowserReports } from "./BrowserReports";
 import { attachClipboard, copyAll, copySelection, copyViewport } from "../lib/terminal-clipboard";
 import { MouseModeTracker } from "../lib/mouse-modes";
 import { PanelLoader } from "./PanelLoader";
@@ -44,13 +47,39 @@ function latin1(bytes: Uint8Array): string {
   return out;
 }
 
+/**
+ * Does this chunk mention a context window, without decoding it?
+ *
+ * The output handler is the hottest path in the app, so the sniff below must
+ * not turn every chunk into a string. Claude redraws its whole TUI many times a
+ * second; `context` appears in a handful of those frames and in none of the
+ * rest, so a byte scan pays for itself immediately.
+ */
+const NEEDLE = [0x63, 0x6f, 0x6e, 0x74, 0x65, 0x78, 0x74]; // "context"
+
+function mentionsContext(bytes: Uint8Array): boolean {
+  outer: for (let i = 0; i + NEEDLE.length <= bytes.length; i += 1) {
+    for (let j = 0; j < NEEDLE.length; j += 1) {
+      // Case-insensitive on ASCII letters only, which is all the needle is.
+      if ((bytes[i + j]! | 0x20) !== NEEDLE[j]!) continue outer;
+    }
+    return true;
+  }
+  return false;
+}
+
 /** Mode, permissions, model and context — what the TUI's status line showed. */
-function ClaudeStatusStrip({ status }: { status: ClaudeStatus | null }) {
+function ClaudeStatusStrip({
+  status,
+  window: configured,
+}: {
+  status: ClaudeStatus | null;
+  window?: number;
+}) {
   if (!status) return null;
 
   const context = status.contextTokens ?? 0;
-  const limit = contextLimit(status.model, context);
-  const percent = limit ? Math.round((context / limit) * 100) : null;
+  const limit = contextLimit(status.model, context, configured);
 
   const bits: string[] = [];
   if (status.mode) bits.push(status.mode);
@@ -60,29 +89,17 @@ function ClaudeStatusStrip({ status }: { status: ClaudeStatus | null }) {
     bits.push(status.permissionMode);
   }
   if (status.model) bits.push(status.model.replace(/^claude-/, ""));
-  if (context > 0) {
-    bits.push(percent === null ? `${compactTokens(context)} ctx` : `${percent}% ctx`);
-  }
 
-  if (!bits.length) return null;
+  if (!bits.length && context === 0) return null;
 
   return (
-    <span
-      className="micro truncate"
-      title={
-        context > 0 && limit
-          ? `${context.toLocaleString()} of ~${limit.toLocaleString()} context tokens`
-          : context > 0
-            ? `${context.toLocaleString()} context tokens (window size unknown)`
-            : undefined
-      }
-      style={{
-        // Amber past three quarters: a filling context is worth noticing before
-        // it forces a compaction. Not red — nothing here needs acting on yet.
-        color: percent !== null && percent >= 75 ? "rgb(var(--busy))" : "var(--text-faint)",
-      }}
-    >
-      {bits.join(" · ")}
+    <span className="flex min-w-0 items-center gap-2">
+      <span className="micro truncate" style={{ color: "var(--text-faint)" }}>
+        {bits.join(" · ")}
+      </span>
+      {/* The bar rather than another word in that list. "How much room is
+          left" is the one question here that is answered faster by a shape. */}
+      {context > 0 && <ContextMeter tokens={context} limit={limit} variant="strip" />}
     </span>
   );
 }
@@ -112,6 +129,18 @@ export function ClaudePanel({
   const clearClaudeSession = useSessions((s) => s.clearClaudeSession);
   const setFullscreen = useSessions((s) => s.setFullscreen);
   const setResume = useSessions((s) => s.setResume);
+  const configure = useSessions((s) => s.configureSession);
+  // The window Claude itself printed. Read from the pane's own output rather
+  // than inferred, which is the only way anyone actually knows it: the
+  // transcript records `claude-opus-5` whether that is a 200k or a 1M window.
+  const contextWindow = useSessions((s) =>
+    s.sessions.find((x) => x.id === sessionId)?.contextWindow,
+  );
+  // Read by the output handler, which is installed once and never re-created —
+  // so it cannot close over `contextWindow` and see anything but its first
+  // value. A ref is the only thing that stays current there.
+  const windowRef = useRef(contextWindow);
+  windowRef.current = contextWindow;
   const [switching, setSwitching] = useState(false);
   // The running session, remembered across remounts so the view reattaches
   // rather than launching a second Claude in the same folder.
@@ -153,7 +182,7 @@ export function ClaudePanel({
     let id: string | null = null;
 
     const xterm = new Xterm({
-      theme: { background: "rgba(0,0,0,0)", foreground: "#e8f4f2", cursor: "#e63b2e" },
+      theme: CLAUDE_THEME,
       allowTransparency: true,
       fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
       fontSize: 12,
@@ -192,6 +221,20 @@ export function ClaudePanel({
       // absent from the overwhelming majority of output.
       if (bytes.includes(0x1b)) {
         mouseModes.current.observe(latin1(bytes));
+      }
+      // Claude states its own context window beside the model — `Opus 5 (1M
+      // context)` — in the banner and in `/status`. That is the only place it
+      // is ever stated, so reading it here is what turns the meter's
+      // denominator from a guess into an observation. Byte-prefiltered: this
+      // runs on every chunk of a TUI that redraws constantly.
+      if (mentionsContext(bytes)) {
+        const sniffed = sniffWindow(latin1(bytes));
+        // Written through the store so it persists and the rail sees it too.
+        // Guarded on a change, or a redraw every frame would rewrite it.
+        if (sniffed && sniffed !== windowRef.current) {
+          windowRef.current = sniffed;
+          configure(sessionId, { contextWindow: sniffed });
+        }
       }
       xterm.write(bytes);
       setReady(true);
@@ -383,7 +426,7 @@ export function ClaudePanel({
       >
         <span className="micro">CLAUDE</span>
 
-        <ClaudeStatusStrip status={claudeStatus} />
+        <ClaudeStatusStrip status={claudeStatus} window={contextWindow} />
 
         {/* Copying out of this pane needs help. A drag is sent to Claude, not
             used to select, so the usual gesture silently does nothing. */}
@@ -537,13 +580,26 @@ export function ClaudePanel({
         </div>
       </header>
 
+      {/* What a connected browser sent back for this session. Empty, and takes
+          no space, until something arrives. */}
+      <BrowserReports sessionId={sessionId} claudeId={claudeId} />
+
       <div className="relative min-h-0 flex-1">
         <div ref={hostRef} className="h-full w-full p-2" />
 
         {/* Until Claude's first byte, the pane is a black rectangle — which reads
             as a crash, not as work in progress. */}
         {!ready && !error && (
-          <div className="absolute inset-0" style={{ background: "var(--app-panel)" }}>
+          <div
+            className="absolute inset-0"
+            // The *loader* only — the terminal's own transparency is settled in
+            // `signal-room.css`, by overriding the opaque `.xterm-viewport`
+            // xterm ships. Tinted rather than solid so this covers the panel
+            // consistently with it while Claude starts.
+            style={{
+              background: "color-mix(in srgb, var(--app-panel) var(--panel-tint, 64%), transparent)",
+            }}
+          >
             <PanelLoader
               phase={phase === "connecting" ? "CONNECTING" : "STARTING CLAUDE"}
               detail={target.host ?? "local"}

@@ -4,7 +4,8 @@ import { Workbench } from "./screens/Workbench";
 import { SshPrompt } from "./components/SshPrompt";
 import { LockScreen } from "./components/LockScreen";
 import { SERVER_KEY } from "./components/SignIn";
-import { api, isTauri, type LockStatus, type SignedIn } from "./lib/api";
+import { api, isTauri, type LockStatus, type SignedIn, type Unlocked } from "./lib/api";
+import { startControlBridge } from "./lib/control";
 
 /**
  * **There is no login gate.**
@@ -27,6 +28,11 @@ import { api, isTauri, type LockStatus, type SignedIn } from "./lib/api";
 export function App() {
   const [session, setSession] = useState<SignedIn | null>(null);
   const [lock, setLock] = useState<LockStatus | null>(null);
+
+  // rmux's backend face. Started here rather than lazily, because a client is
+  // free to connect before the operator has touched anything — and it must find
+  // the session list already mirrored rather than empty.
+  useEffect(() => startControlBridge(), []);
 
   // Restoring runs *beside* the app rather than in front of it. Nothing here
   // blocks the workbench, so a slow or unreachable server delays a footer label
@@ -69,8 +75,13 @@ export function App() {
     };
   }, []);
 
-  const unlocked = useCallback((next: SignedIn) => {
-    setSession(next);
+  const unlocked = useCallback((result: Unlocked) => {
+    // A null account means the vault opened but the stored session is stale.
+    // The app still unlocks; the footer simply reads "not signed in", and
+    // signing in again is a button there rather than a wall here.
+    setSession(
+      result.account ? { account: result.account, serverUrl: result.serverUrl } : null,
+    );
     setLock(null);
   }, []);
 
@@ -86,15 +97,22 @@ export function App() {
     setLock(null);
   }, [lock]);
 
+  // Rendered *instead of* the workbench, never over it.
+  //
+  // An overlay would leave the whole workbench mounted and readable behind the
+  // dialog — the transcript, open files, terminal scrollback, everything. A
+  // lock you can read through is not a lock, and the fact that it looks like
+  // one is what makes it worse than none.
+  if (lock?.locked) {
+    return <LockScreen status={lock} onUnlocked={unlocked} onSignOut={forget} />;
+  }
+
   return (
     <>
       <Workbench session={session} onSession={setSession} />
       {/* Mounted above everything: ssh can ask for a credential at any moment,
           including while signed out and working locally. */}
       {isTauri() && <SshPrompt />}
-      {lock?.locked && (
-        <LockScreen status={lock} onUnlocked={unlocked} onSignOut={forget} />
-      )}
     </>
   );
 }

@@ -54,7 +54,7 @@ async fn a_real_token_survives_sealing_and_still_authenticates() {
     // The real test: the token that came out of the vault still works. A
     // round-trip that compares equal but produces a token the server rejects
     // would pass every unit test and lock the user out on the next restart.
-    let session = Session::resume(&server(), reopened).expect("resume");
+    let session = Session::resume(server(), reopened).expect("resume");
     let account = session.me().await.expect("the unsealed token was rejected by the server");
 
     println!("unsealed token authenticated as {} ({})", account.label(), account.username);
@@ -86,7 +86,7 @@ async fn the_wrong_pin_cannot_recover_a_real_session() {
 #[tokio::test]
 #[ignore = "mutates the account: writes a device_trust row that cannot be revoked"]
 async fn this_machine_can_be_trusted_for_face_unlock() {
-    let session = Session::resume(&server(), stored()).expect("resume");
+    let session = Session::resume(server(), stored()).expect("resume");
 
     let account = session.me().await.expect("me");
     println!(

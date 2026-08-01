@@ -288,3 +288,83 @@ mod tests {
         assert!(label.contains(std::env::consts::OS));
     }
 }
+
+/// Jira connections this server has configured.
+#[tauri::command]
+pub async fn jira_profiles(
+    store: State<'_, AuthStore>,
+) -> Result<Vec<rmux_cowork::JiraProfile>, AuthError> {
+    let guard = store.session.read().await;
+    let session = guard.as_ref().ok_or_else(|| AuthError::message("sign in first"))?;
+    Ok(session.jira_profiles().await?)
+}
+
+/// Projects inside one of them.
+#[tauri::command]
+pub async fn jira_projects(
+    store: State<'_, AuthStore>,
+    profile: String,
+) -> Result<Vec<rmux_cowork::JiraProject>, AuthError> {
+    let guard = store.session.read().await;
+    let session = guard.as_ref().ok_or_else(|| AuthError::message("sign in first"))?;
+    Ok(session.jira_projects(&profile).await?)
+}
+
+/// The signed-in account's assigned Jira issues.
+///
+/// `/agency/missions` — a real, deployed, session-independent route. An earlier
+/// version of this file called invented profile-level endpoints and reported
+/// their 404 as "your server does not expose issues", which was wrong: the
+/// server exposes them under a name I had not looked for.
+#[tauri::command]
+pub async fn jira_missions(
+    store: State<'_, AuthStore>,
+) -> Result<Vec<rmux_cowork::JiraIssue>, AuthError> {
+    let guard = store.session.read().await;
+    let session = guard.as_ref().ok_or_else(|| AuthError::message("sign in first"))?;
+    Ok(session.jira_missions().await?)
+}
+
+/// One issue in full — description and comments included.
+#[tauri::command]
+pub async fn jira_mission(
+    store: State<'_, AuthStore>,
+    key: String,
+) -> Result<rmux_cowork::JiraIssueDetail, AuthError> {
+    let guard = store.session.read().await;
+    let session = guard.as_ref().ok_or_else(|| AuthError::message("sign in first"))?;
+    Ok(session.jira_mission(&key).await?)
+}
+
+/// The moves this issue's workflow currently permits.
+#[tauri::command]
+pub async fn jira_transitions(
+    store: State<'_, AuthStore>,
+    key: String,
+) -> Result<Vec<rmux_cowork::JiraTransition>, AuthError> {
+    let guard = store.session.read().await;
+    let session = guard.as_ref().ok_or_else(|| AuthError::message("sign in first"))?;
+    Ok(session.jira_transitions(&key).await?)
+}
+
+#[tauri::command]
+pub async fn jira_transition(
+    store: State<'_, AuthStore>,
+    key: String,
+    transition: String,
+) -> Result<(), AuthError> {
+    let guard = store.session.read().await;
+    let session = guard.as_ref().ok_or_else(|| AuthError::message("sign in first"))?;
+    Ok(session.jira_transition(&key, &transition).await?)
+}
+
+#[tauri::command]
+pub async fn jira_comment(
+    store: State<'_, AuthStore>,
+    key: String,
+    body: String,
+) -> Result<(), AuthError> {
+    let guard = store.session.read().await;
+    let session = guard.as_ref().ok_or_else(|| AuthError::message("sign in first"))?;
+    Ok(session.jira_comment(&key, &body).await?)
+}

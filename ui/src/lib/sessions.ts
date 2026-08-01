@@ -1,6 +1,8 @@
 import { create } from "zustand";
 
-import { api, type FileContent, type TargetRef } from "./api";
+import { invoke } from "@tauri-apps/api/core";
+
+import { api, isTauri, type FileContent, type TargetRef } from "./api";
 
 /**
  * Coding sessions — the thing rmux is actually for.
@@ -57,6 +59,29 @@ export type Session = {
    * `Rendering` in `crates/rmux-claude`.
    */
   fullscreen?: boolean;
+  /**
+   * The Claude credential this session runs as, if it should not use the
+   * default one.
+   *
+   * Per-session because one machine routinely works across accounts — a
+   * personal subscription on your own projects, the org's Console key on the
+   * team's. A single global credential would silently bill the wrong one.
+   */
+  claudeAccount?: string;
+  /**
+   * The Jira project key (e.g. `RMX`) whose issues this session manages.
+   *
+   * Its presence is what makes the Jira tab appear: a tab that is always there
+   * but empty for most sessions is a tab everyone learns to ignore.
+   */
+  jiraProject?: string;
+  /**
+   * The Claude context window, in tokens.
+   *
+   * Set by hand because nothing reports it: the transcript records the model
+   * name, and the same model ships in 200k and 1M variants.
+   */
+  contextWindow?: number;
   status: SessionStatus;
   /** Set when the target could not be reached, so the rail can show it. */
   error: string | null;
@@ -138,6 +163,26 @@ type State = {
   setFullscreen: (id: string, fullscreen: boolean) => void;
   /** Pin the conversation a session resumes, so a restart keeps its context. */
   setResume: (id: string, resume: string) => void;
+  /** 1 = focus one session; 2/3/4 = an NxN grid of them. */
+  grid: number;
+  setGrid: (n: number) => void;
+  /**
+   * Which session is in which grid cell, by index.
+   *
+   * Sparse and explicit. Deriving the grid from list order — the first N
+   * sessions — meant that with eight sessions in a 2x2 the other four were
+   * simply unreachable, and there was no way to say "that host, in that cell".
+   * A cell left `null` is filled automatically, so the grid still works before
+   * anyone has arranged anything.
+   */
+  gridSlots: (string | null)[];
+  /** Put a session in a cell, or `null` to hand the cell back to auto-fill. */
+  assignSlot: (index: number, sessionId: string | null) => void;
+  /** Update the per-session settings. Absent fields are left alone. */
+  configureSession: (
+    id: string,
+    settings: { claudeAccount?: string; jiraProject?: string; contextWindow?: number },
+  ) => void;
   /** Adopt Claude's own conversation title, unless the name was set by hand. */
   adoptClaudeTitle: (id: string, title: string) => void;
   setStatus: (id: string, status: SessionStatus) => void;
@@ -179,6 +224,8 @@ type Persisted = {
   /** Open file paths per session. Contents are re-read; edits are not persisted. */
   openPaths: Record<string, string[]>;
   activePath: Record<string, string | null>;
+  /** Which session sits in which grid cell. See `State.gridSlots`. */
+  gridSlots: (string | null)[];
 };
 
 const EMPTY: Persisted = {
@@ -188,6 +235,7 @@ const EMPTY: Persisted = {
   activeTerminal: {},
   openPaths: {},
   activePath: {},
+  gridSlots: [],
 };
 
 function load(): Persisted {
@@ -219,7 +267,7 @@ function persist(state: State) {
         // Status is derived at runtime; persisting it would show a stale
         // "waiting" badge for a session whose Claude is long gone.
         sessions: state.sessions.map(
-          ({ id, name, renamed, target, folder, resume, fullscreen }) => ({
+          ({
             id,
             name,
             renamed,
@@ -227,9 +275,29 @@ function persist(state: State) {
             folder,
             resume,
             fullscreen,
+            claudeAccount,
+            jiraProject,
+            contextWindow,
+          }) => ({
+            id,
+            name,
+            renamed,
+            target,
+            folder,
+            resume,
+            fullscreen,
+            // Per-session settings are persisted state, not runtime handles:
+            // this list is explicit, so anything added to `Session` and not
+            // added here is silently forgotten on the next start.
+            claudeAccount,
+            jiraProject,
+            contextWindow,
           }),
         ),
         activeSession: state.activeSession,
+        // The grid arrangement is something the operator built, so it outlives
+        // the run that built it.
+        gridSlots: state.gridSlots,
         terminals: state.terminals.map(({ id, sessionId, title }) => ({ id, sessionId, title })),
         activeTerminal: state.activeTerminal,
         openPaths: Object.fromEntries(
@@ -318,7 +386,37 @@ export const useSessions = create<State>((set, get) => ({
     return id;
   },
 
-  removeSession: (id) =>
+  /**
+   * Close a session, and end the work running under it.
+   *
+   * **The kills are the point.** A session's shells and its Claude do not run
+   * inside rmux — they run under `rmux-agent` on the target, precisely so they
+   * survive quitting the app and losing the network. That is what makes closing
+   * one different from closing a window: dropping it from this list alone left
+   * every shell and the conversation running on the host with nothing able to
+   * reach them again, and no way to find them short of `ps` on the server.
+   *
+   * Best effort and never awaited. The session is gone from the operator's
+   * point of view the moment they confirm; an unreachable host must not leave a
+   * row they cannot remove.
+   */
+  removeSession: (id) => {
+    const state = get();
+    const session = state.sessions.find((x) => x.id === id);
+    if (session && isTauri()) {
+      for (const terminal of state.terminals.filter((t) => t.sessionId === id)) {
+        void invoke("terminal_close", {
+          id: terminal.ptyId ?? "",
+          target: session.target,
+          session: terminal.id,
+        }).catch(() => {});
+      }
+      // The agent session name Claude runs under, reconstructed the same way
+      // `ClaudePanel` does — it is derived from the session id rather than
+      // stored, so it survives a restart.
+      void api.claudeEndSession(session.target, `claude-${id}`).catch(() => {});
+    }
+
     set((s) => {
       const sessions = s.sessions.filter((x) => x.id !== id);
       const activeSession =
@@ -333,6 +431,7 @@ export const useSessions = create<State>((set, get) => ({
       const { [id]: _active, ...activeBuffer } = s.activeBuffer;
       const { [id]: _claude, ...claudeSessions } = s.claudeSessions;
 
+      queueMicrotask(() => schedulePersist(get));
       return {
         sessions,
         activeSession,
@@ -341,8 +440,12 @@ export const useSessions = create<State>((set, get) => ({
         activeBuffer,
         claudeSessions,
         terminals: s.terminals.filter((t) => t.sessionId !== id),
+        // A slot pointing at a closed session would hold a cell empty forever
+        // rather than letting auto-fill use it.
+        gridSlots: s.gridSlots.map((slot) => (slot === id ? null : slot)),
       };
-    }),
+    });
+  },
 
   activate: (id) => {
     set({ activeSession: id });
@@ -383,6 +486,62 @@ export const useSessions = create<State>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((x) => (x.id === id ? { ...x, fullscreen } : x)),
     }));
+    schedulePersist(get);
+  },
+
+  grid: Number(localStorage.getItem("rmux.grid")) || 1,
+  setGrid: (n) => {
+    localStorage.setItem("rmux.grid", String(n));
+    set({ grid: n });
+  },
+
+  gridSlots: restored.gridSlots,
+  assignSlot: (index, sessionId) => {
+    set((s) => {
+      const slots = [...s.gridSlots];
+      while (slots.length <= index) slots.push(null);
+
+      // A session may only be in one cell. Two cells holding the same session
+      // would mount its view twice, which means two Claude panes attaching to
+      // one conversation — so putting it here takes it out of wherever it was.
+      if (sessionId) {
+        for (let i = 0; i < slots.length; i += 1) {
+          if (slots[i] === sessionId) slots[i] = null;
+        }
+      }
+      slots[index] = sessionId;
+      return { gridSlots: slots };
+    });
+    schedulePersist(get);
+  },
+
+  configureSession: (id, settings) => {
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === id
+          ? {
+              ...session,
+              // An empty string means "clear it", which is different from
+              // "leave it alone" — so undefined and "" must not collapse.
+              claudeAccount:
+                settings.claudeAccount === undefined
+                  ? session.claudeAccount
+                  : settings.claudeAccount || undefined,
+              jiraProject:
+                settings.jiraProject === undefined
+                  ? session.jiraProject
+                  : settings.jiraProject || undefined,
+              contextWindow:
+                settings.contextWindow === undefined
+                  ? session.contextWindow
+                  : settings.contextWindow || undefined,
+            }
+          : session,
+      ),
+    }));
+    // These are persisted state, not runtime handles — a Claude account and a
+    // Jira project chosen once must survive a restart. This was missing, so
+    // every setting silently reverted the next time the app opened.
     schedulePersist(get);
   },
 

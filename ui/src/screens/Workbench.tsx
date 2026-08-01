@@ -11,7 +11,6 @@ import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
 import { isDirty, useSessions } from "../lib/sessions";
 import { api, isTauri, type LockStatus, type SignedIn } from "../lib/api";
 import { SignIn } from "../components/SignIn";
-import { LockSettings } from "../components/LockSettings";
 
 /**
  * The workbench.
@@ -28,7 +27,6 @@ export function Workbench({
   onSession: (session: SignedIn | null) => void;
 }) {
   const [signInOpen, setSignInOpen] = useState(false);
-  const [lockOpen, setLockOpen] = useState(false);
   const [lock, setLock] = useState<LockStatus | null>(null);
 
   // Whether a lock exists is keychain state, not something this screen can infer
@@ -48,6 +46,8 @@ export function Workbench({
   const activeId = useSessions((s) => s.activeSession);
   const buffers = useSessions((s) => s.buffers);
   const activate = useSessions((s) => s.activate);
+  const grid = useSessions((s) => s.grid);
+  const setGrid = useSessions((s) => s.setGrid);
 
   const [newSessionOpen, setNewSessionOpen] = useState(false);
 
@@ -165,28 +165,44 @@ export function Workbench({
               </span>
             )}
 
+            {/* Focus, or an NxN grid — several sessions at once, the way you
+                would watch several cameras. */}
+            <div className="flex items-center gap-1">
+              <span className="micro">VIEW</span>
+              {[1, 2, 3, 4].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  className="data px-[5px] text-[10px]"
+                  onClick={() => setGrid(n)}
+                  title={n === 1 ? "One session at a time" : `${n}×${n} grid`}
+                  style={{
+                    border: "1px solid var(--border)",
+                    color: grid === n ? "var(--text)" : "var(--text-soft)",
+                    background: grid === n ? "var(--hover)" : "transparent",
+                  }}
+                >
+                  {n === 1 ? "1" : `${n}×${n}`}
+                </button>
+              ))}
+            </div>
+
             {active && <Metrics target={active.target} />}
 
             <span className="micro">
               {session ? session.account.displayName || session.account.username : "not signed in"}
             </span>
-            {/* Only offered while signed in: there is nothing to seal otherwise,
-                and the workbench itself is not what the lock protects. */}
-            {session && (
-              <button
-                type="button"
-                className="micro"
-                style={{ color: lock?.locked ? "var(--text)" : "var(--text-faint)" }}
-                onClick={() => setLockOpen(true)}
-                title={
-                  lock?.locked
-                    ? "rmux asks for your PIN on every start"
-                    : "Ask for a PIN before restoring this session"
-                }
-              >
-                {lock?.locked ? "locked" : "lock"}
-              </button>
-            )}
+            {/* Settings is a separate window: account management and the lock
+                are decisions you visit and leave, not things to watch. */}
+            <button
+              type="button"
+              className="micro"
+              style={{ color: "var(--text-faint)" }}
+              onClick={() => void api.openSettings()}
+              title="Accounts, the app lock, and your Claude credential"
+            >
+              {lock?.locked ? "settings · locked" : "settings"}
+            </button>
             <button
               type="button"
               className="micro"
@@ -218,15 +234,6 @@ export function Workbench({
                 onSession(next);
                 setSignInOpen(false);
               }}
-            />
-          </ErrorBoundary>
-        )}
-        {lockOpen && session && (
-          <ErrorBoundary label="Lock" onReset={() => setLockOpen(false)}>
-            <LockSettings
-              status={lock ?? { locked: false, face: false, username: "", serverUrl: session.serverUrl }}
-              onChanged={setLock}
-              onClose={() => setLockOpen(false)}
             />
           </ErrorBoundary>
         )}

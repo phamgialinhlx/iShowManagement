@@ -165,9 +165,12 @@ export function LockSettings({
 
         {step === "done" && (
           <p className="data text-[11px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+            {/* `status` is already the *new* state by the time this renders —
+                `onChanged` updated it. Reading it as the old one is what made
+                this message say the opposite of what had just happened. */}
             {status.locked
-              ? "The lock is off. rmux will open straight into the workbench."
-              : "Locked. rmux will ask for this on every start."}
+              ? "Locked. rmux will ask for this every time it starts."
+              : "The lock is off. rmux will open straight into the workbench."}
           </p>
         )}
 

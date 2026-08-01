@@ -145,7 +145,16 @@ function Row({
       )}
 
       {confirming ? (
-        <div className="flex gap-1 px-3 pb-2">
+        <div className="flex flex-col gap-1 px-3 pb-2">
+          {/* Said plainly, because it is not what closing a window does. This
+              session's shells and its Claude are running under the agent on the
+              target — they outlive rmux by design — so closing is the thing
+              that ends them. The conversation itself is kept: it is on disk in
+              Claude's own transcript and can be resumed into a new session. */}
+          <span className="micro" style={{ color: "var(--text-soft)" }}>
+            ENDS ITS SHELLS AND CLAUDE ON {(session.target.host ?? "this machine").toUpperCase()}
+          </span>
+          <div className="flex gap-2">
           <button
             type="button"
             className="micro"
@@ -157,6 +166,7 @@ function Row({
           <button type="button" className="micro" onClick={() => setConfirming(false)}>
             cancel
           </button>
+          </div>
         </div>
       ) : (
         <button

@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+
+import { SessionSettings } from "./SessionSettings";
+import { JiraPanel } from "./JiraPanel";
 import { invoke } from "@tauri-apps/api/core";
 
 import { ClaudePanel } from "./ClaudePanel";
@@ -8,6 +11,7 @@ import { BinaryPreview, MarkdownPreview, previewKind } from "./FilePreview";
 import { TerminalView } from "./Terminal";
 import { TranscriptView } from "./TranscriptView";
 import { useSessions, isDirty, type Buffer, type Session } from "../lib/sessions";
+import { gridLayout } from "../lib/grid";
 
 /**
  * One session's workspace.
@@ -26,7 +30,7 @@ import { useSessions, isDirty, type Buffer, type Session } from "../lib/sessions
 
 const TREE_KEY = "rmux.treeWidth";
 
-type View = "claude" | "transcript" | "files" | "terminal";
+type View = "claude" | "transcript" | "files" | "terminal" | "jira" | "settings";
 
 const readSize = (key: string, fallback: number) => {
   const raw = Number(localStorage.getItem(key));
@@ -429,6 +433,12 @@ export function SessionView({ session }: { session: Session }) {
     { id: "transcript", label: "Transcript", hint: "⌘R" },
     { id: "files", label: "Files", hint: "⌘E" },
     { id: "terminal", label: "Terminal", hint: "⌘`" },
+    // Only once a project is assigned. A tab that is always there but empty for
+    // most sessions is a tab everyone learns to ignore.
+    ...(session.jiraProject
+      ? [{ id: "jira" as View, label: session.jiraProject, hint: "" }]
+      : []),
+    { id: "settings", label: "Settings", hint: "" },
   ];
 
   return (
@@ -511,6 +521,21 @@ export function SessionView({ session }: { session: Session }) {
             <TerminalsView session={session} />
           </div>
         )}
+
+        {visited.has("settings") && (
+          <div
+            className="absolute inset-0 overflow-auto"
+            style={{ display: view === "settings" ? "block" : "none" }}
+          >
+            <SessionSettings session={session} />
+          </div>
+        )}
+
+        {session.jiraProject && visited.has("jira") && (
+          <div className="absolute inset-0" style={{ display: view === "jira" ? "block" : "none" }}>
+            <JiraPanel session={session} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -523,10 +548,121 @@ export function SessionView({ session }: { session: Session }) {
  * sessions instant. The cost is memory per session; the alternative is losing a
  * running build's output every time you look away, which is worse.
  */
+/**
+ * Every session's view, laid out.
+ *
+ * Two modes. **Focus** shows one at a time; **grid** shows several at once, the
+ * way you would watch several cameras. Both keep every visited session mounted
+ * and merely change which are displayed — a session that unmounted would lose
+ * its terminal scrollback and its Claude pane's scroll position, and switching
+ * back would feel like reopening rather than returning.
+ *
+ * In grid mode the instruments follow the **last cell you clicked**, not the
+ * one under the pointer. Following hover would make the whole right-hand rail
+ * flicker as the mouse crossed the grid, which is unreadable precisely when you
+ * are trying to compare hosts.
+ */
+/**
+ * Choose what this cell shows.
+ *
+ * Deliberately a corner affordance rather than a header bar: each cell already
+ * carries a `SessionView` with its own tab strip, and adding a second row of
+ * chrome per cell would cost more of a 4x4's screen than the sessions get. It
+ * stays faint until the cell is hovered, so a wall of sixteen terminals is not
+ * also a wall of sixteen controls.
+ *
+ * Empty cells show it permanently — an empty cell with an invisible control is
+ * just a hole in the grid.
+ */
+function CellPicker({ index, session }: { index: number; session: Session | null }) {
+  const sessions = useSessions((s) => s.sessions);
+  const assign = useSessions((s) => s.assignSlot);
+  const [open, setOpen] = useState(false);
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+        }}
+        className="micro absolute right-1 top-1 z-10 px-1 py-[1px] transition-opacity"
+        style={{
+          background: "color-mix(in srgb, var(--app-panel) 82%, transparent)",
+          border: "1px solid var(--border)",
+          color: "var(--text-soft)",
+          opacity: session ? undefined : 1,
+        }}
+        // Tailwind cannot express "visible when the *parent* is hovered" without
+        // a group class on every cell, and the cell is not this component's to
+        // style. Two handlers are less indirection than that.
+        onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text)")}
+        onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-soft)")}
+        title="Choose which session this cell shows"
+      >
+        {session ? "⇄" : "+ SESSION"}
+      </button>
+    );
+  }
+
+  return (
+    <>
+      {/* Click-away. Inside the cell, so it cannot swallow clicks meant for
+          another cell's picker. */}
+      <div className="absolute inset-0 z-10" onMouseDownCapture={() => setOpen(false)} />
+      <div
+        className="menu absolute right-1 top-1 z-20 flex max-h-[70%] w-[210px] flex-col overflow-auto py-1"
+        onMouseDownCapture={(e) => e.stopPropagation()}
+      >
+        {sessions.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            className="flex items-baseline gap-2 px-2 py-[3px] text-left"
+            style={{ background: s.id === session?.id ? "var(--hover)" : "transparent" }}
+            onClick={() => {
+              assign(index, s.id);
+              setOpen(false);
+            }}
+          >
+            <span className="data truncate text-[11px]" style={{ color: "var(--text)" }}>
+              {s.name}
+            </span>
+            <span className="micro ml-auto shrink-0">{s.target.host ?? "local"}</span>
+          </button>
+        ))}
+        {session && (
+          <button
+            type="button"
+            className="micro px-2 py-[3px] text-left"
+            style={{ borderTop: "1px solid var(--border)", marginTop: 4, paddingTop: 6 }}
+            onClick={() => {
+              // Back to auto-fill rather than blank: a cell you cleared should
+              // pick up the next unplaced session, not become a permanent hole.
+              assign(index, null);
+              setOpen(false);
+            }}
+          >
+            CLEAR THIS CELL
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
 export function SessionDeck() {
   const sessions = useSessions((s) => s.sessions);
   const active = useSessions((s) => s.activeSession);
+  const grid = useSessions((s) => s.grid);
+  const activate = useSessions((s) => s.activate);
+  const slots = useSessions((s) => s.gridSlots);
   const [mounted, setMounted] = useState<string[]>([]);
+
+  // Which session is in which cell. Assignments win, empty cells auto-fill —
+  // see `gridLayout`, where the rules are stated and tested.
+  const cells = useMemo(() => gridLayout(sessions, slots, grid), [sessions, slots, grid]);
 
   useEffect(() => {
     if (!active) return;
@@ -535,7 +671,51 @@ export function SessionDeck() {
     setMounted((m) => (m.includes(active) ? m : [...m, active]));
   }, [active]);
 
+  // In grid mode every session on screen has to be mounted, not just the ones
+  // that have been visited — otherwise the cells come up empty until clicked.
+  useEffect(() => {
+    if (grid < 2) return;
+    const wanted = cells.filter((c): c is Session => !!c).map((s) => s.id);
+    setMounted((m) => [...m, ...wanted.filter((id) => !m.includes(id))]);
+  }, [grid, cells]);
+
   const live = mounted.filter((id) => sessions.some((s) => s.id === id));
+
+  if (grid >= 2) {
+    return (
+      <div
+        className="grid min-h-0 flex-1 gap-[1px]"
+        style={{
+          gridTemplateColumns: `repeat(${grid}, minmax(0, 1fr))`,
+          gridAutoRows: "minmax(0, 1fr)",
+          background: "var(--border)",
+        }}
+      >
+        {cells.map((session, index) => (
+          <div
+            key={session ? session.id : `empty-${index}`}
+            className="relative flex min-h-0 flex-col overflow-hidden"
+            onMouseDownCapture={() => session && activate(session.id)}
+            style={{
+              // Chalk, not red. Red is reserved for "the operator must act", and
+              // spending it on "this is the cell you clicked" is exactly the
+              // dilution the design system warns about — every cell you touch
+              // would look like an alert.
+              outline:
+                session && session.id === active
+                  ? "1px solid rgba(232,230,225,0.45)"
+                  : "1px solid transparent",
+              outlineOffset: -1,
+              background: session ? undefined : "var(--app-bg)",
+            }}
+          >
+            {session ? <SessionView session={session} /> : null}
+            <CellPicker index={index} session={session} />
+          </div>
+        ))}
+      </div>
+    );
+  }
 
   return (
     <>

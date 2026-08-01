@@ -26,6 +26,7 @@ use rmux_transport::{
 };
 
 pub mod askpass;
+pub mod forward;
 pub mod config;
 pub mod mux;
 

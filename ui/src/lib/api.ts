@@ -34,6 +34,16 @@ export type LockStatus = {
   serverUrl: string;
 };
 
+/**
+ * The result of opening the vault.
+ *
+ * `account` is null when the PIN was right but the stored Cowork session is no
+ * longer usable. The app is unlocked either way — the workbench never needed an
+ * account, and refusing entry over a lapsed token would strand you in the one
+ * screen that gates everything.
+ */
+export type Unlocked = { account: Account | null; serverUrl: string };
+
 export type ModelsStatus = {
   installed: boolean;
   /** Total download size, so the operator can be told before it starts. */
@@ -52,6 +62,55 @@ export type TargetRef = {
   user?: string;
   port?: number;
 };
+
+/** A port something is listening on, on the target. */
+export type ListeningPort = { port: number; process: string };
+
+/** A session as clients see it — deliberately less than rmux's own `Session`. */
+export type ControlSession = {
+  id: string;
+  name: string;
+  host?: string;
+  folder: string;
+};
+
+export type ControlInfo = { running: boolean; handshake?: string };
+
+export type JiraTransition = { id: string; name: string; to?: string };
+
+export type JiraIssue = {
+  key: string;
+  summary: string;
+  /** Free text — a Jira admin can rename or add statuses at will. */
+  status: string;
+  /**
+   * `todo` | `inprogress` | `done`.
+   *
+   * The server already collapses Jira's `new`/`indeterminate`/`done` into these
+   * three (`mapCat`), and this is the only part of a status safe to reason
+   * about: the *names* are per-project and renameable.
+   */
+  statusCategory?: string;
+  assignee?: string | null;
+  /** Deep link into Jira itself, built server-side from the profile's base URL. */
+  url?: string;
+};
+
+export type JiraComment = { author?: string | null; created: string; bodyHtml: string };
+
+export type JiraIssueDetail = JiraIssue & {
+  /** Jira renders its own markup server-side, so this is HTML. */
+  descriptionHtml: string;
+  description: string;
+  issueType: string;
+  comments: JiraComment[];
+};
+
+export type ForwardState = "local" | "starting" | "active" | "failed" | "stopped";
+export type Forward = { port: number; state: ForwardState; error?: string };
+
+export type JiraProfile = { name: string; baseUrl: string; email: string | null };
+export type JiraProject = { key: string; name: string };
 
 export type JiraStart = { ok: boolean; authUrl: string; state: string };
 
@@ -133,6 +192,21 @@ export type MetricsSample = {
   memoryUsedBytes: number;
   memoryTotalBytes: number;
   loadAverage: number;
+  /** The host's own name, which need not match the ssh alias used to reach it. */
+  hostname: string;
+  uptimeSeconds: number;
+  /** Bytes/sec, null until a second sample exists to difference against. */
+  netRxBps: number | null;
+  netTxBps: number | null;
+  /** `ps` reports %CPU per core; this is the divisor that makes it a share. */
+  cores: number;
+};
+
+export type ProcessInfo = {
+  pid: number;
+  name: string;
+  cpuPercent: number;
+  memoryPercent: number;
 };
 
 /** A host from ~/.ssh/config. `hostname` and `user` are display hints only —
@@ -239,6 +313,56 @@ export const api = {
     call<SignedIn | null>("jira_poll", { serverUrl, state }),
   openExternal: (url: string) => call<void>("open_external", { url }),
 
+  /** Open Settings in its own window, or focus it if it is already open. */
+  openSettings: () => call<void>("open_settings"),
+
+  /** The heaviest processes on a host. Polled only while the widget is open. */
+  metricsProcesses: (target: TargetRef, by: "cpu" | "memory") =>
+    call<ProcessInfo[]>("metrics_processes", { target, by }),
+
+  /** Jira connections the server has configured. Profile-level, so no
+   *  server-side session row is required. */
+  // --- the control socket ---------------------------------------------------
+  //
+  // Port discovery and forwarding used to live here, driving an in-app browser
+  // tab. That tab is gone: rmux's webview is WKWebView, there is only one of it,
+  // and it cannot be given a per-session proxy — so the page it showed always
+  // needed a forwarded port, which is the manual step the feature existed to
+  // remove. Those calls now belong to `rmux-control`, where a real browser can
+  // ask for a SOCKS proxy per session instead.
+
+  /** Mirror the session list down to Rust, so clients can see it. */
+  controlSync: (sessions: ControlSession[], active: string | null) =>
+    call<void>("control_sync", { sync: { sessions, active } }),
+  /** Ask a connected browser to open a URL in this session's partition. */
+  controlOpenUrl: (session: string, url: string, focus = true) =>
+    call<boolean>("control_open_url", { session, url, focus }),
+  controlInfo: () => call<ControlInfo>("control_info"),
+
+  jiraProfiles: () => call<JiraProfile[]>("jira_profiles"),
+  jiraProjects: (profile: string) => call<JiraProject[]>("jira_projects", { profile }),
+  /** The signed-in account's assigned issues. Server-side route: /agency/missions. */
+  jiraMissions: () => call<JiraIssue[]>("jira_missions"),
+  jiraMission: (key: string) => call<JiraIssueDetail>("jira_mission", { key }),
+  /** The moves this issue's workflow permits *right now* — asked, never assumed. */
+  jiraTransitions: (key: string) => call<JiraTransition[]>("jira_transitions", { key }),
+  jiraTransition: (key: string, transition: string) =>
+    call<void>("jira_transition", { key, transition }),
+  jiraComment: (key: string, body: string) => call<void>("jira_comment", { key, body }),
+
+  // --- the Claude credential ------------------------------------------------
+  //
+  // Driving the real `claude setup-token` in a pty rather than reimplementing
+  // its OAuth flow. Neither the code nor the token is ever stored here.
+
+  /** Start the flow; returns the link to authorise in a browser. */
+  claudeLoginStart: (target?: TargetRef) =>
+    call<{ authUrl: string }>("claude_login_start", { target }),
+  /** Hand back the code from the browser; returns the new account status. */
+  claudeLoginSubmit: (code: string) =>
+    call<ClaudeAccount>("claude_login_submit", { code }),
+  claudeLoginCancel: () => call<void>("claude_login_cancel"),
+
   // --- the app lock ---------------------------------------------------------
   //
   // The PIN never comes back down from Rust and neither does the device secret.
@@ -249,16 +373,18 @@ export const api = {
     call<LockStatus>("lock_enable", { request: { pin, face } }),
   lockDisable: (pin: string) => call<void>("lock_disable", { pin }),
   lockUnlock: (serverUrl: string, pin: string) =>
-    call<SignedIn>("lock_unlock", { serverUrl, pin }),
+    call<Unlocked>("lock_unlock", { serverUrl, pin }),
   /** Takes 128 floats. The camera frame itself never leaves the webview. */
   lockUnlockFace: (serverUrl: string, descriptor: number[]) =>
-    call<SignedIn>("lock_unlock_face", { serverUrl, descriptor }),
+    call<Unlocked>("lock_unlock_face", { serverUrl, descriptor }),
   /** Omit the descriptor to trust this machine against an already-enrolled face. */
   faceEnroll: (descriptor?: number[]) => call<void>("face_enroll", { descriptor }),
   faceStatus: () => call<Account>("face_status"),
 
   faceModelsStatus: () => call<ModelsStatus>("face_models_status"),
   faceModelsInstall: () => call<ModelsStatus>("face_models_install"),
+  /** One model file as base64. Delivered over IPC rather than fetched. */
+  faceModelFile: (name: string) => call<string>("face_model_file", { name }),
 
   fsList: (target: TargetRef, path: string) =>
     call<DirEntry[]>("fs_list", { target, path }),

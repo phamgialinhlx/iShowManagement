@@ -60,7 +60,15 @@
    * --glass-pct opacity of floating windows
    */
   --app-veil: 4%;
-  --app-blur: 6px;
+  /* 6px is not frost — at that radius the backdrop stays legible through the
+     panel and the sheet reads as slightly-dirty transparency rather than as
+     glass. This is the radius the previous app's panels actually used. */
+  --app-blur: 20px;
+  /* Panel opacity, driven by Settings > Appearance.
+     38%, not the 64% this shipped with: measured against a real dark wallpaper,
+     64% plus the old scrim was visually solid. Anyone who needs more contrast
+     over a bright desktop raises it; that is what the slider is for. */
+  --panel-tint: 38%;
   --glass-pct: 94%;
 
   /* The signature easing. One curve, one duration, everywhere. */
@@ -194,13 +202,29 @@ textarea,
   opacity: var(--backdrop-opacity, 1);
 }
 
+/*
+ * The scrim over that backdrop — and it is now barely there, because it was the
+ * thing hiding the desktop entirely.
+ *
+ * What sits behind the glass is the operator's own wallpaper, through the macOS
+ * `underWindowBackground` material. This layer used to reach `rgba(6,6,6,0.46)`
+ * at the edges, and every panel then blurred *that* rather than the wallpaper.
+ * Against a dark wallpaper the sum — scrim plus a 64% panel tint — came out
+ * indistinguishable from solid black, and no Appearance setting could recover
+ * it: **the scrim is not one of the two knobs**, so an operator turning Glass
+ * all the way down still saw an opaque app. Verified by removing it.
+ *
+ * So it now does the one job worth doing — a whisper of vignette and the
+ * registration grid — and legibility is left to `--panel-tint`, which is
+ * tunable.
+ */
 .atmosphere::after {
   content: "";
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse at 50% 42%, rgba(6, 6, 6, 0.34), rgba(6, 6, 6, 0.7) 92%),
-    radial-gradient(640px 480px at 22% 24%, rgb(var(--primary) / 0.07), transparent 70%),
+    radial-gradient(ellipse at 50% 42%, transparent, rgba(6, 6, 6, 0.14) 96%),
+    radial-gradient(640px 480px at 22% 24%, rgb(var(--primary) / 0.05), transparent 70%),
     radial-gradient(rgba(232, 230, 225, 0.05) 1px, transparent 1px);
   background-size: auto, auto, 26px 26px;
 }
@@ -214,13 +238,39 @@ textarea,
  * sheets. One full-screen blur loses that entirely.
  */
 .panel {
-  background: color-mix(in srgb, var(--app-panel) 52%, transparent);
-  backdrop-filter: blur(var(--app-blur));
-  -webkit-backdrop-filter: blur(var(--app-blur));
+  /* Tint carries legibility, blur and saturation carry the material. Raising
+     the tint is what buys the headroom to let the scrim behind get thin: 9px
+     labels still need 4.5:1 over whatever wallpaper is behind them. */
+  background: color-mix(in srgb, var(--app-panel) var(--panel-tint, 64%), transparent);
+  /* `saturate` is the half that was missing. Blur alone desaturates whatever it
+     samples, so frosted colour turns to frosted grey — the exact "flat panel"
+     look. Pushing saturation back up is what makes the sheet read as glass with
+     light in it rather than as a dark card. */
+  backdrop-filter: blur(var(--app-blur)) saturate(1.5);
+  -webkit-backdrop-filter: blur(var(--app-blur)) saturate(1.5);
   border: 1px solid var(--border);
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.08),
     inset 0 0 0 1px rgb(255 255 255 / 0.03);
+}
+
+/*
+ * The terminals are glass too — and this is the rule that makes them so.
+ *
+ * `allowTransparency` plus a `rgba(0,0,0,0)` theme is *not* enough, which is
+ * why two rounds of changing our own backdrops did nothing. xterm's own
+ * stylesheet paints `.xterm-viewport` solid `#000` — its comment says it is
+ * "required in order for the scroll bar to appear fully opaque" — and that
+ * element is absolutely positioned across the whole terminal, behind the rows.
+ * So every xterm ships an opaque black rectangle that no theme colour touches,
+ * and it was covering the only part of the app that had a wallpaper behind it.
+ *
+ * We reserve scrollbar space globally (see `::-webkit-scrollbar` above) rather
+ * than letting macOS float an overlay one, so the reason for that `#000` does
+ * not apply here.
+ */
+.xterm .xterm-viewport {
+  background-color: transparent !important;
 }
 
 /* Floating windows sit closer to opaque so stacked windows stay legible. */
@@ -585,4 +635,16 @@ body[data-hidden="true"] * {
   to {
     transform: translateX(363%);
   }
+}
+
+/*
+ * The one blink the design system allows: a cursor. Liveness everywhere else is
+ * data moving, never a flashing element.
+ */
+@keyframes blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.blink {
+  animation: blink 1.06s step-end infinite;
 }
