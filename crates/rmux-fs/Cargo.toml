@@ -1,0 +1,22 @@
+[package]
+name = "rmux-fs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rmux-transport.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+dirs.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rmux-ssh.workspace = true
+rmux-metrics.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

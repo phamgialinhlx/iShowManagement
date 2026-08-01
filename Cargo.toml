@@ -1,0 +1,115 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rmux-proto",
+    "crates/rmux-transport",
+    "crates/rmux-ssh",
+    "crates/rmux-agent",
+    "crates/rmux-fs",
+    "crates/rmux-term",
+    "crates/rmux-claude",
+    "crates/rmux-metrics",
+    "crates/rmux-browser",
+    "crates/rmux-cowork",
+    "crates/rmux-core",
+    "askpass",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/ngocanhnckh/rmux"
+
+[workspace.dependencies]
+# --- internal ---
+rmux-proto = { path = "crates/rmux-proto" }
+rmux-transport = { path = "crates/rmux-transport" }
+rmux-ssh = { path = "crates/rmux-ssh" }
+rmux-fs = { path = "crates/rmux-fs" }
+rmux-term = { path = "crates/rmux-term" }
+rmux-claude = { path = "crates/rmux-claude" }
+rmux-agent = { path = "crates/rmux-agent" }
+rmux-metrics = { path = "crates/rmux-metrics" }
+rmux-browser = { path = "crates/rmux-browser" }
+rmux-cowork = { path = "crates/rmux-cowork" }
+rmux-core = { path = "crates/rmux-core" }
+
+# --- async / runtime ---
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# --- errors / logging ---
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- serialization ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+prost = "0.14"
+prost-build = "0.14"
+bytes = "1"
+
+# --- terminal ---
+# Pinned exactly: alacritty_terminal offers no stability guarantee across minor versions.
+alacritty_terminal = "=0.26.0"
+portable-pty = "0.9"
+
+# --- system / metrics ---
+sysinfo = "0.39"
+
+# --- network / http ---
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
+
+# --- browser automation (CDP) ---
+chromiumoxide = { version = "0.9", default-features = false, features = [
+    "tokio-runtime",
+] }
+
+# --- credentials ---
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
+
+# --- ssh (Windows fallback only; macOS/Linux shell out to the system ssh binary) ---
+russh = "0.62"
+
+# --- lock (PIN-sealed session vault) ---
+# argon2id because a PIN is a tiny secret: the only thing standing between four
+# digits and the session is how expensive each guess is to make.
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+rand = "0.9"
+sha2 = "0.10"
+
+# --- misc ---
+camino = { version = "1", features = ["serde1"] }
+dirs = "6"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+
+# The remote agent is uploaded over the wire on every version bump, so size matters
+# more than anything else about it.
+[profile.agent-release]
+inherits = "release"
+opt-level = "z"

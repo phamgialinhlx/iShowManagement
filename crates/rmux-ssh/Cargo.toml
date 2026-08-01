@@ -1,0 +1,24 @@
+[package]
+name = "rmux-ssh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rmux-transport.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+camino.workspace = true
+dirs.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

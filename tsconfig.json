@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  // The browser harnesses (`ui/*-check.ts`) are included deliberately. They were
+  // outside this list and therefore silently unchecked, so `tsc --noEmit` passed
+  // while one of them referenced an undefined symbol.
+  "include": ["ui/src", "ui/office-check.ts", "ui/terminal-check.ts", "ui/xterm-clipboard-check.ts", "ui/lock-check.ts", "vite.config.ts"]
+}

@@ -1,0 +1,17 @@
+[package]
+name = "rmux-askpass"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rmux-askpass"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+rmux-ssh.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1,0 +1,45 @@
+/*
+ * Fonts are bundled, never fetched.
+ *
+ * The old app pulled IBM Plex Mono from Google Fonts, which meant the UI
+ * rendered in a fallback face for the first frames of every cold start — and
+ * rendered wrong entirely on a machine with no route to the internet, which is
+ * a normal state for a tool whose whole job is talking to remote servers.
+ *
+ * `font-display: block` is deliberate. This is a dense, tightly-tracked
+ * interface; a swap from a fallback metric would reflow every label. A brief
+ * invisible-text period is the better trade for a local font that loads in
+ * single-digit milliseconds.
+ *
+ * CSS requires every @import to precede all other statements, so the bundled
+ * Plex Mono faces come first and the local @font-face rules follow.
+ */
+
+@import "@fontsource/ibm-plex-mono/300.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+
+@font-face {
+  font-family: "SFU Futura";
+  src: url("/fonts/SFUFuturaBook.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "SFU Futura";
+  src: url("/fonts/SFUFuturaBold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "SFU Futura";
+  src: url("/fonts/SFUFuturaHeavy.ttf") format("truetype");
+  font-weight: 800;
+  font-style: normal;
+  font-display: block;
+}

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Notarisation requires the hardened runtime, and the hardened runtime
+	     denies the camera unless it is entitled here. Without this a signed
+	     build would fail face unlock in a way an unsigned build does not,
+	     which is the most confusing possible place for the two to differ. -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+
+	<!-- WKWebView JITs JavaScript. Under the hardened runtime the web content
+	     process cannot start without these, so the window comes up blank. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!-- rmux runs the system `ssh` binary, and the whole SSH design depends on
+	     that rather than on a linked library — see the transport crate. -->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,588 @@
+/*
+ * SIGNAL ROOM — rmux design system
+ * ================================
+ *
+ * Four rules. They are what make this look deliberate rather than decorated,
+ * and every one of them is load-bearing:
+ *
+ *   0. Red appears ONLY where the operator must act (waiting / decision /
+ *      overdue). Working and done stay monochrome. If red means three things it
+ *      means nothing, and a screen full of alerts trains you to ignore alerts.
+ *   1. Zero border-radius, everywhere. Hairlines, not glows.
+ *   2. Blinking is reserved for cursors. Liveness is shown by data moving, never
+ *      by opacity flicker — a pulsing dot conveys no information and costs
+ *      attention continuously.
+ *   3. No emoji. Inline SVG icons only, Lucide-style, 1.5-1.7px strokes,
+ *      square caps.
+ */
+
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ tokens */
+
+:root {
+  /* The one accent. Reserved for "you must act" — see rule 0. */
+  --primary: 230 59 46;
+  --primary-soft: 232 230 225;
+
+  --app-bg: #060606;
+  --app-panel: #0a0a0a;
+  --app-panel-2: #0e0e0e;
+  --app-elev: #121212;
+
+  --border: rgba(232, 230, 225, 0.14);
+  --border-strong: rgba(232, 230, 225, 0.24);
+  --hover: rgba(232, 230, 225, 0.055);
+
+  --text: #e8e6e1;
+  --text-soft: #98958f;
+  /*
+   * Raised from #5c5953, which measured 2.77:1 against the panel — well under
+   * the 4.5:1 that normal text needs to be legible. Most of what wears this is
+   * 9px micro-labels, which is exactly the size that cannot afford to be dim.
+   * #7e7b74 measures 4.57:1 and still sits a clear step below `--text-soft`
+   * (6.46:1), so the three-level hierarchy survives.
+   */
+  --text-faint: #7e7b74;
+
+  /* Work in progress is amber, never red — rule 0. */
+  --busy: 242 168 60;
+  --warn: #e0a44a;
+
+  --font-display: "SFU Futura", "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-body: var(--font-display);
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /*
+   * User-tunable material knobs (Settings > Appearance).
+   * --app-veil  how much desktop shows through the shell
+   * --app-blur  per-panel frost radius
+   * --glass-pct opacity of floating windows
+   */
+  --app-veil: 4%;
+  --app-blur: 6px;
+  --glass-pct: 94%;
+
+  /* The signature easing. One curve, one duration, everywhere. */
+  --ease: cubic-bezier(0.2, 0.9, 0.3, 1);
+  --dur: 0.3s;
+
+  color-scheme: dark;
+}
+
+/*
+ * Rule 1, enforced rather than encouraged. A single stray rounded corner reads
+ * as a mistake against everything else, and rounding creeps in through every
+ * third-party component (xterm, Monaco, form controls) unless it is stamped out
+ * globally.
+ */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+}
+
+/* The one exception: genuinely circular instruments — gauges, radar, avatars. */
+.round,
+.round::before,
+.round::after {
+  border-radius: 50% !important;
+}
+
+/* -------------------------------------------------------------------- base */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: transparent; /* the native window is translucent; see atmosphere */
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  /* The whole shell is a desktop app, not a document. */
+  user-select: none;
+  cursor: default;
+}
+
+/* Rule 0 again: the caret is the one place red is always correct. */
+input,
+textarea,
+[contenteditable] {
+  caret-color: rgb(var(--primary));
+  user-select: text;
+}
+
+::selection {
+  background: rgb(var(--primary) / 0.3);
+  color: var(--text);
+}
+
+/* Square, thin, and always space-reserving. macOS overlay scrollbars float over
+ * content, which makes a terminal's last column unreadable. */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #242424;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2e2e2e;
+}
+
+/* ------------------------------------------------------------- typography */
+
+.display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.05;
+  text-transform: uppercase;
+}
+
+.kicker {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.6rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+
+/* The recurring micro-label: every panel header, every field caption. */
+.micro {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* All data is mono — numbers must align in a column to be comparable at a glance. */
+.data {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- material */
+
+/*
+ * The backdrop. A defocused photo under a scrim, a faint red bloom, and a
+ * registration dot grid. It sits behind everything at the root level.
+ */
+.atmosphere {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.atmosphere::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--backdrop-image, none) center / cover no-repeat;
+  opacity: var(--backdrop-opacity, 1);
+}
+
+.atmosphere::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 50% 42%, rgba(6, 6, 6, 0.34), rgba(6, 6, 6, 0.7) 92%),
+    radial-gradient(640px 480px at 22% 24%, rgb(var(--primary) / 0.07), transparent 70%),
+    radial-gradient(rgba(232, 230, 225, 0.05) 1px, transparent 1px);
+  background-size: auto, auto, 26px 26px;
+}
+
+/*
+ * Per-panel frost — NOT a single app-wide blur.
+ *
+ * This is the detail that makes the material read as glass instead of as a grey
+ * overlay: because each panel blurs independently, the backdrop stays SHARP in
+ * the gaps between panels, so you can see it is a real photograph behind real
+ * sheets. One full-screen blur loses that entirely.
+ */
+.panel {
+  background: color-mix(in srgb, var(--app-panel) 52%, transparent);
+  backdrop-filter: blur(var(--app-blur));
+  -webkit-backdrop-filter: blur(var(--app-blur));
+  border: 1px solid var(--border);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.08),
+    inset 0 0 0 1px rgb(255 255 255 / 0.03);
+}
+
+/* Floating windows sit closer to opaque so stacked windows stay legible. */
+.window {
+  background: color-mix(in srgb, var(--app-panel) var(--glass-pct), transparent);
+  backdrop-filter: blur(30px) saturate(1.4);
+  -webkit-backdrop-filter: blur(30px) saturate(1.4);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 0.5);
+}
+
+.menu {
+  background: color-mix(in srgb, var(--app-panel) 92%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 24px 70px -30px rgb(0 0 0 / 0.8);
+}
+
+.inset {
+  background: color-mix(in srgb, var(--app-elev) 62%, transparent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
+}
+
+/* `hudClear`: dissolve the shell so only the instruments float over the desktop. */
+[data-hud-clear="true"] .panel {
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+/* ---------------------------------------------------------------- controls */
+
+.btn {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  padding: 8px 16px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--text-faint);
+}
+
+.btn:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+/*
+ * The primary action: a chalk plate that turns signal red on hover. Red on
+ * *intent to act* is consistent with rule 0 — it is the one control where the
+ * operator is about to do the thing red is reserved for.
+ */
+.btn-primary {
+  background: var(--text);
+  color: #0a0a0a;
+  border-color: var(--text);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: rgb(var(--primary));
+  border-color: rgb(var(--primary));
+  color: var(--text);
+}
+
+/*
+ * A disabled primary button must NOT keep the chalk plate. `.btn-primary` sets
+ * an explicit colour, which overrides `.btn:disabled` — so without this rule the
+ * button renders exactly like an enabled one and simply refuses to respond,
+ * which reads as the app being broken rather than as input being incomplete.
+ */
+.btn-primary:disabled {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-faint);
+}
+
+.field {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 9px 12px;
+  width: 100%;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  color: var(--text);
+  outline: none;
+  transition: border-color var(--dur) var(--ease);
+}
+
+.field:focus {
+  border-color: var(--border-strong);
+}
+
+/* An input in an error state is exactly the "operator must act" case. */
+.field[aria-invalid="true"] {
+  border-color: rgb(var(--primary));
+}
+
+/* ------------------------------------------------------------------ motifs */
+
+/* Corner L-bracket. The single most recognisable mark in the language. */
+.corner {
+  position: relative;
+}
+
+.corner::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  border-top: 1px solid rgb(var(--primary-soft) / 0.5);
+  border-right: 1px solid rgb(var(--primary-soft) / 0.5);
+  pointer-events: none;
+}
+
+/* Hairline separator — a rule, never a shadow. */
+.hairline {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 0;
+}
+
+/* --------------------------------------------------------------- animation */
+
+/*
+ * Panel entrance: an eDEX-style build-in that opens from a horizontal slit.
+ * Reads as an instrument powering on rather than a box fading in.
+ */
+@keyframes build-in {
+  from {
+    clip-path: inset(49.5% 0 49.5% 0);
+    opacity: 0;
+  }
+  45% {
+    opacity: 1;
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+    opacity: 1;
+  }
+}
+
+.build-in {
+  animation: build-in var(--dur) var(--ease) both;
+}
+
+/*
+ * Meter "breathe". Scales the BAR only — never the printed number.
+ *
+ * That distinction is the whole point of rule 2: the animation says "this
+ * reading is live", while the digits stay exactly as measured. Animating the
+ * value itself would be inventing data.
+ */
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scaleX(1);
+  }
+  50% {
+    transform: scaleX(1.03);
+  }
+}
+
+.breathe {
+  animation: breathe 3.2s ease-in-out infinite;
+  transform-origin: left center;
+}
+
+/* Work in progress: amber, and a glow rather than a blink. */
+@keyframes working {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(var(--busy) / 0.28);
+  }
+  50% {
+    box-shadow: 0 0 17px 0 rgb(var(--busy) / 0.55);
+  }
+}
+
+.working {
+  animation: working 2.6s ease-in-out infinite;
+}
+
+/* The equalizer that indicates an agent is thinking — data movement, not flicker. */
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.eq-bar {
+  width: 2px;
+  height: 14px;
+  background: var(--text-soft);
+  transform-origin: bottom;
+  animation: eq 0.9s ease-in-out infinite;
+}
+
+.eq-bar:nth-child(2) { animation-delay: 0.15s; }
+.eq-bar:nth-child(3) { animation-delay: 0.3s; }
+.eq-bar:nth-child(4) { animation-delay: 0.45s; }
+
+/* Rule 2: the ONLY blink in the system. Hard on/off, no fade — a faded cursor
+ * looks like a rendering bug. */
+@keyframes caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.caret {
+  animation: caret 1s step-end infinite;
+}
+
+/* Sparkline draw-on. */
+@keyframes draw {
+  from {
+    stroke-dashoffset: 600;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.draw {
+  stroke-dasharray: 600;
+  animation: draw 1.1s ease forwards;
+}
+
+/*
+ * Every infinite animation stops when the window is hidden. Without this the
+ * compositor keeps burning battery on animations nobody is looking at.
+ */
+body[data-hidden="true"] * {
+  animation-play-state: paused !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ------------------------------------------------------- markdown preview */
+
+/*
+ * Rendered markdown. Sized and spaced to read as a document rather than as UI
+ * chrome, while staying inside the palette — headings are weight and tracking,
+ * not colour, because colour here would compete with the accent that means
+ * "act now".
+ */
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin: 1.6em 0 0.6em;
+  line-height: 1.2;
+}
+.markdown h1 { font-size: 1.5rem; }
+.markdown h2 { font-size: 1.15rem; }
+.markdown h3 { font-size: 1rem; color: var(--text-soft); }
+.markdown h4 { font-size: 0.9rem; color: var(--text-soft); }
+.markdown h1:first-child,
+.markdown h2:first-child { margin-top: 0; }
+
+.markdown p { margin: 0 0 1em; }
+.markdown ul,
+.markdown ol { margin: 0 0 1em; padding-left: 1.4em; }
+.markdown li { margin: 0.25em 0; }
+.markdown ul { list-style: square; }
+
+.markdown a { color: rgb(var(--primary)); text-decoration: underline; }
+
+.markdown code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: rgba(232, 230, 225, 0.07);
+  padding: 0.1em 0.35em;
+}
+.markdown pre {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  padding: 12px;
+  /* Long lines scroll inside the block; the page itself must never scroll
+     sideways. */
+  overflow-x: auto;
+  margin: 0 0 1em;
+}
+.markdown pre code { background: none; padding: 0; }
+
+.markdown blockquote {
+  border-left: 2px solid var(--border-strong);
+  margin: 0 0 1em;
+  padding-left: 1em;
+  color: var(--text-soft);
+}
+
+.markdown table { border-collapse: collapse; margin: 0 0 1em; display: block; overflow-x: auto; }
+.markdown th,
+.markdown td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; }
+.markdown th { font-weight: 700; background: rgba(232, 230, 225, 0.05); }
+
+.markdown hr { border: 0; border-top: 1px solid var(--border); margin: 1.6em 0; }
+.markdown img { max-width: 100%; }
+
+/* ------------------------------------------------------------ waiting sweep */
+
+/*
+ * The one indeterminate progress indicator in the system.
+ *
+ * A sweep rather than a spinner or a pulse: rule 2 forbids conveying liveness by
+ * opacity flicker, and a spinner says only "something is happening" — which the
+ * operator already assumed. This moves in one direction at a constant rate, so
+ * it reads as a process running rather than as decoration.
+ *
+ * Paused when the window is hidden, like every other infinite animation here:
+ * an off-screen animation is pure battery cost.
+ */
+.sweep {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--text-soft) 45%,
+    var(--text) 55%,
+    transparent
+  );
+  animation: sweep 1.15s var(--ease) infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(363%);
+  }
+}

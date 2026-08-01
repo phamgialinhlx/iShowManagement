@@ -1,0 +1,44 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node / Vite
+node_modules
+/dist
+*.tsbuildinfo
+
+# Tauri build output
+/src-tauri/target
+/src-tauri/gen
+
+# Local tooling artifacts
+.playwright-mcp/
+*.log
+
+# Screenshots taken during development
+rmux-m0*.png
+
+# The cross-compiled remote agents: multi-MB binaries, rebuilt by
+# scripts/build-agents.sh and shipped as bundle resources.
+/src-tauri/agents/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+.creds
+
+# Deployment-specific notes: hostnames, org name, accounts, machines, signing
+# identity. Ignored deliberately — this repository is meant to be shareable, and
+# a hostname committed once stays in the history forever. Everything tracked
+# must stay generic; the live tests read RMUX_LIVE_SERVER instead.
+CLAUDE.local.md
+*.local.md
+
+# Signing material. A .p12 carries a private key.
+*.p12
+*.cer
+*.der
+*.mobileprovision
+
+.DS_Store
