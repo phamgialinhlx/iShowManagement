@@ -10,6 +10,7 @@ use serde::Serialize;
 
 mod askpass;
 mod control;
+mod notify;
 mod paste;
 mod tunnels;
 pub mod agent;
@@ -44,6 +45,9 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // Gives a notification rmux's own icon and name. Driven from Rust (see
+        // `notify`), so it needs no ACL entry.
+        .plugin(tauri_plugin_notification::init())
         // Face model weights. See `face_models::SCHEME` for why this is a
         // protocol of our own rather than Tauri's asset: handler.
         .register_uri_scheme_protocol(face_models::SCHEME, |ctx, request| {
@@ -75,6 +79,7 @@ pub fn run() {
         .manage(claude_login::LoginStore::default())
         .manage(tunnels::TunnelStore::default())
         .manage(control::ControlState::default())
+        .manage(notify::NotifyStore::default())
         .invoke_handler(tauri::generate_handler![
             commands::local_target,
             commands::run_on_target,
@@ -122,6 +127,8 @@ pub fn run() {
             metrics::metrics_processes,
             metrics::metrics_kill,
             paste::claude_paste_image,
+            notify::notify,
+            notify::notify_reset,
             tunnels::ports_discover,
             tunnels::port_forward,
             tunnels::port_unforward,

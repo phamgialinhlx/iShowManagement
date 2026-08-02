@@ -135,7 +135,15 @@ function useHostSample(target: TargetRef) {
   const [failed, setFailed] = useState(false);
   const [cpuHistory, setCpuHistory] = useState<number[]>([]);
   const [ramHistory, setRamHistory] = useState<number[]>([]);
-  const [netPeak, setNetPeak] = useState(1);
+  // A rolling window of recent throughput, not an all-time maximum.
+  //
+  // This was `Math.max(peak, now)`, which only ever grew — so one burst (an
+  // agent upload, a `git clone`) pinned the scale permanently and every normal
+  // reading afterwards rendered as a fraction of a percent, which is to say a
+  // bar that is always empty. A window over the same 30 samples the charts use
+  // means the bar answers "busy compared to lately", which is the only
+  // comparison a network rate has: there is no equivalent of "100% of CPU".
+  const [netHistory, setNetHistory] = useState<number[]>([]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -157,8 +165,13 @@ function useHostSample(target: TargetRef) {
           const pct = (next.memoryUsedBytes / next.memoryTotalBytes) * 100;
           setRamHistory((h) => [...h, pct].slice(-HISTORY));
         }
-        const now = (next.netRxBps ?? 0) + (next.netTxBps ?? 0);
-        setNetPeak((p) => Math.max(p, now, 1));
+        // Only once a rate exists. `null` is "no second sample yet", and
+        // feeding that in as a zero would drag the window down with a reading
+        // nobody took.
+        if (next.netRxBps != null || next.netTxBps != null) {
+          const now = (next.netRxBps ?? 0) + (next.netTxBps ?? 0);
+          setNetHistory((h) => [...h, now].slice(-HISTORY));
+        }
       } catch {
         if (!cancelled) setFailed(true);
       }
@@ -171,6 +184,10 @@ function useHostSample(target: TargetRef) {
       clearInterval(timer);
     };
   }, [target]);
+
+  // A floor of 1 keeps the division safe on an idle host; the bar reads empty
+  // either way, which is correct — an idle link *is* empty.
+  const netPeak = Math.max(1, ...netHistory);
 
   return { sample, failed, cpuHistory, ramHistory, netPeak };
 }

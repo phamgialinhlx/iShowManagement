@@ -41,10 +41,19 @@ export function formatUptime(seconds: number): string {
 
 const gb = (bytes: number) => (bytes / 1e9).toFixed(1);
 
-/** Compact so the rail never truncates a real number. */
+/**
+ * Compact, so the rail never truncates a real number — but **with its unit**.
+ *
+ * `489K` says nothing on its own: kilobits, kilobytes, packets? The counters
+ * behind it are bytes per second, and a network figure without a unit is the
+ * one number in this widget people actively misread, because the habit from
+ * every speed test is bits.
+ */
 export function formatRate(bps: number | null | undefined): string {
   const v = bps ?? 0;
-  return v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : `${Math.round(v / 1e3)}K`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)} MB/s`;
+  if (v >= 1e3) return `${Math.round(v / 1e3)} KB/s`;
+  return `${Math.round(v)} B/s`;
 }
 
 function Bar({ percent, color }: { percent: number; color: string }) {

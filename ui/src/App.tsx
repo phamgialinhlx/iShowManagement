@@ -6,6 +6,7 @@ import { LockScreen } from "./components/LockScreen";
 import { SERVER_KEY } from "./components/SignIn";
 import { api, isTauri, type LockStatus, type SignedIn, type Unlocked } from "./lib/api";
 import { startControlBridge } from "./lib/control";
+import { startNotifications } from "./lib/notify";
 
 /**
  * **There is no login gate.**
@@ -33,6 +34,10 @@ export function App() {
   // free to connect before the operator has touched anything — and it must find
   // the session list already mirrored rather than empty.
   useEffect(() => startControlBridge(), []);
+
+  // Nothing acted on the status the rail already tracked, so a session that
+  // finished while the operator was elsewhere sat idle until someone looked.
+  useEffect(() => startNotifications(), []);
 
   // Restoring runs *beside* the app rather than in front of it. Nothing here
   // blocks the workbench, so a slow or unreachable server delays a footer label

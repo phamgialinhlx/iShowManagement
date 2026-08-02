@@ -6,6 +6,7 @@ import { ClaudeAccountPanel } from "../components/ClaudeAccountPanel";
 import { LockPanel } from "../components/LockPanel";
 import { CoworkPanel } from "../components/CoworkPanel";
 import { AppearancePanel } from "../components/AppearancePanel";
+import { NotificationsPanel } from "../components/NotificationsPanel";
 import { api, isTauri, type SignedIn } from "../lib/api";
 import { SERVER_KEY } from "../components/SignIn";
 
@@ -24,12 +25,13 @@ import { SERVER_KEY } from "../components/SignIn";
  * in to one had something to do with the others.
  */
 
-type Section = "claude" | "lock" | "cowork" | "appearance";
+type Section = "claude" | "lock" | "cowork" | "notifications" | "appearance";
 
 const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "claude", label: "CLAUDE", blurb: "The account your sessions run as" },
   { id: "lock", label: "LOCK", blurb: "Ask for a PIN or a face on every start" },
   { id: "cowork", label: "COWORK", blurb: "Your team's server, if you use one" },
+  { id: "notifications", label: "NOTIFICATIONS", blurb: "When a session wants you" },
   { id: "appearance", label: "APPEARANCE", blurb: "How much desktop shows through" },
 ];
 
@@ -105,6 +107,11 @@ export function Settings() {
           {section === "lock" && (
             <ErrorBoundary label="App lock">
               <LockPanel session={session} />
+            </ErrorBoundary>
+          )}
+          {section === "notifications" && (
+            <ErrorBoundary label="Notifications">
+              <NotificationsPanel />
             </ErrorBoundary>
           )}
           {section === "appearance" && (

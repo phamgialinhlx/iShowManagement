@@ -56,6 +56,13 @@ ui/                     React 19 + Tailwind 4 + motion
   connection target. A test pins this.
 - **Anything interpolated into a remote shell line goes through `shell_quote`.** The
   remote login shell re-parses it, so an unquoted path is an injection, not a cosmetic bug.
+- **`dragDropEnabled` must be `false` for the webview to see a dropped file.** It defaults to
+  `true`, and in that mode the native window swallows the drop and emits a Tauri event
+  instead — so HTML5 `dragover`/`drop` handlers never fire and dragging a screenshot onto the
+  Claude pane silently does nothing, while Cmd-V works. Turning it off is the right trade
+  here: nothing uses Tauri's native drop, and the DOM event gives per-pane targeting for free
+  — a window-level event would have to hit-test the drop position against every pane, which
+  in a 4x4 grid is sixteen rectangles to get wrong.
 - **Tauri plugin commands need explicit ACL grants; app commands do not.** Anything
   `plugin:*` (window dragging, dialogs, fs) must be listed in
   `src-tauri/capabilities/default.json` or it is rejected *silently* — the promise rejects

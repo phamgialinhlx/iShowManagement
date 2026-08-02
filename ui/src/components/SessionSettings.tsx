@@ -32,10 +32,17 @@ export function SessionSettings({ session }: { session: Session }) {
   const [account, setAccount] = useState(session.claudeAccount ?? "");
   const [window_, setWindow] = useState(String(session.contextWindow ?? ""));
   const [error, setError] = useState<string | null>(null);
+  /** Why the connection list could not be read, as the server put it. */
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   // Which Jira connections exist is the server's configuration, not ours — so
   // it is asked for rather than assumed, exactly as the sign-in flow does.
+  //
+  // **The failure is reported, not flattened.** This used to `catch` into an
+  // empty list, so "you are not signed in", "the server said no" and "there
+  // genuinely are no connections" all rendered as one sentence covering all
+  // three — which tells the operator nothing about which one to go and fix.
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
@@ -44,9 +51,14 @@ export function SessionSettings({ session }: { session: Session }) {
       .then((list) => {
         if (cancelled) return;
         setProfiles(list);
+        setProfileError(null);
         if (list.length === 1) setProfile(list[0]!.name);
       })
-      .catch(() => !cancelled && setProfiles([]));
+      .catch((e) => {
+        if (cancelled) return;
+        setProfiles([]);
+        setProfileError(e instanceof Error ? e.message : String(e));
+      });
     return () => {
       cancelled = true;
     };
@@ -138,9 +150,24 @@ export function SessionSettings({ session }: { session: Session }) {
           <span className="micro">JIRA PROJECT</span>
           {profiles === null ? (
             <span className="micro">looking for Jira connections…</span>
+          ) : profileError ? (
+            <div className="flex flex-col gap-1">
+              <span role="alert" className="data text-[10.5px]" style={{ color: "rgb(var(--primary))" }}>
+                {profileError}
+              </span>
+              <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+                {/* The two causes worth naming, because they need different
+                    actions and the message above is the server's, not ours. */}
+                {/sign in/i.test(profileError)
+                  ? "Sign in from the footer — the Jira credential lives on the Cowork server and never comes here."
+                  : "That came from your Cowork server. rmux only asks it which connections exist."}
+              </span>
+            </div>
           ) : profiles.length === 0 ? (
-            <span className="data text-[10.5px]" style={{ color: "var(--text-soft)" }}>
-              No Jira connection is configured on your server, or you are not signed in.
+            <span className="data text-[10.5px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+              You are signed in, and your Cowork server has no Jira connection configured. An
+              admin adds one there with <span style={{ color: "var(--text)" }}>PUT /jira/profiles/:name</span>;
+              rmux cannot create one, because the credential is the server's to hold.
             </span>
           ) : (
             <>

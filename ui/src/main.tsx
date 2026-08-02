@@ -11,6 +11,24 @@ import { applyUserCss } from "./lib/user-css";
 // Before the first paint: applying this in an effect would flash the default
 // glass on every launch.
 applyAppearance();
+
+/*
+ * Swallow every file drop the app does not explicitly handle.
+ *
+ * `dragDropEnabled` is off in `tauri.conf.json` so the *webview* receives
+ * drops — that is what makes dragging a screenshot onto the Claude pane work.
+ * The cost is the browser's own default: a file dropped anywhere else navigates
+ * the document to it, which in a single-window app means the entire workbench
+ * is replaced by a picture of a cat and the only way back is a restart.
+ *
+ * Registered on `window`, which is the last thing an event reaches — so a pane
+ * that wants the drop has already handled it by the time this runs, and
+ * `preventDefault` twice is the same as once. Only the navigation is cancelled;
+ * nothing else about the event changes.
+ */
+for (const type of ["dragover", "drop"] as const) {
+  window.addEventListener(type, (event) => event.preventDefault());
+}
 // Last, so it sits after the design system in document order — which is the
 // whole mechanism by which it overrides anything.
 applyUserCss();
