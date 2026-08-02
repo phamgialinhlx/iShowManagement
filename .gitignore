@@ -42,3 +42,11 @@ CLAUDE.local.md
 *.mobileprovision
 
 .DS_Store
+
+# The vendored Cowork server.
+#
+# Kept out of the published branch deliberately. It has been scrubbed of every
+# deployment identifier (see the ORG_NAME / COWORK_PUBLIC_URL env knobs), so it
+# *can* be published — but that is a decision to make on purpose, not a default,
+# and it is a separate project with its own history.
+server/

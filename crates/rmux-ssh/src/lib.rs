@@ -216,7 +216,9 @@ mod tests {
         // The remote command must be the final argument, guarded by `--`.
         let sep = args.iter().position(|a| a == "--").expect("missing -- separator");
         assert_eq!(sep, args.len() - 2);
-        assert_eq!(args[args.len() - 1], r#""$SHELL" -l"#);
+        // `-i` as well as `-l`: the login shell has to read `.zshrc`, which is
+        // where version managers put their PATH. See `CommandSpec::login_shell`.
+        assert_eq!(args[args.len() - 1], r#""$SHELL" -l -i"#);
     }
 
     #[test]
@@ -258,7 +260,7 @@ mod tests {
         let resolved = t.build_command(&spec).unwrap();
         let last = resolved.args.last().unwrap().to_string_lossy().into_owned();
 
-        assert_eq!(last, r#"cd '/srv/my project' && "$SHELL" -l"#);
+        assert_eq!(last, r#"cd '/srv/my project' && "$SHELL" -l -i"#);
     }
 
     #[test]

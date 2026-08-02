@@ -100,6 +100,40 @@ function Turn({ entry }: { entry: TranscriptEntry }) {
   );
 }
 
+/**
+ * Is the operator selecting text inside this view right now?
+ *
+ * Guards every automatic DOM change here. `getSelection` is checked against the
+ * container rather than globally, so a selection in another pane does not freeze
+ * this one — and `isCollapsed` is what separates a real selection from a bare
+ * caret, which every click leaves behind and which nobody would want to be
+ * treated as "busy reading".
+ */
+function hasSelectionWithin(container: HTMLElement | null): boolean {
+  if (!container) return false;
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+  const range = selection.getRangeAt(0);
+  return container.contains(range.commonAncestorContainer);
+}
+
+/**
+ * Did the poll actually bring anything new?
+ *
+ * Compared by what the reader would notice — how much was read, how many turns,
+ * and the last turn's text — rather than deep-equalled. A transcript tail is
+ * append-only in practice, so the final entry changing is the signal, and this
+ * runs every five seconds on a list that can be thousands of items long.
+ */
+function sameTranscript(a: Transcript | null, b: Transcript): boolean {
+  if (!a) return false;
+  if (a.readBytes !== b.readBytes || a.totalBytes !== b.totalBytes) return false;
+  if (a.entries.length !== b.entries.length) return false;
+  const last = a.entries.at(-1);
+  const next = b.entries.at(-1);
+  return last?.text === next?.text && last?.timestamp === next?.timestamp;
+}
+
 export function TranscriptView({ session }: { session: Session }) {
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -107,6 +141,10 @@ export function TranscriptView({ session }: { session: Session }) {
   const [tail, setTail] = useState(TAIL_STEP);
   const [showSystem, setShowSystem] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Whether the automatic refresh is currently standing down for a selection.
+  // Shown in the header — a view that silently stops updating is exactly the
+  // "is this thing broken?" impression worth spending a label to avoid.
+  const [held, setHeld] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // Only stick to the bottom when the reader is already there — yanking the view
@@ -121,7 +159,11 @@ export function TranscriptView({ session }: { session: Session }) {
     setLoading(true);
     try {
       const next = await api.claudeTranscript(session.target, session.folder, session.resume, tail);
-      setTranscript(next);
+      // Only swap state when something actually changed. A poll that returns
+      // the same bytes used to replace the array anyway, re-rendering every
+      // turn — which is invisible when nothing is selected and destroys the
+      // selection when something is.
+      setTranscript((prev) => (sameTranscript(prev, next) ? prev : next));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -134,7 +176,20 @@ export function TranscriptView({ session }: { session: Session }) {
     void load();
     // Re-read while Claude is working. Cheap: it is a bounded `tail` on the far
     // side, not a re-read of the file.
-    const timer = setInterval(() => void load(), 5000);
+    //
+    // **Skipped while the reader has text selected.** This was the whole reason
+    // selection "did not work" here: a five-second poll that re-rendered the
+    // list wiped the selection, and a drag that crossed a tick was cancelled
+    // outright — so the view behaved as though it were read-only. Nothing the
+    // operator did not ask for may move under their hands; a transcript that is
+    // a few seconds stale while they copy from it is the correct trade, and it
+    // catches up the moment they click away.
+    const timer = setInterval(() => {
+      const selecting = hasSelectionWithin(scrollRef.current);
+      setHeld(selecting);
+      if (selecting) return;
+      void load();
+    }, 5000);
     return () => clearInterval(timer);
   }, [load]);
 
@@ -144,6 +199,9 @@ export function TranscriptView({ session }: { session: Session }) {
   );
 
   useEffect(() => {
+    // Same rule as the poll: sticking to the bottom is a convenience, and it
+    // loses to someone mid-drag every time.
+    if (hasSelectionWithin(scrollRef.current)) return;
     if (pinnedRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
@@ -171,6 +229,15 @@ export function TranscriptView({ session }: { session: Session }) {
         style={{ borderColor: "var(--border)" }}
       >
         <span className="micro">{entries.length} messages</span>
+        {/* Never leave the reader guessing whether the view is live. Three
+            states, all named: refreshing, held because they are selecting, or
+            simply current. */}
+        {transcript && loading && <span className="micro">refreshing…</span>}
+        {transcript && !loading && held && (
+          <span className="micro" style={{ color: "rgb(var(--busy))" }} title="Updates resume when you click away.">
+            paused while selecting
+          </span>
+        )}
         {transcript && (
           <span className="micro">
             {humanBytes(transcript.readBytes)} of {humanBytes(transcript.totalBytes)}
@@ -214,7 +281,10 @@ export function TranscriptView({ session }: { session: Session }) {
         ref={scrollRef}
         className="min-h-0 flex-1 overflow-y-auto px-4 py-3"
         // The reason this view exists: text you can select.
-        style={{ userSelect: "text", cursor: "auto" }}
+        // The reason this view exists: text you can select. `WebkitUserSelect`
+        // as well as the standard property — the shell sets `user-select: none`
+        // on `body`, and this is the opt-out.
+        style={{ userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}
         onScroll={(e) => {
           const el = e.currentTarget;
           pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
@@ -225,9 +295,34 @@ export function TranscriptView({ session }: { session: Session }) {
             <Turn key={`${entry.timestamp ?? ""}-${i}`} entry={entry} />
           ))}
 
-          {!entries.length && !loading && (
+          {/*
+            The first read, which on a real transcript is genuinely slow — one
+            measured 228MB, and even a bounded tail crosses SSH. This used to
+            render *nothing* at all in exactly this state (`!entries.length &&
+            !loading` excluded the loading case), so the pane was blank for
+            several seconds with no way to tell it apart from a broken one.
+          */}
+          {!transcript && loading && (
+            <div className="flex flex-col items-center gap-3 py-10">
+              {/* Data movement, not a spinner — rule 2. */}
+              <div className="flex h-[16px] items-end gap-[3px]" aria-hidden="true">
+                <div className="eq-bar" />
+                <div className="eq-bar" />
+                <div className="eq-bar" />
+                <div className="eq-bar" />
+              </div>
+              <span className="micro">reading the last {humanBytes(tail)} of the transcript</span>
+              <span className="micro" style={{ color: "var(--text-faint)" }}>
+                over {session.target.host ?? "this machine"}
+              </span>
+            </div>
+          )}
+
+          {!entries.length && !loading && transcript && (
             <p className="micro py-6 text-center">
-              {transcript ? "nothing to show yet" : "reading transcript…"}
+              {transcript.entries.length
+                ? "every message here is a system note — turn on SYSTEM to see them"
+                : "nothing recorded in this conversation yet"}
             </p>
           )}
         </div>

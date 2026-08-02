@@ -43,6 +43,23 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tauri-plugin-notification = "2.3.3"
 
+# Native Liquid Glass. See `src/glass.rs` for why `NSGlassEffectView` is looked
+# up by name at runtime rather than linked — these bindings are compiled on every
+# macOS, and only the *class lookup* is version-gated.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSObject", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSColor",
+    "NSGlassEffectView",
+    "NSResponder",
+    "NSView",
+    "NSVisualEffectView",
+    "NSWindow",
+    "objc2-core-foundation",
+] }
+
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
 serde_json.workspace = true

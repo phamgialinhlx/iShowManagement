@@ -6,6 +6,7 @@ import { TopProcesses } from "./widgets/TopProcesses";
 import { TokenSpend } from "./widgets/TokenSpend";
 import { Clock } from "./widgets/Clock";
 import { Note } from "./widgets/Note";
+import { Uplink } from "./widgets/Uplink";
 import { JiraProgress } from "./widgets/JiraProgress";
 
 import {
@@ -384,7 +385,7 @@ function SessionWidget({
  * widget added after someone first dragged one is invisible to them forever,
  * with nothing to suggest why.
  */
-const INSTRUMENTS = ["clock", "host", "processes", "usage", "jira", "note", "session"] as const;
+const INSTRUMENTS = ["clock", "host", "processes", "uplink", "usage", "jira", "note", "session"] as const;
 type InstrumentId = (typeof INSTRUMENTS)[number];
 
 const ORDER_KEY = "rmux.widgetRail.order";
@@ -450,6 +451,12 @@ function Instrument({
             <JiraProgress project={session.jiraProject} />
           </Widget>
         ) : null;
+      case "uplink":
+        return (
+          <Widget title="UPLINK" onDragStart={start}>
+            <Uplink target={session.target} />
+          </Widget>
+        );
       case "note":
         return (
           <Widget title="NOTE" onDragStart={start}>

@@ -61,6 +61,19 @@ pub async fn claude_list_sessions(
     ClaudeSession::list(resolved.as_ref(), &folder).await.map_err(err)
 }
 
+/// Every Claude session on a host, newest first.
+///
+/// The folder comes back with each one, read from the transcript's own `cwd`, so
+/// resuming does not require having found the directory first.
+#[tauri::command]
+pub async fn claude_list_all_sessions(
+    store: State<'_, ClaudeStore>,
+    target: TargetRef,
+) -> Result<Vec<SessionInfo>, String> {
+    let resolved = resolve(store.inner(), &target).await?;
+    ClaudeSession::list_all(resolved.as_ref()).await.map_err(err)
+}
+
 /// Read a conversation back as text.
 ///
 /// Separate from the live session on purpose: this reads the transcript on disk,
@@ -130,6 +143,12 @@ pub async fn claude_start<R: tauri::Runtime>(
     // Fullscreen puts Claude on the alternate screen and gives it the mouse,
     // which breaks selection and makes scrolling round-trip. Off unless asked.
     fullscreen: Option<bool>,
+    // `--dangerously-skip-permissions`. Deliberately a *per-launch* argument and
+    // never a stored preference: it is chosen for one conversation at the moment
+    // of starting it, which is the only point the operator has the context to
+    // judge it. A saved setting would silently apply it to work started weeks
+    // later on a different machine.
+    skip_permissions: Option<bool>,
     cols: u16,
     rows: u16,
     output: Channel<Response>,
@@ -142,6 +161,15 @@ pub async fn claude_start<R: tauri::Runtime>(
         rmux_claude::Rendering::Inline
     };
 
+    // One argument list for both launch paths. They had drifted apart once
+    // already — the agent path missed the rendering flags — so anything that
+    // affects how Claude starts is built here and used by both.
+    let args: Vec<String> = if skip_permissions.unwrap_or(false) {
+        vec!["--dangerously-skip-permissions".to_owned()]
+    } else {
+        Vec::new()
+    };
+
     // Hand the stored Claude account to this host's agent first, so the session
     // starts already signed in. No-op when nothing is stored.
     crate::claude_account::apply_to_target(&app, resolved.as_ref()).await?;
@@ -149,7 +177,7 @@ pub async fn claude_start<R: tauri::Runtime>(
     let session = Arc::new(match &session_name {
         Some(name) => {
             let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
-            let line = ClaudeSession::launch_line(resume.as_deref(), &[], rendering);
+            let line = ClaudeSession::launch_line(resume.as_deref(), &args, rendering);
 
             let mut spec = installed.attach_spec(name, cwd.as_deref(), cols, rows);
             spec = spec.arg("--login-command").arg(line);
@@ -161,7 +189,7 @@ pub async fn claude_start<R: tauri::Runtime>(
             resolved.as_ref(),
             cwd.as_deref(),
             resume.as_deref(),
-            &[],
+            &args,
             size,
         )
         .map_err(err)?,
@@ -220,13 +248,33 @@ fn session(store: &ClaudeStore, id: &str) -> Result<Arc<ClaudeSession>, String> 
     store.sessions.lock().get(id).cloned().ok_or_else(|| format!("no such session: {id}"))
 }
 
+/// What Claude is showing, plus whether it is still there at all.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolledState {
+    #[serde(flatten)]
+    pub state: ClaudeState,
+    /// The exit code, once the attach process has died.
+    ///
+    /// **This is how a dropped connection becomes visible.** The pane is fed by
+    /// a broadcast of terminal output; when the process behind it exits, that
+    /// stream simply stops. Nothing arrives, nothing errors, and the pane sits
+    /// there looking like a Claude that has gone quiet — which after a laptop
+    /// sleeps is exactly what it is not. The UI already polls this endpoint
+    /// several times a second, so reporting death here costs nothing and needs
+    /// no second channel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exited: Option<i32>,
+}
+
 /// What Claude is showing. Polled by the UI.
 #[tauri::command]
 pub async fn claude_state(
     store: State<'_, ClaudeStore>,
     id: String,
-) -> Result<ClaudeState, String> {
-    Ok(session(store.inner(), &id)?.state())
+) -> Result<PolledState, String> {
+    let session = session(store.inner(), &id)?;
+    Ok(PolledState { state: session.state(), exited: session.terminal().exit_code() })
 }
 
 /// Answer the prompt identified by `fingerprint`.

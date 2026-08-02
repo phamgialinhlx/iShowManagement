@@ -175,6 +175,101 @@ dead knob. Stored tints are clamped: a 64% saved against the old opaque blur lay
 nearly solid without it. Fonts (SFU Futura, IBM Plex Mono) are bundled, never
 fetched from a CDN; this app must look right with no network.
 
+**The operator may replace the backdrop, the type scale and the two colours.**
+Background is `desktop | color | image`; the picture is copied to
+`$APPDATA/backgrounds` by `background_set` and served over the asset protocol,
+**never stored as a data URL** — a wallpaper is megabytes and `localStorage` is a
+single shared quota that also holds the session list, so overflowing it costs
+someone their sessions to gain a picture. A painted background and native glass
+are mutually exclusive by physics: glass refracts what is behind the *window*,
+which a background inside the page covers. Interface scale is `zoom`, not a font
+size — the type is 157 hard-coded pixel values, so a font variable would move
+almost nothing and read as a broken control. `--text-soft` and `--text-faint` are
+*derived* from a chosen `--text` rather than being three pickers, because the
+three-level ramp is load-bearing and three independent colours is three chances
+to invert it. `--primary` is a bare `r g b` triplet, never a hex: every use is
+`rgb(var(--primary) / <alpha>)`.
+
+**Real glass is native, and the class is looked up rather than linked**
+(`src-tauri/src/glass.rs`). The corollary of the paragraph above is that glass cannot come
+from the page at all — you cannot refract light you were never handed. macOS 26's
+`NSGlassEffectView` is the compositor doing it properly, and it is the only version of this
+that can work. Two things must stay true:
+
+- **`AnyClass::get(c"NSGlassEffectView")`, never `NSGlassEffectView::class()`.** `objc2`
+  resolves classes with `objc_getClass` and **panics** (`class_not_present`) when one is
+  missing — so on macOS 15 the typed path would take the app down the moment glass was
+  applied. Measured: the shipped binary has *zero* undefined `OBJC_CLASS` symbols, so this is
+  a runtime panic and not, as first assumed, a dyld load failure. Either way the lookup
+  returning `None` is the entire version check, and it is what makes this a fallback rather
+  than a crash. The generated bindings are still used for the instance methods, which message
+  the object and never name the class.
+- **The vibrancy is hidden, not removed.** Two materials both sampling behind the window is
+  twice the frosting and reads as a solid panel — the exact failure CSS glass had. Hiding
+  Tauri's `NSVisualEffectView` means switching glass off restores the shipped material for
+  free.
+
+It is **one sheet behind the whole window, not per-panel glass**, and that is settled: glass
+is an `NSView` and every panel is HTML in one webview, so per-panel would mean sixteen native
+views chasing DOM geometry and wrong for a frame on every resize. Off by default even where
+supported — an app that changes its own appearance on an OS upgrade is unsettling.
+
+**With native glass on, the page stops simulating glass at all.** Not "less", none: the
+vignette, the tint gradient and the layered opacities all sat *above* the real material, and
+a film above an effect can only hide it. `:root[data-native-glass="on"]` reduces the scrim to
+the registration grid and repoints `.panel`/`.inset` at **`--glass-overlay`**, a knob that is
+deliberately *not* `--panel-tint`: under real glass that background is no longer a material,
+it is legibility residue, a different quantity with a different right answer. Settings shows
+whichever of the two applies and never both, because the other is a visibly dead slider — the
+mistake the Frost setting already made. `.window` and `.menu` are **not** thinned: they stack
+over page content, so their opacity was never a glass simulation, and a see-through dialog
+over a photograph is worse than a plain one. `applyAppearance` memoises the glass options it
+last sent, because the overlay slider calls it on every tick and each call crosses IPC to
+mutate AppKit views on the main thread for every open window.
+
+## The interface must never make anyone feel lost
+
+The operator should be able to use rmux on instinct — without reading labels to
+work out what a control does, and without ever wondering whether the app has
+stopped working. These are not aspirations; each one is a rule with a test.
+
+- **Never leave a blank screen.** A pane that is loading must *say* it is loading,
+  what it is loading, and from where. This was violated exactly: the transcript
+  rendered `{!entries.length && !loading && …}`, so during the initial read — the
+  one case that is genuinely slow, since a real transcript reaches 228MB across
+  SSH — it drew nothing at all. Several seconds of empty pane is indistinguishable
+  from a broken one, and the operator reported it as broken. If a state can take
+  longer than a frame, it needs a visible state of its own.
+- **Nothing moves under the operator's hands.** Automatic refreshes, autoscroll and
+  re-renders all lose to whatever the person is doing. The transcript polls every
+  five seconds; that poll destroyed any selection, so the pane behaved as if text
+  could not be selected at all. It now stands down while `hasSelectionWithin` is
+  true — and *says* it is standing down, because a view that silently stops
+  updating is the same "is this broken?" impression in another costume.
+- **Never show a control that cannot work.** Not disabled — absent. A greyed switch
+  invites "how do I enable this"; a missing one asks nothing. Liquid Glass is
+  hidden on machines without `NSGlassEffectView` and while a painted background
+  covers the desktop; the GLASS slider is replaced by OVERLAY rather than left
+  dead beside it. The Frost setting was the original sin here, and `--app-blur`
+  is still in the tokens as its gravestone.
+- **State must be readable without clicking.** Segmented buttons over dropdowns for
+  small closed choices, because a `<select>` hides the options *and* the current
+  value behind a click. Selection is carried by more than tone — at 9px a
+  tone-only difference is not a state anyone can see, so the selected chip also
+  wears an underline.
+- **Every mutating control reports its outcome inline, beside itself.** Disabled
+  plus a progress label in flight, then confirmation or the error. Errors persist
+  until the next attempt; successes may fade after ~2.5s. An operation that can
+  fail — picking a background picture, killing a process — must never appear to
+  have succeeded.
+- **Make the wrong click hard and the right one obvious.** The dangerous option is
+  never the default and never one keystroke from the safe one:
+  `--dangerously-skip-permissions` is a deliberate second choice that explains its
+  consequence only once selected, and `KILL` is a separate control from `TERM`.
+- **A destructive default is worse than a prompt.** Reset clears the stored
+  background file as well as the setting, because leaving a wallpaper on disk that
+  nothing in the UI can reach is litter nobody will ever find.
+
 ## Claude rendering — the one that caused the most grief
 
 **Claude runs inline, never fullscreen** (`Rendering` in `crates/rmux-claude/src/lib.rs`).
@@ -271,9 +366,15 @@ TUI. Three things it must keep doing:
 
 ## The Cowork server
 
-The server itself lives in a **separate repository** (`redstone-cowork`), which has its own
-git history and remote. Do not vendor it in here: two copies of a tracked codebase means two
-sources of truth, and this repo would carry the one nobody deploys from.
+**The server lives here, under `server/`.** It was copied in from `redstone-cowork`, which is
+now **reference only** — an old project we read for design and feature history. Never modify
+it, never commit to it, never push to it. Anything the server needs to do is changed in
+`server/` and deployed from here.
+
+**Nothing sensitive comes across.** The copy is filtered: no `.env` of any kind (including
+`.env.example`), no keys, no credentials. The only credential-shaped strings in `server/` are
+`${POSTGRES_PASSWORD}`-style placeholders in `docker-compose.yml`. Re-check before any push —
+this repository has been pushed to a public remote at least once.
 
 **Which server, and where it runs, is deployment detail and is deliberately not recorded in
 this repository.** It belongs in `CLAUDE.local.md`, which is git-ignored. Nothing in the code
@@ -346,6 +447,18 @@ app, never in front of it, so an unreachable server delays a footer label and no
 
 ## Conventions
 
+- **Never report something as ready before verifying the artefact itself.** Starting a build
+  is not finishing one; `pnpm tauri build` returns from its Vite step minutes before the Rust
+  compile produces a binary, so "rebuilding now, it'll relaunch" reads as "go and test it" and
+  sends the operator back to the *same broken build* they just reported. This happened twice in
+  one sitting and wasted more of their time than the original bug.
+
+  The rule is to check the thing, not the command: the binary's mtime and size changed, the
+  process is running, the socket is up, the test passed. State what was observed. If a
+  verification is still pending, say that instead — "still compiling, do not test yet" is
+  useful; "should be ready" is not.
+
+  Same rule for fixes: a change that compiles is not a change that works. Say which one it is.
 - `cargo test --workspace` and `cargo clippy --workspace --all-targets` must be clean.
 - `pnpm exec tsc --noEmit` for the UI; `pnpm exec vite build` to verify bundling. The
   `ui/*-check.ts` harnesses are in `tsconfig.json`'s `include` **on purpose** — they were
@@ -353,11 +466,24 @@ app, never in front of it, so an unreachable server delays a footer label and no
   symbol. Anything added beside them needs adding there too.
 - Vite runs on port **5273** with `strictPort` — a silent port fallback changes the origin
   and silently discards all saved `localStorage` state.
-- **A debug build loads `devUrl`, not the bundled files.** `./target/debug/rmux` fetches the
-  UI from `http://localhost:5273`, so with no Vite running the window is simply **blank** —
-  no error, nothing in the log. Use `pnpm tauri dev` (starts both), or keep Vite running
-  alongside the binary. `cargo build --release` embeds `dist/` instead and needs no server;
-  that is what to hand someone for actual use.
+- **A blank window means the binary is looking for Vite. There is exactly one correct way to
+  build a shippable app: `pnpm tauri build`.**
+
+  Tauri serves its embedded UI only when compiled with the **`custom-protocol`** feature.
+  `pnpm tauri build` passes it; `cargo build --release` does **not**. Without it a *release*
+  binary falls back to `devUrl` — `http://localhost:5273` — and with no Vite running the
+  window is simply blank: no error, nothing in the log, nothing in the console. It is the
+  same symptom as a debug build with no Vite, which is precisely why it gets misread as "the
+  app is broken" rather than "this binary was built wrong".
+
+  **Never hand-assemble a bundle.** Building with `cargo build --release` and copying the
+  binary into an existing `.app` produces something that looks perfect — right size, valid
+  signature, correct Info.plist — and does nothing at all when opened. This has happened, and
+  it cost a working app in front of the operator. If you need a signed bundle: run
+  `pnpm tauri build`, then sign, then install. No shortcuts through `cargo` directly, ever,
+  no matter how much faster it looks.
+
+  For development use `pnpm tauri dev`, which starts Vite and the binary together.
 - **`cargo build --release` does not notice a changed `dist/`.** Nothing declares it as a
   build input, so a UI-only change relinks in under a second and embeds the *previous*
   bundle — the app then runs code you did not build, silently. `touch src-tauri/build.rs`
@@ -386,6 +512,23 @@ app, never in front of it, so an unreachable server delays a footer label and no
   with rmux closed. It must be a *login* shell: `claude` is installed by a version manager
   whose PATH only exists there, so spawning the binary directly gives "command not found" on
   a host where it is plainly installed.
+- **The login shell is `-l` *and* `-i`, and both launch paths must build it the same way.**
+  `zsh -l` reads `.zprofile` and `.zlogin` and **not** `.zshrc` — and `.zshrc` is where every
+  version manager writes its PATH. So a login-but-not-interactive shell still reports
+  "command not found: claude" on a zsh host where claude works when typed. Everything goes
+  through `CommandSpec::login_shell()`; a hand-built `$SHELL -l` is the bug. This was fixed
+  once in `rmux-agent` while `ClaudeSession::start_resuming` kept its own copy, so the
+  direct path stayed broken and the two answers disagreed depending on whether the session
+  was hosted by the agent. **Fixing the agent is not enough on its own**: the agent is a
+  cross-compiled binary uploaded to the host, so `scripts/build-agents.sh` has to run and the
+  app has to be rebuilt before the host sees the change at all.
+- **`--dangerously-skip-permissions` is a per-session launch argument, never a stored
+  default.** It is a judgement about one piece of work on one machine, made at the moment of
+  starting it; a saved preference would carry it silently into work started weeks later
+  somewhere else, which is exactly the case where nobody re-reads the flag. It *is* kept with
+  the session, though, so a pane that restarts comes back with the latitude it was launched
+  with — quietly gaining or losing permission checks across a reconnect is worse than either
+  setting. Offered on both launch screens (`PermissionChoice`), defaulting to the safe one.
 - **Claude's project directory name is not computable.** The scheme changed between versions
   (`/home/a.user/x` files under `-home-a-user-x` now, `-home-a.user-x` before),
   so `list_sessions_script` tries every spelling and then falls back to reading the `cwd` each

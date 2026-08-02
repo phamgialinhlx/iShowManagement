@@ -8,7 +8,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
 import { contextLimit, sniffWindow } from "../lib/context-window";
 import { useSessions } from "../lib/sessions";
-import { CLAUDE_THEME } from "../lib/terminal-theme";
+import { CLAUDE_THEME, gpuRendering } from "../lib/terminal-theme";
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { ContextMeter } from "./ContextMeter";
 import { BrowserReports } from "./BrowserReports";
@@ -115,6 +115,7 @@ export function ClaudePanel({
   cwd,
   resume,
   fullscreen,
+  skipPermissions,
 }: {
   sessionId: string;
   target: TargetRef;
@@ -123,6 +124,8 @@ export function ClaudePanel({
   resume?: string;
   /** Let Claude use its fullscreen TUI. Off by default — see `Rendering`. */
   fullscreen?: boolean;
+  /** Launch with `--dangerously-skip-permissions`. Decided when the session was created. */
+  skipPermissions?: boolean;
 }) {
   const setStatus = useSessions((s) => s.setStatus);
   const setClaudeSession = useSessions((s) => s.setClaudeSession);
@@ -173,6 +176,16 @@ export function ClaudePanel({
   // operator needs to see, because a screenshot to a remote host takes long
   // enough that silence reads as nothing having happened.
   const [dropping, setDropping] = useState(false);
+  // Set while the connection is being rebuilt after a drop. Distinct from the
+  // first-load state: this pane already has content, and blanking it would
+  // throw away the conversation the operator is reading.
+  const [reconnecting, setReconnecting] = useState(false);
+  const reconnectingRef = useRef(false);
+  // Bumping this re-runs the mount effect, which is what actually rebuilds the
+  // terminal and the attachment. Nothing else in the pane can restart it: the
+  // setup effect has no dependencies by design, so that an ordinary re-render
+  // never tears down a live conversation.
+  const [generation, setGeneration] = useState(0);
   const [sending, setSending] = useState<string | null>(null);
 
   /**
@@ -239,7 +252,11 @@ export function ClaudePanel({
     // The GPU renderer, same as the terminal tab. Without it this pane falls back
     // to the DOM renderer, and scrolling or dragging a selection across Claude's
     // constantly-redrawing TUI is visibly slow — which is exactly what it was.
+    // Skipped entirely when the operator has turned GPU rendering off — see
+    // `gpuRendering`. Loading the addon and disposing it still creates and
+    // loses a WebGL context, which is worse than never loading it.
     try {
+      if (!gpuRendering()) throw new Error("gpu rendering is off");
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => webgl.dispose());
       xterm.loadAddon(webgl);
@@ -278,6 +295,14 @@ export function ClaudePanel({
       }
       xterm.write(bytes);
       setReady(true);
+      // Bytes are arriving, so whatever broke is fixed. Cleared here rather than
+      // when the attach call returns: the call can succeed against a connection
+      // that dies a moment later, and the operator would be told it recovered
+      // when it had not.
+      if (reconnectingRef.current) {
+        reconnectingRef.current = false;
+        setReconnecting(false);
+      }
     };
 
     // Started only once the pane has a real size — fitting before layout tells
@@ -311,6 +336,7 @@ export function ClaudePanel({
             resume,
             sessionName: `claude-${sessionId}`,
             fullscreen,
+            skipPermissions,
             cols: xterm.cols,
             rows: xterm.rows,
             output,
@@ -373,7 +399,30 @@ export function ClaudePanel({
       // session is closed.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [generation]);
+
+  /**
+   * Rebuild a connection that dropped.
+   *
+   * Guarded by a ref rather than by state: the poll runs every 400ms, and a
+   * `reconnecting` flag read from a closure would still be `false` on the next
+   * three ticks — firing four reattaches for one drop.
+   *
+   * The handle is cleared first. It names an attachment inside the *previous*
+   * ssh connection; asking to reattach to it yields "no such session" forever,
+   * which is the shape of a pane that never comes back.
+   */
+  const reconnect = () => {
+    if (reconnectingRef.current) return;
+    reconnectingRef.current = true;
+    setReconnecting(true);
+    clearClaudeSession(sessionId);
+
+    // A beat before retrying. A machine waking from sleep has an interface that
+    // is up but not yet routable, so an immediate reattach fails on DNS or a
+    // refused connection and simply burns the attempt.
+    setTimeout(() => setGeneration((n) => n + 1), 1200);
+  };
 
   // Poll the screen. Cheap — it reads an in-memory emulator, no network.
   useEffect(() => {
@@ -382,14 +431,33 @@ export function ClaudePanel({
 
     const tick = async () => {
       try {
-        const next = await invoke<ClaudeState>("claude_state", { id: claudeId });
+        const next = await invoke<ClaudeState & { exited?: number }>("claude_state", {
+          id: claudeId,
+        });
         if (cancelled) return;
+
+        // **The connection died.** After a laptop sleeps, ssh drops and the
+        // attach process exits — the pane then sits there fed by a stream that
+        // has simply stopped, looking like a Claude that went quiet. It is not:
+        // nothing will ever arrive again, and typing goes nowhere.
+        //
+        // The conversation itself is untouched. It runs under `rmux-agent` on
+        // the target precisely so it survives this, so reattaching by name
+        // brings it back whole — scrollback included.
+        if (next.exited != null) {
+          setState({ prompt: null, working: false });
+          setStatus(sessionId, "idle");
+          reconnect();
+          return;
+        }
+
         setState(next);
         // Publish to the rail. This is what makes "which session needs me?"
         // answerable at a glance without opening each one.
         setStatus(sessionId, next.prompt ? "waiting" : next.working ? "working" : "idle");
       } catch {
-        // The session ended; the terminal above already shows why.
+        // The handle is gone entirely — the same outcome, reached differently.
+        if (!cancelled) reconnect();
       }
     };
 
@@ -654,6 +722,23 @@ export function ClaudePanel({
       {/* What a connected browser sent back for this session. Empty, and takes
           no space, until something arrives. */}
       <BrowserReports sessionId={sessionId} claudeId={claudeId} />
+
+      {reconnecting && (
+        <div
+          className="flex shrink-0 items-center gap-2 border-b px-3 py-1"
+          style={{ borderColor: "var(--border)", background: "var(--hover)" }}
+        >
+          <span className="micro" style={{ color: "rgb(var(--busy))" }}>
+            CONNECTION LOST — REATTACHING TO {(target.host ?? "this machine").toUpperCase()}
+          </span>
+          {/* Said out loud, because the alternative reading is "my work is
+              gone". It is not: the conversation runs under the agent on the
+              target and survives this. */}
+          <span className="micro" style={{ color: "var(--text-faint)" }}>
+            YOUR CONVERSATION IS STILL RUNNING THERE
+          </span>
+        </div>
+      )}
 
       {/* An image on its way to the target. Worth saying out loud: a screenshot
           over ssh takes seconds, and Claude's pane looks identical while it

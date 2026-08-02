@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from "motion/react";
 
 import { api, type ConfigHost, type TargetRef } from "../lib/api";
 import { ClaudeSessionPicker } from "./ClaudeSessionPicker";
+import { AllSessions } from "./AllSessions";
+import { PermissionChoice } from "./PermissionChoice";
 import { FolderBrowser } from "./FolderBrowser";
 import { basename, useSessions } from "../lib/sessions";
 
@@ -24,6 +26,8 @@ type Step =
   | { kind: "host" }
   | { kind: "connecting"; target: TargetRef; label: string }
   | { kind: "folder"; target: TargetRef; label: string; home: string }
+  /** Every conversation on the host, wherever it was started. */
+  | { kind: "all"; target: TargetRef; label: string }
   | { kind: "claude"; target: TargetRef; label: string; folder: string };
 
 export function NewSession({ onClose }: { onClose: () => void }) {
@@ -35,6 +39,8 @@ export function NewSession({ onClose }: { onClose: () => void }) {
   const [filter, setFilter] = useState("");
   const [typed, setTyped] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Per-launch, never persisted as a default — see `PermissionChoice`.
+  const [skipPermissions, setSkipPermissions] = useState(false);
   const [creating, setCreating] = useState(false);
 
   const filterRef = useRef<HTMLInputElement>(null);
@@ -109,7 +115,7 @@ export function NewSession({ onClose }: { onClose: () => void }) {
     try {
       // Resuming adopts the conversation's own name; a new one starts as the
       // folder and picks up Claude's title once the work has a shape.
-      await addSession(target, folder, title?.trim() || basename(folder), resume);
+      await addSession(target, folder, title?.trim() || basename(folder), resume, skipPermissions);
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -147,7 +153,11 @@ export function NewSession({ onClose }: { onClose: () => void }) {
               ? "1 · choose a machine"
               : step.kind === "folder"
                 ? "2 · choose a folder"
-                : "3 · resume or start"}
+                : step.kind === "all"
+                  ? // Not numbered: this is a way *past* step 2, not a step
+                    // after it. The folder is decided by the session you pick.
+                    "resume anything on this server"
+                  : "3 · resume or start"}
           </span>
           {(step.kind === "folder" || step.kind === "claude") && (
             <button
@@ -262,11 +272,49 @@ export function NewSession({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
+        {step.kind === "all" && (
+          <AllSessions
+            target={step.target}
+            label={step.label}
+            busy={creating}
+            onBack={() => connect(step.target, step.label)}
+            onResume={(session) =>
+              // The folder comes from the session's own transcript, so there is
+              // nothing to choose — which is the entire point of this screen.
+              void create(step.target, session.folder!, session.id, session.title)
+            }
+          />
+        )}
+
+        {/* Offered on both launch screens, immediately above the thing that
+            starts Claude. Asking on the screen where the decision is made beats
+            a setting elsewhere that the operator has to remember the state of. */}
+        {(step.kind === "all" || step.kind === "claude") && (
+          <PermissionChoice
+            value={skipPermissions}
+            onChange={setSkipPermissions}
+            disabled={creating}
+          />
+        )}
+
         {step.kind === "folder" && (
           <>
-            <span className="micro">
-              on <span style={{ color: "var(--text)" }}>{step.label}</span>
-            </span>
+            <div className="flex items-baseline gap-3">
+              <span className="micro">
+                on <span style={{ color: "var(--text)" }}>{step.label}</span>
+              </span>
+              {/* The way out of hunting for a folder. Offered here because this
+                  is exactly where the operator realises they do not remember
+                  which of forty checkouts the conversation was in. */}
+              <button
+                type="button"
+                className="micro ml-auto"
+                style={{ color: "var(--text)" }}
+                onClick={() => setStep({ kind: "all", target: step.target, label: step.label })}
+              >
+                LIST OLD SESSIONS ON THIS SERVER →
+              </button>
+            </div>
             <FolderBrowser
               target={step.target}
               initialPath={step.home}

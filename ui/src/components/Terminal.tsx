@@ -7,7 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import { isTauri, type TargetRef } from "../lib/api";
 import { attachClipboard } from "../lib/terminal-clipboard";
-import { TERMINAL_THEME } from "../lib/terminal-theme";
+import { TERMINAL_THEME, gpuRendering } from "../lib/terminal-theme";
 import { PanelLoader } from "./PanelLoader";
 
 /**
@@ -101,7 +101,11 @@ export function TerminalView({
 
     // The WebGL renderer is what makes a fast remote session feel local. It is
     // not available everywhere, so failure falls back rather than blanking.
+    // Skipped entirely when the operator has turned GPU rendering off — see
+    // `gpuRendering`. Loading the addon and disposing it still creates and
+    // loses a WebGL context, which is worse than never loading it.
     try {
+      if (!gpuRendering()) throw new Error("gpu rendering is off");
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => webgl.dispose());
       xterm.loadAddon(webgl);
@@ -122,6 +126,28 @@ export function TerminalView({
     lifecycle.onmessage = (event) => {
       if (event.type === "exited") {
         onExitRef.current?.(event.code);
+
+        // A non-zero exit is an accident — ssh reports a broken connection as
+        // 255 — and the shell behind it is still alive under the agent on the
+        // target. So reattach rather than leaving a pane that looks like a
+        // quiet terminal and silently swallows every keystroke.
+        //
+        // xterm is deliberately *not* torn down: the agent replays the session
+        // backlog on reattach, and disposing here would throw away what the
+        // operator is reading in order to get the same text back.
+        if (event.code !== 0 && !disposed) {
+          terminalId = null;
+          binding = false;
+          // Clearing the handle matters. It names an attachment inside the
+          // connection that just died; reattaching to it fails forever.
+          ptyRef.current = undefined;
+          setNotice("Connection lost — reattaching…");
+          // A beat first: a machine waking from sleep has an interface that is
+          // up but not yet routable, so an immediate retry just burns itself.
+          window.setTimeout(() => {
+            if (!disposed) bind();
+          }, 1200);
+        }
       } else {
         // Say so rather than silently showing a terminal missing bytes.
         setNotice(`Output dropped (${event.chunks} chunks) — display may be incomplete.`);
@@ -161,6 +187,7 @@ export function TerminalView({
         .then(({ id }) => {
           if (disposed) return;
           terminalId = id;
+          setNotice(null);
           if (!existing) onOpenedRef.current?.(id);
           // Match the far side to the pane we actually have.
           void invoke("terminal_resize", { id, cols: xterm.cols, rows: xterm.rows });

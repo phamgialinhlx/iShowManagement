@@ -60,6 +60,17 @@ export type Session = {
    */
   fullscreen?: boolean;
   /**
+   * Start Claude with `--dangerously-skip-permissions`.
+   *
+   * Chosen when the session is created and kept with it, because restarting a
+   * pane must not quietly change how much Claude is allowed to do — a session
+   * that was launched unsupervised has to come back unsupervised, and one that
+   * was not must never come back that way. It is *not* a global setting: the
+   * judgement is about this piece of work on this machine, and a saved default
+   * would apply it to work started weeks later somewhere else.
+   */
+  skipPermissions?: boolean;
+  /**
    * The Claude credential this session runs as, if it should not use the
    * default one.
    *
@@ -155,7 +166,13 @@ type State = {
    */
   claudeSessions: Record<string, string>;
 
-  addSession: (target: TargetRef, folder: string, name?: string, resume?: string) => Promise<string>;
+  addSession: (
+    target: TargetRef,
+    folder: string,
+    name?: string,
+    resume?: string,
+    skipPermissions?: boolean,
+  ) => Promise<string>;
   removeSession: (id: string) => void;
   activate: (id: string) => void;
   renameSession: (id: string, name: string) => void;
@@ -286,6 +303,7 @@ function persist(state: State) {
             folder,
             resume,
             fullscreen,
+            skipPermissions,
             claudeAccount,
             jiraProject,
             contextWindow,
@@ -300,6 +318,7 @@ function persist(state: State) {
             // Per-session settings are persisted state, not runtime handles:
             // this list is explicit, so anything added to `Session` and not
             // added here is silently forgotten on the next start.
+            skipPermissions,
             claudeAccount,
             jiraProject,
             contextWindow,
@@ -376,7 +395,7 @@ export const useSessions = create<State>((set, get) => ({
   // name, through the agent, not through a handle from a dead process.
   claudeSessions: {},
 
-  addSession: async (target, folder, name, resume) => {
+  addSession: async (target, folder, name, resume, skipPermissions) => {
     const id = nextId("session");
     const session: Session = {
       id,
@@ -384,6 +403,7 @@ export const useSessions = create<State>((set, get) => ({
       target,
       folder,
       resume,
+      skipPermissions,
       status: "idle",
       error: null,
     };

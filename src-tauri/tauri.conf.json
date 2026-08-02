@@ -36,7 +36,8 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$APPDATA/face-models/*"
+          "$APPDATA/face-models/*",
+          "$APPDATA/backgrounds/*"
         ]
       }
     }

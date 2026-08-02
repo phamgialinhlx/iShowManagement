@@ -9,9 +9,11 @@ use tauri::Manager;
 use serde::Serialize;
 
 mod askpass;
+mod background;
 mod control;
 mod notify;
 mod paste;
+mod uplink;
 mod tunnels;
 pub mod agent;
 mod claude;
@@ -20,6 +22,7 @@ mod claude_login;
 mod auth;
 mod commands;
 mod face_models;
+mod glass;
 mod lock;
 mod settings_window;
 pub mod files;
@@ -80,6 +83,7 @@ pub fn run() {
         .manage(tunnels::TunnelStore::default())
         .manage(control::ControlState::default())
         .manage(notify::NotifyStore::default())
+        .manage(uplink::UplinkStore::default())
         .invoke_handler(tauri::generate_handler![
             commands::local_target,
             commands::run_on_target,
@@ -129,6 +133,7 @@ pub fn run() {
             paste::claude_paste_image,
             notify::notify,
             notify::notify_reset,
+            uplink::host_uplink,
             tunnels::ports_discover,
             tunnels::port_forward,
             tunnels::port_unforward,
@@ -139,6 +144,7 @@ pub fn run() {
             control::control_info,
             claude::claude_start,
             claude::claude_list_sessions,
+            claude::claude_list_all_sessions,
             claude::claude_transcript,
             claude::claude_end_session,
             claude_account::claude_account_status,
@@ -160,6 +166,10 @@ pub fn run() {
             files::fs_join,
             files::fs_parent,
             files::ssh_config_hosts,
+            background::background_set,
+            background::background_clear,
+            glass::glass_status,
+            glass::set_glass,
         ])
         .setup(|app| {
             // Bring the askpass bridge up before any connection can need it.

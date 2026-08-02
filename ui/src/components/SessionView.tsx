@@ -367,7 +367,22 @@ function TerminalsView({ session }: { session: Session }) {
               session={t.id}
               ptyId={t.ptyId}
               onOpened={(ptyId) => setPty(t.id, ptyId)}
-              onExit={() => close(t.id)}
+              // **Only a clean exit closes the tab.**
+              //
+              // A shell the operator ended with `exit` and one killed by ssh
+              // dropping arrive here identically, and closing the tab for the
+              // second is data loss — the shell is still running under the
+              // agent on the target, and this tab is the only thing that knows
+              // its name. After a laptop sleeps, that silently deleted every
+              // terminal tab in the session.
+              //
+              // ssh reports a broken connection as 255, and a killed client as
+              // a signal; a login shell that ran `exit` reports 0. So zero is
+              // taken as intent and anything else as an accident, which
+              // `TerminalView` recovers from by reattaching.
+              onExit={(code) => {
+                if (code === 0) close(t.id);
+              }}
             />
           </div>
         ))}
@@ -500,6 +515,7 @@ export function SessionView({ session }: { session: Session }) {
             target={session.target}
             cwd={session.folder}
             resume={session.resume}
+            skipPermissions={session.skipPermissions}
             fullscreen={session.fullscreen}
           />
         </div>

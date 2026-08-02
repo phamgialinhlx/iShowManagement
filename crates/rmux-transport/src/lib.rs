@@ -144,8 +144,27 @@ impl CommandSpec {
     ///
     /// Resolved on the far side rather than here — for SSH we deliberately let
     /// the remote `sshd` pick, which respects the remote user's `chsh`.
+    ///
+    /// **`-i` as well as `-l`, and that is load-bearing.** `claude` is installed
+    /// by a version manager, and which startup file that manager writes its PATH
+    /// into depends on the shell:
+    ///
+    /// | shell | `-l` reads | `-i` reads |
+    /// |---|---|---|
+    /// | bash | `.bash_profile`, `.profile` | `.bashrc` |
+    /// | zsh  | `.zprofile`, `.zlogin` | `.zshrc` |
+    ///
+    /// nvm, fnm, bun and volta overwhelmingly write to `.bashrc`/`.zshrc` — the
+    /// *interactive* files — so a login-only shell finds nothing and reports
+    /// `command not found: claude` on a host where it is plainly installed and
+    /// works when the operator types it. Measured: a zsh host failed under
+    /// `-l` alone while a bash host whose PATH came from `.profile` did not,
+    /// which is exactly why this went unnoticed until a zsh machine appeared.
+    ///
+    /// `-c` still runs the command and exits, so nothing about this makes the
+    /// shell wait for input.
     pub fn login_shell() -> Self {
-        Self::new("$SHELL").arg("-l")
+        Self::new("$SHELL").arg("-l").arg("-i")
     }
 
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
@@ -393,6 +412,18 @@ mod tests {
     #[test]
     fn login_shell_stays_expandable_on_the_far_side() {
         // Quoting this would run a program literally named "$SHELL".
-        assert_eq!(spec_to_shell_line(&CommandSpec::login_shell()), r#""$SHELL" -l"#);
+        assert_eq!(spec_to_shell_line(&CommandSpec::login_shell()), r#""$SHELL" -l -i"#);
+    }
+
+    #[test]
+    fn the_login_shell_is_interactive_so_rc_files_are_read() {
+        // `-i` is what makes `.bashrc` / `.zshrc` load, and those are where nvm,
+        // fnm, bun and volta put their PATH — so without it `claude` is "command
+        // not found" on a host where it is installed and works when typed. A
+        // zsh host is where this shows up, because `zsh -l` reads neither
+        // `.zshrc` nor anything else the version managers touch.
+        let line = spec_to_shell_line(&CommandSpec::login_shell());
+        assert!(line.contains(" -i"), "the login shell must be interactive: {line}");
+        assert!(line.contains(" -l"), "and still a login shell: {line}");
     }
 }

@@ -74,6 +74,15 @@ export type ControlSession = {
   folder: string;
 };
 
+export type UplinkInfo = {
+  localIp?: string;
+  publicIp?: string;
+  city?: string;
+  country?: string;
+  lat?: number;
+  long?: number;
+};
+
 export type ControlInfo = { running: boolean; handshake?: string };
 
 export type JiraTransition = { id: string; name: string; to?: string };
@@ -217,12 +226,19 @@ export type ConfigHost = {
   user?: string;
 };
 
-/** A Claude conversation recorded for a folder, resumable by id. */
+/** A Claude conversation, resumable by id. */
 export type ClaudeSessionInfo = {
   id: string;
   /** Unix seconds of last activity. */
   modified: number;
   title?: string;
+  /**
+   * Where it was running, read from the transcript's own `cwd`.
+   *
+   * Present only in the host-wide listing, where it is the point: it lets a
+   * session be resumed without the operator having located the folder first.
+   */
+  folder?: string;
 };
 
 /** A non-text file encoded for the webview. */
@@ -285,6 +301,22 @@ export type UsageReport = {
   output: number;
   byModel: ModelUsage[];
   days: number;
+};
+
+export type GlassStatus = {
+  /** This machine has `NSGlassEffectView`. */
+  available: boolean;
+  /** It is installed on the window right now. */
+  active: boolean;
+};
+
+export type GlassOptions = {
+  enabled: boolean;
+  /** Apple's thinner style. More wallpaper, less contrast for small text. */
+  clear?: boolean;
+  /** `#rrggbb`, or omitted for untinted glass. */
+  tint?: string;
+  tintOpacity?: number;
 };
 
 export const api = {
@@ -355,7 +387,29 @@ export const api = {
   /** Ask a connected browser to open a URL in this session's partition. */
   controlOpenUrl: (session: string, url: string, focus = true) =>
     call<boolean>("control_open_url", { session, url, focus }),
+  /** Where a host is: LAN address, public address, coordinates. Cached per host. */
+  hostUplink: (target: TargetRef, refresh = false) =>
+    call<UplinkInfo>("host_uplink", { target, refresh }),
   controlInfo: () => call<ControlInfo>("control_info"),
+
+  /**
+   * Native Liquid Glass — macOS 26 only, and the UI must ask before offering it.
+   *
+   * `available` is false on Windows, Linux and every Mac before 26, where the
+   * window keeps its ordinary translucent material. A toggle that silently does
+   * nothing is worse than no toggle.
+   */
+  /**
+   * Store a chosen background picture and get back the path to load it from.
+   *
+   * The bytes go to disk rather than into `localStorage`: a wallpaper is
+   * megabytes, and that quota is shared with the session list.
+   */
+  backgroundSet: (dataBase64: string) => call<string>("background_set", { data: dataBase64 }),
+  backgroundClear: () => call<void>("background_clear"),
+
+  glassStatus: () => call<GlassStatus>("glass_status"),
+  setGlass: (options: GlassOptions) => call<GlassStatus>("set_glass", { options }),
 
   jiraProfiles: () => call<JiraProfile[]>("jira_profiles"),
   jiraProjects: (profile: string) => call<JiraProject[]>("jira_projects", { profile }),
@@ -441,6 +495,9 @@ export const api = {
 
   claudeSessions: (target: TargetRef, folder: string) =>
     call<ClaudeSessionInfo[]>("claude_list_sessions", { target, folder }),
+  /** Every Claude session on a host — folder included, so none has to be found. */
+  claudeListAllSessions: (target: TargetRef) =>
+    call<ClaudeSessionInfo[]>("claude_list_all_sessions", { target }),
 
   claudeTranscript: (target: TargetRef, folder: string, session?: string, tailBytes?: number) =>
     call<Transcript>("claude_transcript", { target, folder, session, tailBytes }),

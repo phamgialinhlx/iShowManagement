@@ -118,8 +118,13 @@ impl ClaudeSession {
         // and the rendering flags must not apply to only half of them.
         let launch = Self::launch_line(resume, args, Rendering::default());
 
-        let mut spec = CommandSpec::new("$SHELL")
-            .arg("-l")
+        // `login_shell()`, not a hand-built `$SHELL -l`: it carries `-i` as well,
+        // and that is what makes `.zshrc` load. `zsh -l` reads `.zprofile` and
+        // `.zlogin` and nothing else, while every version manager writes its PATH
+        // into `.zshrc` — so without it this is "command not found: claude" on a
+        // host where claude plainly works when typed. This path had drifted from
+        // the agent's; both build the shell the same way now.
+        let mut spec = CommandSpec::login_shell()
             .arg("-c")
             .arg(launch)
             .tty(Tty::Allocate)
@@ -214,6 +219,27 @@ impl ClaudeSession {
     /// Offered before starting, so a conversation can be resumed rather than
     /// restarted — the context of yesterday's work is usually worth more than a
     /// clean slate.
+    /// Every Claude session on the host, whichever folder it was started in.
+    ///
+    /// The listing that makes resuming practical. Finding the folder first is
+    /// backwards — the operator remembers the *conversation*, not which of forty
+    /// checkouts it happened in — and each transcript records its own `cwd`, so
+    /// rmux can simply read where each one belongs and set the folder itself.
+    pub async fn list_all<T: Target + ?Sized>(target: &T) -> anyhow::Result<Vec<SessionInfo>> {
+        let spec = CommandSpec::new("sh")
+            .arg("-c")
+            .arg(sessions::list_all_sessions_script())
+            .tty(Tty::None);
+
+        let out = target.exec(&spec).await?;
+        // A host Claude has never run on exits non-zero from the `[ -d ]` guard
+        // on some shells; that is "no sessions", not a failure.
+        if out.status != 0 {
+            return Ok(Vec::new());
+        }
+        Ok(sessions::parse_all_sessions(out.stdout.as_bytes()))
+    }
+
     pub async fn list<T: Target + ?Sized>(
         target: &T,
         folder: &str,
@@ -335,6 +361,43 @@ mod launch_tests {
         let line =
             ClaudeSession::launch_line(None, &["--model".into(), "opus".into()], Rendering::Inline);
         assert!(line.ends_with("claude --model opus"), "{line}");
+    }
+
+    #[test]
+    fn resuming_unsupervised_carries_both_the_conversation_and_the_flag() {
+        // The two are chosen together on the resume screen, and they travel on
+        // the same line — so a change to either must not drop the other. The
+        // failure this pins is silent in the worst way: a session the operator
+        // launched with permission checks off would come back *with* them, or,
+        // far worse, the other way round.
+        let line = ClaudeSession::launch_line(
+            Some("f00-baa"),
+            &["--dangerously-skip-permissions".into()],
+            Rendering::Inline,
+        );
+        // Unquoted, because `shell_quote` only quotes what needs it and a real
+        // conversation id is safe characters throughout. `the_resume_id_is_still_quoted`
+        // covers the one that does need it.
+        assert!(line.contains("--resume f00-baa"), "{line}");
+        assert!(line.contains("--dangerously-skip-permissions"), "{line}");
+        // And the rendering prefix still leads, or Claude comes back fullscreen
+        // with the mouse captured.
+        assert!(line.starts_with("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1"), "{line}");
+    }
+
+    #[test]
+    fn the_launch_shell_reads_rc_files() {
+        // `zsh -l` sources `.zprofile` and `.zlogin` and *not* `.zshrc`, which is
+        // where every version manager writes its PATH — so without `-i` this is
+        // "command not found: claude" on a host where claude plainly works when
+        // typed. Reported on a real server, twice: this path had drifted from
+        // the agent's, which had already been fixed.
+        let target = rmux_transport::LocalTarget::new();
+        let spec = CommandSpec::login_shell().arg("-c").arg("claude");
+        let resolved = target.build_command(&spec).unwrap();
+        let args: Vec<_> = resolved.args.iter().map(|a| a.to_string_lossy()).collect();
+        assert!(args.iter().any(|a| a == "-i"), "not an interactive shell: {args:?}");
+        assert!(args.iter().any(|a| a == "-l"), "not a login shell: {args:?}");
     }
 }
 

@@ -71,6 +71,19 @@
   --panel-tint: 38%;
   --glass-pct: 94%;
 
+  /*
+   * Typography and colour, when the operator overrides them (Settings >
+   * Appearance). Absent by default, so the hand-tuned values above stand.
+   *
+   * `--text-soft` and `--text-faint` are *derived* from a chosen `--text` by
+   * mixing toward the panel, rather than being three separate pickers. The
+   * three-level hierarchy is load-bearing — rule -1 is that prose sits at
+   * `--text-soft` and 9px labels must still clear 4.5:1 — and three independent
+   * colours is three chances to invert it. The mix ratios reproduce the shipped
+   * ramp to within a couple of levels, so the default is unchanged by having
+   * become computable.
+   */
+
   /* The signature easing. One curve, one duration, everywhere. */
   --ease: cubic-bezier(0.2, 0.9, 0.3, 1);
   --dur: 0.3s;
@@ -104,6 +117,26 @@ body,
 #root {
   height: 100%;
   margin: 0;
+}
+
+/*
+ * Interface scale.
+ *
+ * On `#root` rather than `:root`, and compensated. `zoom` on the document
+ * element scales the root box while `height: 100%` still resolves against the
+ * unscaled viewport — so at 85% the app was laid out into 85% of its own window
+ * and clipped, with a scrollbar stranded in the middle of the settings sheet.
+ * Here the percentage resolves against `body`, which is *not* zoomed, so
+ * `(100% / z) * z` is exactly the window at every scale.
+ *
+ * It also fixes the overlays for free: an element with `zoom` other than 1 is a
+ * containing block for fixed-position descendants, so `.atmosphere` and the
+ * modals resolve against `#root` — which is, by the line above, the window.
+ */
+#root {
+  zoom: var(--ui-zoom, 1);
+  width: calc(100% / var(--ui-zoom, 1));
+  height: calc(100% / var(--ui-zoom, 1));
 }
 
 body {
@@ -181,6 +214,19 @@ textarea,
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * Overrides written by Settings > Appearance.
+ *
+ * A separate block rather than editing the tokens in place: `--text-soft` and
+ * `--text-faint` must fall back to their hand-tuned defaults when no custom
+ * colour is set, and a `color-mix` in `:root` would compute even when the base
+ * had not been touched.
+ */
+:root[data-custom-text="on"] {
+  --text-soft: color-mix(in srgb, var(--text) 64%, var(--app-panel));
+  --text-faint: color-mix(in srgb, var(--text) 52%, var(--app-panel));
+}
+
 /* ---------------------------------------------------------------- material */
 
 /*
@@ -194,11 +240,29 @@ textarea,
   pointer-events: none;
 }
 
+/*
+ * The operator's own background, when they have chosen one.
+ *
+ * Longhands rather than the `background` shorthand: in the shorthand only the
+ * final layer may carry a colour, so a colour and an image driven by two
+ * independent custom properties cannot both be expressed without one of them
+ * silently winning. Written out, the image simply sits over the colour and
+ * either may be absent.
+ *
+ * `--backdrop-opacity` is how much of the desktop this *covers*, which is why
+ * it applies to both: at anything under 100% a solid colour becomes a wash over
+ * the wallpaper, which is a genuinely nice third option that costs nothing to
+ * allow.
+ */
 .atmosphere::before {
   content: "";
   position: absolute;
   inset: 0;
-  background: var(--backdrop-image, none) center / cover no-repeat;
+  background-color: var(--backdrop-color, transparent);
+  background-image: var(--backdrop-image, none);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
   opacity: var(--backdrop-opacity, 1);
 }
 
@@ -268,6 +332,53 @@ textarea,
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.08),
     inset 0 0 0 1px rgb(255 255 255 / 0.03);
+}
+
+/*
+ * Under native Liquid Glass the page stops simulating glass entirely.
+ *
+ * This is the same rule as `.panel` above, taken to its conclusion. Once
+ * `NSGlassEffectView` is installed (macOS 26 — see `src-tauri/src/glass.rs`) the
+ * compositor is doing the real thing: refraction, its own dimming, a specular
+ * edge. Everything the page was doing to *imply* that material is now a film
+ * painted on top of it — it cannot add to an effect it sits above, it can only
+ * hide it. The vignette, the tint gradient, the layered surface opacities all
+ * become subtraction.
+ *
+ * So they go, and what is left has one job: **legibility**. 9px labels still
+ * need contrast against whatever wallpaper is behind them, and real glass does
+ * not guarantee that. That residue is `--glass-overlay` — not a glass setting, a
+ * *how much colour is laid over the glass* setting, which is why it is a
+ * separate knob from `--panel-tint` rather than a scaled version of it. Reusing
+ * the tint would mean a value chosen for a flat material silently deciding how
+ * much of a translucent one you get to see.
+ *
+ * `.window` and `.menu` are deliberately **not** thinned here. They are modal
+ * surfaces stacked over content, and the thing behind them is page content
+ * rather than the desktop, so their opacity was never a glass simulation — it is
+ * what makes a dialog readable. A see-through dialog over a photograph is worse
+ * than a plain one.
+ */
+:root[data-native-glass="on"] .atmosphere::after {
+  /* The registration grid only. It is design language, not material — the
+     vignette and the glow were the parts pretending to be glass. */
+  background: radial-gradient(rgba(232, 230, 225, 0.045) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+
+:root[data-native-glass="on"] .panel {
+  background: color-mix(in srgb, var(--app-panel) var(--glass-overlay, 14%), transparent);
+}
+
+/* Insets ride the same overlay. Left at their fixed 62% they would become the
+   only solid thing on screen — a field reading as heavier than the panel
+   containing it, which inverts the depth the whole design depends on. */
+:root[data-native-glass="on"] .inset {
+  background: color-mix(
+    in srgb,
+    var(--app-elev) calc(var(--glass-overlay, 14%) * 1.6),
+    transparent
+  );
 }
 
 /*

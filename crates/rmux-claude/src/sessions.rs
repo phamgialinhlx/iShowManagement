@@ -23,6 +23,13 @@ pub struct SessionInfo {
     /// Claude's own title for the conversation, when it has generated one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Where it was running, read from the transcript's own `cwd`.
+    ///
+    /// Only set by the host-wide listing, where it is the whole point: it lets
+    /// a session be resumed without the operator having found the folder first.
+    /// The per-folder listing leaves it `None` because the caller already knows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 /// Every directory name Claude Code might have filed this folder's sessions under.
@@ -143,6 +150,90 @@ done"#
     )
 }
 
+/// Every Claude session on a host, wherever it was started.
+///
+/// **The folder comes from the session, not the other way round.** Resuming used
+/// to require finding the project directory first, which is backwards: the
+/// operator wants "the conversation about the offload bug", and being made to
+/// remember which of forty checkouts it happened in — and then hunt for it in a
+/// file tree — is the slowest possible way to get there. Every transcript
+/// records its own `cwd`, so the folder is something rmux can simply read.
+///
+/// That also sidesteps the project-slug problem entirely. `project_slug` has to
+/// guess how Claude Code spelled a directory name, and the scheme changed
+/// between versions; here nothing is guessed, because the answer is inside the
+/// file.
+///
+/// Scanning is bounded on purpose. A transcript measured **228MB** on a real
+/// host and there can be hundreds of them, so this reads the `cwd` from the
+/// *first* line of each — it is recorded on every record, so the first will do —
+/// and the title from the last matching line. Reading whole files here would
+/// take minutes and produce the same answer.
+pub fn list_all_sessions_script() -> String {
+    // `$HOME` is expanded by the remote shell: this whole script is one quoted
+    // argument, so it must not be shell-quoted itself. See `provision`.
+    r#"root="$HOME/.claude/projects"
+[ -d "$root" ] || exit 0
+for d in "$root"/*; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*.jsonl; do
+    [ -f "$f" ] || continue
+    id=$(basename "$f" .jsonl)
+    mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
+    # A bounded prefix, not the first line. Verified against a real host: the
+    # first record is a `mode` entry carrying only type/mode/sessionId, and
+    # `cwd` does not appear until about the fourth line — so "read line one"
+    # silently returned nothing for every session. 256KB is far more than
+    # enough to reach it and still never reads a 228MB transcript.
+    cwd=$(head -c 262144 "$f" 2>/dev/null | grep -m1 -o '"cwd":"[^"]*"' | cut -d'"' -f4)
+    t=$(tail -c 262144 "$f" 2>/dev/null | grep '"aiTitle"' | tail -n 1)
+    printf '%s\0%s\0%s\0%s\0' "$id" "$mt" "$cwd" "$t"
+  done
+done"#
+    .to_owned()
+}
+
+/// Parse what [`list_all_sessions_script`] emits.
+///
+/// Four fields per record rather than three — the folder is the addition.
+pub fn parse_all_sessions(bytes: &[u8]) -> Vec<SessionInfo> {
+    let mut sessions = Vec::new();
+    let mut fields = bytes.split(|b| *b == 0);
+
+    while let Some(id) = fields.next() {
+        if id.is_empty() {
+            break;
+        }
+        let (Some(modified), Some(cwd), Some(title_line)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            // Truncated output — a connection cut mid-listing. Keep what parsed
+            // rather than discarding the lot.
+            break;
+        };
+
+        let folder = String::from_utf8_lossy(cwd).trim().to_owned();
+        // A session whose transcript never recorded a cwd cannot be placed, and
+        // resuming it into the wrong directory would point Claude at someone
+        // else's code. Skipped rather than guessed.
+        if folder.is_empty() {
+            continue;
+        }
+
+        sessions.push(SessionInfo {
+            id: String::from_utf8_lossy(id).trim().to_owned(),
+            modified: String::from_utf8_lossy(modified).trim().parse().unwrap_or(0),
+            title: extract_title(&String::from_utf8_lossy(title_line)),
+            folder: Some(folder),
+        });
+    }
+
+    // Newest first: the session you want is nearly always the one you were last
+    // in, and on a shared host this list is long.
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    sessions
+}
+
 /// Parse what [`list_sessions_script`] emits.
 pub fn parse_sessions(bytes: &[u8]) -> Vec<SessionInfo> {
     let mut sessions = Vec::new();
@@ -167,6 +258,8 @@ pub fn parse_sessions(bytes: &[u8]) -> Vec<SessionInfo> {
             id,
             modified: String::from_utf8_lossy(modified).trim().parse().unwrap_or(0),
             title: extract_title(&String::from_utf8_lossy(title_line)),
+            // The caller asked about one folder, so it already knows which.
+            folder: None,
         });
     }
 

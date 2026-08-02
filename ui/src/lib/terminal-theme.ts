@@ -53,3 +53,28 @@ export const TERMINAL_THEME = {
 
 /** The Claude pane differs in one thing only: red, because that is its cursor. */
 export const CLAUDE_THEME = { ...TERMINAL_THEME, cursor: "#e63b2e" } as const;
+
+/**
+ * Whether terminals render on the GPU.
+ *
+ * A setting rather than a constant, because it is the *only* lever over a class
+ * of rendering artefact we do not otherwise control. xterm's WebGL renderer
+ * keeps its own glyph atlas, and a glyph cached with a background attribute can
+ * come back with that background painted opaque — which on a glass terminal
+ * reads as a black box around each styled word, with gaps where the spaces are.
+ * The DOM renderer composites text normally and does not do this.
+ *
+ * **On by default and it should stay that way.** Without WebGL, xterm falls
+ * back to the DOM renderer, and scrolling or dragging across a constantly
+ * redrawing TUI is visibly slow — that was a real bug in this pane once. Turn it
+ * off only if the artefact bothers you more than the latency does.
+ */
+const GPU_KEY = "rmux.terminal.gpu";
+
+export function gpuRendering(): boolean {
+  return localStorage.getItem(GPU_KEY) !== "0";
+}
+
+export function setGpuRendering(on: boolean): void {
+  localStorage.setItem(GPU_KEY, on ? "1" : "0");
+}

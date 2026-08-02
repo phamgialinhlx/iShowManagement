@@ -103,6 +103,9 @@ fi
 # `dist/` is not a cargo build input, so a UI-only change relinks in a second
 # and embeds the *previous* bundle — the app then runs code you did not build,
 # silently. Touching build.rs is what forces the re-embed.
+VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+[ -n "$VERSION" ] || die "could not read the version from Cargo.toml"
+
 say "Building the UI"
 pnpm exec vite build
 touch src-tauri/build.rs
@@ -112,7 +115,16 @@ say "Building and signing the app"
 # afterwards: it signs the nested binaries — the agents in Resources — in the
 # right order. A `--deep` sign after the fact is documented by Apple as
 # unreliable for exactly that.
-APPLE_SIGNING_IDENTITY="$IDENTITY" pnpm tauri build --bundles app,dmg
+#
+# **`--bundles app` only.** Building the dmg here too produces it from the app as
+# it stands *at that moment* — which is before step 3b signs the nested agents
+# and re-seals the wrapper. The dmg therefore captured a stale app: correctly
+# built, but with an ad-hoc-signed agent inside and no notarisation ticket. It
+# then failed to staple with "Record not found", the script reported success
+# anyway, and the file labelled "send this one" was rejected by Gatekeeper.
+# Verified by mounting it: `spctl` said `rejected / Unnotarized Developer ID`.
+# The dmg is now built in step 5b, from the finished article.
+APPLE_SIGNING_IDENTITY="$IDENTITY" pnpm tauri build --bundles app
 
 APP="target/release/bundle/macos/rmux.app"
 [ -d "$APP" ] || die "no bundle at $APP"
@@ -190,12 +202,43 @@ say "Stapling the ticket"
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
 
-# The dmg is what gets sent, so it is stapled too — otherwise the app inside is
-# fine and the disk image itself warns.
-DMG=$(ls target/release/bundle/dmg/*.dmg 2>/dev/null | head -1 || true)
-if [ -n "$DMG" ]; then
-  xcrun stapler staple "$DMG" && xcrun stapler validate "$DMG"
-fi
+# --- 5b. the disk image, built from the finished app -------------------------
+#
+# Made here rather than by Tauri, for the ordering reason above: this has to
+# contain the app *after* nested signing, notarisation and stapling, and nothing
+# in the bundler's pipeline runs that late. `hdiutil` on a staging folder is the
+# ordinary way to do it — note that the app inside is still the genuine Tauri
+# bundle, which is the part that must never be hand-assembled.
+#
+# The ticket is stapled to the app before it goes in, so the copy the recipient
+# drags to /Applications validates offline on first launch.
+say "Building the disk image from the stapled app"
+DMG_DIR="target/release/bundle/dmg"
+DMG="$DMG_DIR/rmux_${VERSION}_aarch64.dmg"
+STAGE=$(mktemp -d)
+mkdir -p "$DMG_DIR"
+cp -R "$APP" "$STAGE/"
+# The drag-to-install affordance. Without it the window is a lone icon and the
+# recipient is left to guess where it goes.
+ln -s /Applications "$STAGE/Applications"
+rm -f "$DMG"
+hdiutil create -volname "rmux" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+rm -rf "$STAGE"
+
+# A disk image is itself code-signed and notarised — separately from the app it
+# carries. Its ticket is keyed to the dmg's own hash, which is why stapling one
+# that was never submitted fails with "Record not found" rather than saying what
+# is wrong.
+say "Signing and notarising the disk image"
+codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+xcrun notarytool submit "$DMG" "${NOTARY[@]}" --wait \
+  || die "the disk image was refused — 'xcrun notarytool log <id>' says why"
+
+# No `&&` here, deliberately. Under `set -e` a failure on the left of `&&` is
+# exempt from exiting, so the previous version swallowed a failed staple and
+# went on to print "send this one" for a file Gatekeeper rejects.
+xcrun stapler staple "$DMG"
+xcrun stapler validate "$DMG"
 
 # --- 6. prove it ------------------------------------------------------------
 #
@@ -204,6 +247,28 @@ fi
 say "What Gatekeeper will say on someone else's Mac"
 spctl -a -vvv -t exec "$APP"
 
+# **The app inside the dmg, not just the app on disk.** They were different
+# once, and the difference was invisible from here: the standalone bundle passed
+# every check while the file actually being sent contained an unnotarised copy.
+# Mounting it is the only way to check the artefact rather than its neighbour.
+say "…and to the copy inside the disk image"
+MNT=$(mktemp -d)
+hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MNT" >/dev/null \
+  || die "could not mount the disk image to verify it"
+VERDICT=$(spctl -a -vvv -t exec "$MNT/rmux.app" 2>&1 || true)
+STAPLED=$(xcrun stapler validate "$MNT/rmux.app" 2>&1 || true)
+hdiutil detach "$MNT" >/dev/null 2>&1 || true
+rmdir "$MNT" 2>/dev/null || true
+echo "$VERDICT"
+case "$VERDICT" in
+  *accepted*) ;;
+  *) die "the app inside the dmg would be REFUSED on another Mac — do not send it" ;;
+esac
+case "$STAPLED" in
+  *worked*) ;;
+  *) die "the app inside the dmg has no stapled ticket; a first launch offline would fail" ;;
+esac
+
 say "Done"
 echo "  app: $APP"
-[ -n "$DMG" ] && echo "  dmg: $DMG  ← send this one"
+echo "  dmg: $DMG  ← send this one (verified from inside the image)"
