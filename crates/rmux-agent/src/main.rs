@@ -95,13 +95,38 @@ async fn main() -> ExitCode {
         }
 
         // Used to decide whether an uploaded binary needs replacing.
+        // What is this daemon running? Printed as one NUL-free line per
+        // session so a caller can split on newlines and tabs — the same
+        // reasoning as `rmux-fs`, except a session name is ours and cannot
+        // contain either.
+        "list" => {
+            match attach::list().await {
+                Ok(sessions) => {
+                    for s in sessions {
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}",
+                            s.name,
+                            s.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                            s.age_seconds,
+                            if s.attached { "attached" } else { "detached" },
+                            s.command.unwrap_or_default(),
+                        );
+                    }
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("rmux-agent: {e}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
         "version" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
 
         _ => {
-            eprintln!("usage: rmux-agent <attach|daemon|kill|setenv|version> [--session NAME] [--cwd DIR]");
+            eprintln!("usage: rmux-agent <attach|daemon|kill|list|setenv|version> [--session NAME] [--cwd DIR]");
             ExitCode::FAILURE
         }
     }

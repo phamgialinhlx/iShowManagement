@@ -135,11 +135,15 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
                     code = exit;
                     break 'outer;
                 }
-                // The daemon never sends these to a client.
+                // The daemon never sends these to an *attached* client —
+                // `Sessions` is answered during the handshake of a `list`
+                // connection, which never reaches this loop.
                 Frame::Hello(_)
                 | Frame::Resize { .. }
                 | Frame::Kill { .. }
-                | Frame::SetEnv(_) => {}
+                | Frame::SetEnv(_)
+                | Frame::List
+                | Frame::Sessions(_) => {}
             }
         }
     }
@@ -196,29 +200,67 @@ async fn wait_for_daemon(endpoint: &ipc::Endpoint) -> anyhow::Result<ipc::Stream
 ///
 /// Connects only if a daemon is already running — if none is, there is nothing
 /// to kill, and starting one just to tell it to do nothing would be absurd.
+/// Ask the daemon what it is running.
+///
+/// Returns an empty list when there is no daemon at all, which is the ordinary
+/// answer on a host rmux has never touched — not an error to report.
+pub async fn list() -> anyhow::Result<Vec<crate::protocol::SessionSummary>> {
+    let endpoint = daemon::endpoint()?;
+    let Ok(mut stream) = ipc::connect(&endpoint).await else {
+        return Ok(Vec::new());
+    };
+
+    // `List` is sent *instead of* a Hello, not after one. Going through the
+    // Hello path to ask what exists would spawn a shell named after the
+    // question — the enumeration would create what it was counting.
+    stream.write_all(&Frame::List.encode()).await?;
+    stream.flush().await?;
+
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Some((frame, _)) = Frame::decode(&buf)? {
+            return match frame {
+                Frame::Sessions(sessions) => Ok(sessions),
+                other => anyhow::bail!("expected a session list, got {other:?}"),
+            };
+        }
+
+        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut chunk).await?;
+        // A daemon from before this frame existed closes rather than answering.
+        anyhow::ensure!(n > 0, "this host's agent is too old to list sessions");
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
 pub async fn kill(session: &str) -> anyhow::Result<()> {
     let endpoint = daemon::endpoint()?;
     let Ok(mut stream) = ipc::connect(&endpoint).await else {
         return Ok(());
     };
 
-    // The daemon expects a Hello first; this one only carries the name, and the
-    // Kill that follows it is what actually does the work.
-    let hello = Hello {
-        session: session.to_owned(),
-        cwd: None,
-        program: None,
-        args: Vec::new(),
-        login_command: None,
-        env: Default::default(),
-        cols: 80,
-        rows: 24,
-    };
-    stream.write_all(&Frame::Hello(hello).encode()).await?;
+    // `Kill` alone, with **no Hello in front of it**.
+    //
+    // It used to send a Hello first, because the daemon only handled `Kill`
+    // once a client had fully attached. That was a real leak: this function
+    // closes the connection immediately, so the daemon attached, tried to write
+    // the scrollback replay to a socket that was already gone, errored, and
+    // never read the `Kill`. Every closed tab kept its shell — the exact failure
+    // closing exists to prevent. Verified against a real host.
+    //
+    // A Hello was also wrong on its own terms: it *creates* the session when the
+    // name is unknown, so asking to kill something that had already gone would
+    // spawn a shell in order to destroy it.
     stream
         .write_all(&Frame::Kill { session: session.to_owned() }.encode())
         .await?;
     stream.flush().await?;
+
+    // Wait for the far end to close before dropping the stream. Without this the
+    // socket can be torn down before the daemon has read the frame, which is the
+    // same race in a smaller form.
+    let mut sink = [0u8; 1];
+    let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut sink).await;
     Ok(())
 }
 

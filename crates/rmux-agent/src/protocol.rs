@@ -28,6 +28,8 @@ const KIND_RESIZE: u8 = 2;
 const KIND_EXITED: u8 = 3;
 const KIND_KILL: u8 = 4;
 const KIND_SET_ENV: u8 = 5;
+const KIND_LIST: u8 = 6;
+const KIND_SESSIONS: u8 = 7;
 
 /// What an attaching client asks for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +93,41 @@ pub enum Frame {
     /// a connection leaves the shell running, so without this every closed tab
     /// would leak a shell that nothing can ever reach again.
     Kill { session: String },
+    /// Client → daemon: what are you running?
+    ///
+    /// **This is what makes a leak findable.** Sessions deliberately outlive
+    /// both the client and the network, so a session whose tab is gone keeps
+    /// running with nothing able to reach it. Without an enumeration the only
+    /// way to discover one is `ps` on the host and correlating by hand — which
+    /// means in practice nobody does, and shells accumulate for months.
+    List,
+    /// Daemon → client: everything it is running.
+    Sessions(Vec<SessionSummary>),
+}
+
+/// One session, as the daemon sees it.
+///
+/// JSON rather than a packed layout: this is a once-in-a-while control message,
+/// not the hot path, and a self-describing encoding means an older client shown
+/// a newer daemon's answer degrades to missing fields rather than garbage.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    /// The name rmux reattaches by — `term-…` or `claude-…`.
+    pub name: String,
+    /// The shell's pid on the host, so the operator can find it in `ps`.
+    pub pid: Option<u32>,
+    /// Seconds since it was created. Age is what identifies a leak: a shell
+    /// older than the app that started it had no tab for most of its life.
+    pub age_seconds: u64,
+    /// Whether a client is attached **right now**. An unattached session is not
+    /// necessarily leaked — rmux may simply be closed — but every leaked one is
+    /// unattached, so this is the first thing to sort by.
+    pub attached: bool,
+    /// What it is running, when the daemon was told. Distinguishes a shell from
+    /// a Claude conversation without parsing the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// Append a data frame directly to `out`.
@@ -124,6 +161,11 @@ impl Frame {
             }
             Frame::Exited { code } => (KIND_EXITED, code.to_le_bytes().to_vec()),
             Frame::Kill { session } => (KIND_KILL, session.as_bytes().to_vec()),
+            Frame::List => (KIND_LIST, Vec::new()),
+            Frame::Sessions(sessions) => (
+                KIND_SESSIONS,
+                serde_json::to_vec(sessions).expect("summaries are always serialisable"),
+            ),
             Frame::SetEnv(env) => (
                 KIND_SET_ENV,
                 serde_json::to_vec(env).expect("an env map is always serialisable"),
@@ -175,6 +217,8 @@ impl Frame {
             }
             KIND_KILL => Frame::Kill { session: String::from_utf8(payload.to_vec())? },
             KIND_SET_ENV => Frame::SetEnv(serde_json::from_slice(payload)?),
+            KIND_LIST => Frame::List,
+            KIND_SESSIONS => Frame::Sessions(serde_json::from_slice(payload)?),
             other => anyhow::bail!("unknown frame kind {other}"),
         };
 

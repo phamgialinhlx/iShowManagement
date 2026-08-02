@@ -25,9 +25,31 @@ pub fn endpoint() -> anyhow::Result<Endpoint> {
     Endpoint::for_version(env!("CARGO_PKG_VERSION"))
 }
 
+/// A session, plus what the daemon knows about it that the terminal does not.
+///
+/// The extra fields exist to make a *leak* identifiable, not merely to list
+/// things. A name and a pid say what is running; age and attachment say whether
+/// anyone still wants it — which is the actual question when a shell has been
+/// alive for six weeks and its tab is long gone.
+struct Session {
+    terminal: Arc<Terminal>,
+    started: std::time::Instant,
+    /// What it was launched to run, when the client said. Distinguishes a plain
+    /// shell from a Claude conversation without parsing the session name, which
+    /// is rmux's convention and not the agent's business.
+    command: Option<String>,
+    /// How many clients are attached **right now**.
+    ///
+    /// A count rather than a flag: reattaching before the old connection has
+    /// finished tearing down is normal, and a flag would be cleared by the
+    /// departing client after the arriving one set it — leaving a live session
+    /// reported as abandoned.
+    attached: Arc<std::sync::atomic::AtomicUsize>,
+}
+
 #[derive(Default)]
 struct Sessions {
-    by_name: HashMap<String, Arc<Terminal>>,
+    by_name: HashMap<String, Session>,
     /// Environment applied to sessions created from now on.
     ///
     /// **In memory only, deliberately.** It holds credentials, and the whole
@@ -53,6 +75,22 @@ pub async fn serve() -> anyhow::Result<()> {
                 tracing::debug!(error = %e, "client disconnected");
             }
         });
+    }
+}
+
+/// Holds the attached count up for as long as a client is connected.
+struct AttachGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl AttachGuard {
+    fn hold(count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(count)
+    }
+}
+
+impl Drop for AttachGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -83,6 +121,35 @@ where
                     sessions.lock().env.extend(env);
                     return Ok(());
                 }
+                // Answered here, during the handshake, because listing must not
+                // *create* anything. Going through the Hello path to ask what
+                // exists would spawn a shell named after the question.
+                Frame::List => {
+                    let reply = Frame::Sessions(summarise(&sessions)).encode();
+                    writer.write_all(&reply).await?;
+                    writer.flush().await?;
+                    return Ok(());
+                }
+                // **Also during the handshake, and this one was a real bug.**
+                //
+                // `Kill` used to be handled only in the streaming loop, which
+                // meant a client had to complete a full attach first. The kill
+                // client sends its frames and closes immediately, so the daemon
+                // attached, tried to write the scrollback replay to a socket
+                // that was already gone, errored — and never read the `Kill` at
+                // all. Verified on a real host: the session survived, stayed in
+                // the map, and kept its shell running. Every "closed" tab was
+                // still leaking the exact way closing was supposed to prevent.
+                //
+                // Attaching to kill was always wrong anyway: it made the
+                // teardown path *create* a session when the name did not exist,
+                // just to destroy it.
+                Frame::Kill { session } => {
+                    if let Some(dead) = sessions.lock().by_name.remove(&session) {
+                        let _ = dead.terminal.kill();
+                    }
+                    return Ok(());
+                }
                 other => anyhow::bail!("expected Hello, got {other:?}"),
             }
         }
@@ -90,6 +157,16 @@ where
 
     let size = TermSize { cols: hello.cols, rows: hello.rows };
     let (terminal, created) = open_or_attach(&sessions, &hello, size)?;
+
+    // Counted for exactly as long as this client is here. `AttachGuard` releases
+    // it on every exit path — including the error ones, which is the whole
+    // reason it is a guard: a client killed mid-stream would otherwise leave the
+    // session looking permanently attached, and permanently attached is exactly
+    // what a leak does not look like.
+    let _attached = {
+        let guard = sessions.lock();
+        guard.by_name.get(&hello.session).map(|s| AttachGuard::hold(Arc::clone(&s.attached)))
+    };
 
     // The terminal is resized to *this* client's window. With one client that is
     // simply correct; with several the last to attach wins, which is the same
@@ -149,7 +226,7 @@ where
                         // Explicit end-of-life: the tab was closed, so the shell
                         // should die rather than linger unreachable.
                         if let Some(dead) = sessions.lock().by_name.remove(&session) {
-                            let _ = dead.kill();
+                            let _ = dead.terminal.kill();
                         }
                         return Ok(());
                     }
@@ -157,7 +234,10 @@ where
                         sessions.lock().env.extend(env);
                     }
                     // A client has no business announcing these.
-                    Frame::Hello(_) | Frame::Exited { .. } => {}
+                    Frame::Hello(_) | Frame::Exited { .. } | Frame::Sessions(_) => {}
+                    // Answered only during the handshake, where it cannot be
+                    // confused with traffic for an open session.
+                    Frame::List => {}
                 }
             }
 
@@ -192,8 +272,8 @@ fn open_or_attach(
     if let Some(existing) = guard.by_name.get(&hello.session) {
         // A shell that has exited should not be reattached to — start a new one
         // under the same name rather than handing back a dead terminal.
-        if existing.exit_code().is_none() {
-            return Ok((Arc::clone(existing), false));
+        if existing.terminal.exit_code().is_none() {
+            return Ok((Arc::clone(&existing.terminal), false));
         }
         guard.by_name.remove(&hello.session);
     }
@@ -223,8 +303,49 @@ fn open_or_attach(
     let cwd = hello.cwd.as_deref().map(camino::Utf8Path::new);
     let terminal = Arc::new(Terminal::spawn(&command, cwd, size)?);
 
-    guard.by_name.insert(hello.session.clone(), Arc::clone(&terminal));
+    guard.by_name.insert(
+        hello.session.clone(),
+        Session {
+            terminal: Arc::clone(&terminal),
+            started: std::time::Instant::now(),
+            // The login command is the informative one — it is what carries
+            // `claude --resume …`. A bare program name says only "a shell".
+            command: hello
+                .login_command
+                .clone()
+                .or_else(|| hello.program.clone()),
+            attached: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        },
+    );
     Ok((terminal, true))
+}
+
+/// Everything the daemon is running, newest last.
+///
+/// Sorted oldest-first on purpose: age is what identifies a leak, so the ones
+/// worth looking at are the ones at the top.
+fn summarise(sessions: &Arc<Mutex<Sessions>>) -> Vec<crate::protocol::SessionSummary> {
+    use std::sync::atomic::Ordering;
+
+    let guard = sessions.lock();
+    let mut out: Vec<_> = guard
+        .by_name
+        .iter()
+        // A session whose shell has exited is not running, whatever the map
+        // still says — reporting it would send the operator to kill a pid that
+        // the OS may have reused.
+        .filter(|(_, session)| session.terminal.exit_code().is_none())
+        .map(|(name, session)| crate::protocol::SessionSummary {
+            name: name.clone(),
+            pid: session.terminal.pid(),
+            age_seconds: session.started.elapsed().as_secs(),
+            attached: session.attached.load(Ordering::Relaxed) > 0,
+            command: session.command.clone(),
+        })
+        .collect();
+
+    out.sort_by_key(|s| std::cmp::Reverse(s.age_seconds));
+    out
 }
 
 #[cfg(test)]
@@ -236,6 +357,121 @@ mod tests {
         // A newer client talking to an older daemon would surface as corrupt
         // terminal output rather than an honest error, so they never share one.
         assert!(endpoint().unwrap().address.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// Killing must work without attaching first.
+    ///
+    /// The bug this pins was real and shipped: `Kill` was handled only in the
+    /// streaming loop, so a client had to complete a full attach before it
+    /// counted. The kill client closes its connection immediately, so the
+    /// daemon attached, tried to write the scrollback replay to a socket that
+    /// was already gone, errored — and never read the `Kill`. Every closed tab
+    /// kept its shell, which is the precise failure closing exists to prevent,
+    /// and it looked fixed because the *client* reported success.
+    ///
+    /// Driven through `handle` rather than by calling a helper, because the
+    /// handshake is where the bug lived: a test that reaches past it proves
+    /// nothing.
+    #[tokio::test]
+    async fn a_kill_needs_no_hello_and_no_attach() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        let size = TermSize { cols: 80, rows: 24 };
+
+        let hello = Hello {
+            session: "doomed".into(),
+            cwd: None,
+            program: Some("sh".into()),
+            args: vec!["-c".into(), "sleep 30".into()],
+            login_command: None,
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        };
+        let (terminal, _) = open_or_attach(&sessions, &hello, size).unwrap();
+        assert!(terminal.exit_code().is_none(), "the shell should be running");
+
+        // A client that says only "kill this" and hangs up, which is exactly
+        // what `attach::kill` does.
+        let (client, server) = tokio::io::duplex(1024);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+        client_write
+            .write_all(&Frame::Kill { session: "doomed".into() }.encode())
+            .await
+            .unwrap();
+        drop(client_write);
+
+        handle(server, Arc::clone(&sessions)).await.unwrap();
+
+        assert!(
+            !sessions.lock().by_name.contains_key("doomed"),
+            "the session must be gone from the daemon's map"
+        );
+
+        // And the process itself, not merely the bookkeeping. `SIGHUP` is what
+        // portable-pty sends; asserting only on the map would have passed for
+        // the broken version too.
+        for _ in 0..50 {
+            if terminal.exit_code().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(terminal.exit_code().is_some(), "the shell must actually have died");
+
+        // Nothing is sent back; the client learns it worked from the close.
+        let mut sink = [0u8; 1];
+        let _ = client_read.read(&mut sink).await;
+    }
+
+    /// Age ordering, and the exclusion of the dead.
+    ///
+    /// Oldest first because age is what identifies a leak — a shell older than
+    /// the app that started it had no tab for most of its life. And a session
+    /// whose shell has exited must not appear at all: its pid may already have
+    /// been reused by the OS, so reporting it sends the operator to kill
+    /// something else entirely.
+    #[test]
+    fn the_summary_leads_with_the_oldest_and_omits_the_dead() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        let size = TermSize { cols: 80, rows: 24 };
+
+        for name in ["young", "old"] {
+            let hello = Hello {
+                session: name.into(),
+                cwd: None,
+                // Long-lived, so it is still running when the summary is taken.
+                program: Some("sh".into()),
+                args: vec!["-c".into(), "sleep 30".into()],
+                login_command: None,
+                env: Default::default(),
+                cols: 80,
+                rows: 24,
+            };
+            open_or_attach(&sessions, &hello, size).unwrap();
+        }
+        // Backdate one so the ordering is decided by age rather than by the
+        // map's iteration order, which is not stable and would make this pass
+        // or fail at random.
+        sessions.lock().by_name.get_mut("old").unwrap().started =
+            std::time::Instant::now() - std::time::Duration::from_secs(600);
+
+        let summary = summarise(&sessions);
+        assert_eq!(summary.len(), 2, "{summary:?}");
+        assert_eq!(summary[0].name, "old", "the oldest must lead: {summary:?}");
+        assert!(summary[0].age_seconds >= 600);
+
+        // Nothing is attached: these were opened, not connected to. That is
+        // exactly the shape of a leak, and the field has to say so.
+        assert!(summary.iter().all(|s| !s.attached), "{summary:?}");
+
+        // A session that exits leaves the listing.
+        sessions.lock().by_name.get("young").unwrap().terminal.kill().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let after = summarise(&sessions);
+        assert!(
+            after.iter().all(|s| s.name != "young"),
+            "a dead session must not be listed: {after:?}"
+        );
     }
 
     #[test]

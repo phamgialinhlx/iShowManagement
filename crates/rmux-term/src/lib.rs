@@ -227,6 +227,20 @@ impl Terminal {
         Ok(())
     }
 
+    /// The child's process id on this machine.
+    ///
+    /// Exposed so a session can be correlated with `ps`. That matters because
+    /// these processes deliberately outlive the app: when one is left behind,
+    /// the pid is the only thing that ties what the daemon reports to what the
+    /// operator sees on the host.
+    ///
+    /// `None` once the child has been reaped — `portable_pty` drops the id with
+    /// the process, and reporting a stale pid would point at whatever the OS
+    /// has since reused it for.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.lock().process_id()
+    }
+
     /// Terminate the child.
     pub fn kill(&self) -> anyhow::Result<()> {
         self.child.lock().kill()?;

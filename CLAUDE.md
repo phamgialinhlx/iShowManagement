@@ -88,6 +88,24 @@ ui/                     React 19 + Tailwind 4 + motion
   `rmux-agent` on the target so they survive quitting the app; dropping the session from the
   list alone leaves them running with nothing able to reach them. `removeSession` sends
   `terminal_close` per tab and `claude_end_session` for `claude-<id>`.
+- **`Kill` and `List` are answered during the *handshake*, never after an attach.** `Kill`
+  used to require a full attach first, and the kill client closes its connection
+  immediately — so the daemon attached, tried to write the scrollback replay to a socket
+  that was already gone, errored, and never read the frame. Every closed tab kept its shell
+  while the client reported success. Verified broken and then fixed on a real host; a test
+  drives `handle` end to end and asserts the *process* died, not just the map entry.
+  Attaching to kill was wrong anyway: it created the session when the name was unknown, in
+  order to destroy it.
+- **`rmux-agent list` is what makes a leak findable.** Without it the only way to discover an
+  abandoned shell is `ps` on the host and correlating by hand, which means nobody does.
+  It reports name, pid, age and whether anything is attached — age and attachment are what
+  separate "left behind" from "rmux is merely closed". Dead sessions are excluded: their pid
+  may already have been reused, and reporting one sends the operator to kill something else.
+- **The daemon socket is versioned, not fingerprinted.** `agent-<version>.sock`, so two
+  builds of the same version share one daemon and a newer client meets an older daemon —
+  which surfaces as "this host's agent is too old to list sessions" rather than as garbage.
+  The install *path* carries a content fingerprint; this does not, and that asymmetry is a
+  known rough edge.
 
 ## Managing the host
 
