@@ -178,6 +178,17 @@ type State = {
   gridSlots: (string | null)[];
   /** Put a session in a cell, or `null` to hand the cell back to auto-fill. */
   assignSlot: (index: number, sessionId: string | null) => void;
+  /**
+   * The grid cell the operator has selected, if any.
+   *
+   * This is what makes "click a cell, then pick a session in the rail" work,
+   * which is the only interaction that answers "I have eight sessions and four
+   * cells". Runtime only — a selection is a thing you are doing right now, not
+   * a property of the workspace, and restoring one on launch would leave the
+   * next rail click silently replacing a pane.
+   */
+  focusedCell: number | null;
+  focusCell: (index: number | null) => void;
   /** Update the per-session settings. Absent fields are left alone. */
   configureSession: (
     id: string,
@@ -492,10 +503,14 @@ export const useSessions = create<State>((set, get) => ({
   grid: Number(localStorage.getItem("rmux.grid")) || 1,
   setGrid: (n) => {
     localStorage.setItem("rmux.grid", String(n));
-    set({ grid: n });
+    // Leaving a cell selected across a layout change would point at a cell that
+    // may no longer exist — and the next rail click would assign into nothing.
+    set({ grid: n, focusedCell: null });
   },
 
   gridSlots: restored.gridSlots,
+  focusedCell: null,
+  focusCell: (index) => set({ focusedCell: index }),
   assignSlot: (index, sessionId) => {
     set((s) => {
       const slots = [...s.gridSlots];

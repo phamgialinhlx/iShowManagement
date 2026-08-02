@@ -29,11 +29,26 @@ import { useSessions, type Session, type SessionStatus } from "./sessions";
  * Everything else is silent. `idle → working` is the operator's own keystroke
  * echoing back at them.
  *
- * **The session you are looking at stays quiet.** A notification for the pane
- * already on screen is pure noise, and it is the common case — most turns are
- * watched. The same applies when the window is focused *and* that session is
- * active; a background session still pings, because that is the entire point.
+ * ## Whether the watched session stays quiet is the operator's call
+ *
+ * It used to be suppressed unconditionally: a notification for the pane already
+ * on screen looked like pure noise. In practice that made the feature appear
+ * broken — you watch a session precisely *because* you are waiting on it, and
+ * silence is indistinguishable from a bug. So it now notifies for everything by
+ * default, and Settings › Notifications has a switch for anyone who does find it
+ * redundant.
  */
+
+const QUIET_KEY = "rmux.notify.quietWatched";
+
+/** Whether the session on screen is deliberately silent. Off by default. */
+export function quietWhenWatching(): boolean {
+  return localStorage.getItem(QUIET_KEY) === "1";
+}
+
+export function setQuietWhenWatching(quiet: boolean): void {
+  localStorage.setItem(QUIET_KEY, quiet ? "1" : "0");
+}
 
 /** What each session was doing last time we looked. */
 const previous = new Map<string, SessionStatus>();
@@ -89,7 +104,10 @@ export function startNotifications(): void {
       // A question fires from any state; a finish only from `working`. See the
       // note above — `idle` is also where a session that never ran sits.
       if (!asking && !(before === "working" && session.status === "idle")) continue;
-      if (watching && session.id === active) continue;
+      // Read per event, not captured once: the operator can change it in
+      // Settings while sessions are running, and a subscription installed at
+      // startup would hold the old value for the life of the app.
+      if (quietWhenWatching() && watching && session.id === active) continue;
 
       const message = describe(session, session.status);
       if (!message) continue;

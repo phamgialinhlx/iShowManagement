@@ -203,6 +203,10 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
   const collapsed = useSessions((s) => s.railCollapsed);
   const activate = useSessions((s) => s.activate);
   const remove = useSessions((s) => s.removeSession);
+  const grid = useSessions((s) => s.grid);
+  const focusedCell = useSessions((s) => s.focusedCell);
+  const focusCell = useSessions((s) => s.focusCell);
+  const assignSlot = useSessions((s) => s.assignSlot);
   const toggle = useSessions((s) => s.toggleRail);
 
   const waiting = sessions.filter((s) => s.status === "waiting").length;
@@ -239,6 +243,28 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
         </button>
       </header>
 
+      {/* The mode is stated rather than left to be discovered. A rail whose
+          clicks quietly mean something different is the kind of thing people
+          find by accident and then distrust. */}
+      {grid >= 2 && focusedCell !== null && !collapsed && (
+        <div
+          className="flex shrink-0 items-center gap-2 border-b px-3 py-[6px]"
+          style={{ borderColor: "var(--border)", background: "var(--hover)" }}
+        >
+          <span className="micro" style={{ color: "var(--text)" }}>
+            PICK A SESSION FOR CELL {focusedCell + 1}
+          </span>
+          <button
+            type="button"
+            className="micro ml-auto"
+            style={{ color: "var(--text-faint)" }}
+            onClick={() => focusCell(null)}
+          >
+            CANCEL
+          </button>
+        </div>
+      )}
+
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         <AnimatePresence initial={false}>
           {sessions.map((session) => (
@@ -253,7 +279,17 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
                 session={session}
                 active={session.id === active}
                 collapsed={collapsed}
-                onSelect={() => activate(session.id)}
+                onSelect={() => {
+                  // **In grid mode with a cell selected, this fills that cell.**
+                  // Which is the only interaction that answers "I have eight
+                  // sessions and four cells": pick the pane, then pick what
+                  // goes in it. Without a cell selected it activates as usual,
+                  // so the rail keeps working exactly as before in focus mode.
+                  if (grid >= 2 && focusedCell !== null) {
+                    assignSlot(focusedCell, session.id);
+                  }
+                  activate(session.id);
+                }}
                 onClose={() => remove(session.id)}
               />
             </motion.div>

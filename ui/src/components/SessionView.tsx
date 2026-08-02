@@ -577,102 +577,14 @@ export function SessionView({ session }: { session: Session }) {
  * flicker as the mouse crossed the grid, which is unreadable precisely when you
  * are trying to compare hosts.
  */
-/**
- * Choose what this cell shows.
- *
- * Deliberately a corner affordance rather than a header bar: each cell already
- * carries a `SessionView` with its own tab strip, and adding a second row of
- * chrome per cell would cost more of a 4x4's screen than the sessions get. It
- * stays faint until the cell is hovered, so a wall of sixteen terminals is not
- * also a wall of sixteen controls.
- *
- * Empty cells show it permanently — an empty cell with an invisible control is
- * just a hole in the grid.
- */
-function CellPicker({ index, session }: { index: number; session: Session | null }) {
-  const sessions = useSessions((s) => s.sessions);
-  const assign = useSessions((s) => s.assignSlot);
-  const [open, setOpen] = useState(false);
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-        }}
-        className="micro absolute right-1 top-1 z-10 px-1 py-[1px] transition-opacity"
-        style={{
-          background: "color-mix(in srgb, var(--app-panel) 82%, transparent)",
-          border: "1px solid var(--border)",
-          color: "var(--text-soft)",
-          opacity: session ? undefined : 1,
-        }}
-        // Tailwind cannot express "visible when the *parent* is hovered" without
-        // a group class on every cell, and the cell is not this component's to
-        // style. Two handlers are less indirection than that.
-        onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text)")}
-        onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-soft)")}
-        title="Choose which session this cell shows"
-      >
-        {session ? "⇄" : "+ SESSION"}
-      </button>
-    );
-  }
-
-  return (
-    <>
-      {/* Click-away. Inside the cell, so it cannot swallow clicks meant for
-          another cell's picker. */}
-      <div className="absolute inset-0 z-10" onMouseDownCapture={() => setOpen(false)} />
-      <div
-        className="menu absolute right-1 top-1 z-20 flex max-h-[70%] w-[210px] flex-col overflow-auto py-1"
-        onMouseDownCapture={(e) => e.stopPropagation()}
-      >
-        {sessions.map((s) => (
-          <button
-            key={s.id}
-            type="button"
-            className="flex items-baseline gap-2 px-2 py-[3px] text-left"
-            style={{ background: s.id === session?.id ? "var(--hover)" : "transparent" }}
-            onClick={() => {
-              assign(index, s.id);
-              setOpen(false);
-            }}
-          >
-            <span className="data truncate text-[11px]" style={{ color: "var(--text)" }}>
-              {s.name}
-            </span>
-            <span className="micro ml-auto shrink-0">{s.target.host ?? "local"}</span>
-          </button>
-        ))}
-        {session && (
-          <button
-            type="button"
-            className="micro px-2 py-[3px] text-left"
-            style={{ borderTop: "1px solid var(--border)", marginTop: 4, paddingTop: 6 }}
-            onClick={() => {
-              // Back to auto-fill rather than blank: a cell you cleared should
-              // pick up the next unplaced session, not become a permanent hole.
-              assign(index, null);
-              setOpen(false);
-            }}
-          >
-            CLEAR THIS CELL
-          </button>
-        )}
-      </div>
-    </>
-  );
-}
-
 export function SessionDeck() {
   const sessions = useSessions((s) => s.sessions);
   const active = useSessions((s) => s.activeSession);
   const grid = useSessions((s) => s.grid);
   const activate = useSessions((s) => s.activate);
   const slots = useSessions((s) => s.gridSlots);
+  const focusedCell = useSessions((s) => s.focusedCell);
+  const focusCell = useSessions((s) => s.focusCell);
   const [mounted, setMounted] = useState<string[]>([]);
 
   // Which session is in which cell. Assignments win, empty cells auto-fill —
@@ -710,22 +622,40 @@ export function SessionDeck() {
           <div
             key={session ? session.id : `empty-${index}`}
             className="relative flex min-h-0 flex-col overflow-hidden"
-            onMouseDownCapture={() => session && activate(session.id)}
+            // Selects the *cell*, not only the session in it. That is what
+            // makes the rail able to fill it — see `focusedCell`. An empty
+            // cell is selectable too; it is the one you most want to fill.
+            onMouseDownCapture={() => {
+              focusCell(index);
+              if (session) activate(session.id);
+            }}
             style={{
               // Chalk, not red. Red is reserved for "the operator must act", and
               // spending it on "this is the cell you clicked" is exactly the
               // dilution the design system warns about — every cell you touch
               // would look like an alert.
+              // Two different things, two different weights. A *selected* cell
+              // is the one the rail will fill, so it has to be unmistakable;
+              // the merely-active one only tells the instruments where to look.
               outline:
-                session && session.id === active
-                  ? "1px solid rgba(232,230,225,0.45)"
-                  : "1px solid transparent",
+                focusedCell === index
+                  ? "2px solid var(--text)"
+                  : session && session.id === active
+                    ? "1px solid rgba(232,230,225,0.45)"
+                    : "1px solid transparent",
               outlineOffset: -1,
               background: session ? undefined : "var(--app-bg)",
             }}
           >
-            {session ? <SessionView session={session} /> : null}
-            <CellPicker index={index} session={session} />
+            {session ? (
+              <SessionView session={session} />
+            ) : (
+              <div className="grid h-full place-items-center">
+                <span className="micro" style={{ color: "var(--text-faint)" }}>
+                  {focusedCell === index ? "PICK A SESSION IN THE RAIL" : "EMPTY — CLICK TO FILL"}
+                </span>
+              </div>
+            )}
           </div>
         ))}
       </div>

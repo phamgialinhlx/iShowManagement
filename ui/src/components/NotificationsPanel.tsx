@@ -2,6 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { isTauri } from "../lib/api";
+import { quietWhenWatching, setQuietWhenWatching } from "../lib/notify";
 
 /**
  * Notifications, and a way to find out whether they actually work.
@@ -20,6 +21,7 @@ import { isTauri } from "../lib/api";
  */
 export function NotificationsPanel() {
   const [sent, setSent] = useState(false);
+  const [quiet, setQuiet] = useState(quietWhenWatching);
   const [error, setError] = useState<string | null>(null);
 
   const test = async () => {
@@ -51,10 +53,27 @@ export function NotificationsPanel() {
       </header>
 
       <div className="flex flex-col gap-2">
-        <p className="data text-[11px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
-          The session you are currently looking at stays quiet — a notification for the pane
-          already on screen is noise. Background sessions always ping.
-        </p>
+        <label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            checked={quiet}
+            style={{ accentColor: "rgb(var(--primary))", marginTop: 2 }}
+            onChange={(e) => {
+              setQuiet(e.target.checked);
+              setQuietWhenWatching(e.target.checked);
+            }}
+          />
+          <span className="flex flex-col gap-[2px]">
+            <span className="data text-[11px]" style={{ color: "var(--text)" }}>
+              Stay quiet for the session I am watching
+            </span>
+            <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+              Off by default. This was once the unconditional behaviour and it made the feature
+              look broken — you watch a session precisely because you are waiting on it, and
+              silence is indistinguishable from a bug.
+            </span>
+          </span>
+        </label>
 
         <div className="flex items-center gap-3">
           <button type="button" className="btn" disabled={!isTauri()} onClick={() => void test()}>
