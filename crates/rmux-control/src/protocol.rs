@@ -254,7 +254,7 @@ mod tests {
         SessionInfo {
             id: "s-1".into(),
             name: "redstone-agent".into(),
-            host: Some("contabo2".into()),
+            host: Some("build-box".into()),
             folder: "/home/dev.user/redstone-agent".into(),
         }
     }
@@ -298,7 +298,7 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
 
         assert!(json.contains("redstone-agent"), "{json}");
-        assert!(json.contains("contabo2"), "{json}");
+        assert!(json.contains("build-box"), "{json}");
         assert!(json.contains("/home/dev.user/redstone-agent"), "{json}");
     }
 
