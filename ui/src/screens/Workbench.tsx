@@ -9,6 +9,7 @@ import { SessionRail } from "../components/SessionRail";
 import { WidgetRail } from "../components/WidgetRail";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
 import { isDirty, useSessions } from "../lib/sessions";
+import { startStatusWatch } from "../lib/status-watch";
 import { api, isTauri, type LockStatus, type SignedIn } from "../lib/api";
 import { SignIn } from "../components/SignIn";
 
@@ -28,6 +29,11 @@ export function Workbench({
 }) {
   const [signInOpen, setSignInOpen] = useState(false);
   const [lock, setLock] = useState<LockStatus | null>(null);
+
+  // The rail's status for sessions that are *not* on screen. Started here
+  // rather than in a pane, because a pane only exists for a session you can
+  // already see — see `status-watch`.
+  useEffect(() => startStatusWatch(), []);
 
   // Whether a lock exists is keychain state, not something this screen can infer
   // from having a session — the app may have been unlocked on the way in.

@@ -124,6 +124,37 @@ pub struct Prompt {
 /// Lines Claude draws while it is thinking. Matched case-insensitively.
 const WORKING_MARKERS: &[&str] = &["esc to interrupt", "esc to stop"];
 
+/// Does this line look like Claude's "still going" spinner?
+///
+/// **The hint is not always on screen.** Detection used to rest entirely on
+/// `esc to interrupt`, and inline rendering frequently does not print it — so a
+/// session that was plainly working (`Adding due dates and priority… (2m 40s ·
+/// ↓ 4.0k tokens)`) reported idle, and the rail said nothing was happening
+/// anywhere. That defeats the rail's whole purpose.
+///
+/// What *is* always there is the elapsed-time parenthetical: an ellipsis, then
+/// a bracket, then a duration. Matching that shape rather than a phrase also
+/// survives Claude renaming the verb, which it does constantly — every spinner
+/// word is different.
+///
+/// Deliberately narrow: the digits must be followed by a time unit, so ordinary
+/// prose ending in "… (see below)" does not read as work in progress.
+fn looks_like_spinner(line: &str) -> bool {
+    let mut rest = line;
+    while let Some(at) = rest.find('…') {
+        rest = &rest[at + '…'.len_utf8()..];
+        let after = rest.trim_start();
+        let Some(after) = after.strip_prefix('(') else { continue };
+
+        let digits = after.trim_start_matches(|c: char| c.is_ascii_digit());
+        // There must have been at least one digit, and a unit must follow it.
+        if digits.len() < after.len() && digits.starts_with(['m', 's', 'h']) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Recognise a numbered option line: `❯ 1. Yes` / `  2. No`.
 ///
 /// Returns `(key, label, selected)`.
@@ -218,7 +249,7 @@ fn extract_question(above: &[String]) -> String {
 pub fn parse_state(lines: &[String]) -> ClaudeState {
     let working = lines.iter().any(|l| {
         let lower = l.to_lowercase();
-        WORKING_MARKERS.iter().any(|m| lower.contains(m))
+        WORKING_MARKERS.iter().any(|m| lower.contains(m)) || looks_like_spinner(l)
     });
 
     let mut choices: Vec<Choice> = Vec::new();
@@ -471,5 +502,62 @@ mod tests {
 
         let prompt = screen.state().prompt.expect("dialog should survive emulation");
         assert_eq!(prompt.choices.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod spinner_tests {
+    use super::*;
+
+    #[test]
+    fn the_elapsed_timer_is_enough_to_mean_working() {
+        // Taken from a real screen. There is no "esc to interrupt" anywhere on
+        // it, which is why the rail showed every session idle while Claude was
+        // plainly working on several of them.
+        for line in [
+            "* Adding due dates and priority… (2m 40s · ↓ 4.0k tokens)",
+            "✳ Inferring… (4m 4s · ↓ 4.7k tokens)",
+            "· Thinking… (12s)",
+            "  Running… (51s)",
+        ] {
+            assert!(parse_state(&[line.to_owned()]).working, "missed: {line}");
+        }
+    }
+
+    #[test]
+    fn the_old_hint_still_counts() {
+        assert!(parse_state(&["  (esc to interrupt)".to_owned()]).working);
+    }
+
+    #[test]
+    fn prose_that_merely_trails_off_is_not_work() {
+        // The reason the digits must be followed by a unit: without that check
+        // any parenthetical after an ellipsis would pin the rail to "working"
+        // forever, which is worse than the bug being fixed — a signal that is
+        // always on carries nothing.
+        for line in [
+            "and so on… (see below)",
+            "wait for it… (the 3 options)",
+            "done.",
+            "",
+        ] {
+            assert!(!parse_state(&[line.to_owned()]).working, "false positive: {line}");
+        }
+    }
+
+    #[test]
+    fn a_blocked_prompt_still_outranks_the_spinner() {
+        // A question on screen means the operator must act, whatever else is
+        // being rendered — otherwise a session needing an answer would show as
+        // busy and never be visited.
+        let screen = [
+            "Do you want to proceed?".to_owned(),
+            "❯ 1. Yes".to_owned(),
+            "  2. No".to_owned(),
+            "* Working… (3s)".to_owned(),
+        ];
+        let state = parse_state(&screen);
+        assert!(state.prompt.is_some());
+        assert!(!state.working);
     }
 }

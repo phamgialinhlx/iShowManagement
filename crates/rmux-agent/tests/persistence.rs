@@ -11,6 +11,16 @@
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
+/// Serialises the tests in this file.
+///
+/// Both of them spawn real daemons and tear them down with `pkill`, which is a
+/// process-wide instrument — run in parallel, each one's cleanup lands in the
+/// middle of the other's run, and they pass alone while failing together. That
+/// is the worst way for a test to be wrong, and it is why the file used to hold
+/// exactly one test. A lock is the smaller price than a single thousand-line
+/// test.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A private HOME, so a real agent on this machine is never disturbed.
 ///
 /// Cleanup kills daemons by name, which is process-wide — so everything here
@@ -91,6 +101,7 @@ fn read_until(child: &mut Child, needle: &str, timeout: std::time::Duration) -> 
 
 #[test]
 fn sessions_persist_across_disconnection() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let sandbox = Sandbox::new("persist");
 
     // --- a shell survives its client being killed ---------------------------
@@ -181,4 +192,121 @@ fn sessions_persist_across_disconnection() {
         !leak.contains("LEAKED:[alpha]"),
         "state leaked between two differently-named sessions:\n{leak}"
     );
+}
+
+/// Two builds must not each start their own copy of the same session.
+///
+/// **This is the bug that cost real work.** The daemon socket carries the
+/// binary's content fingerprint, so a rebuilt agent deliberately starts its own
+/// daemon — upgrading must not kill a run in progress. What was missing is the
+/// other half: the new client could not *see* the sessions the old daemon still
+/// held, so it created a second Claude under the same name while the first kept
+/// running, orphaned and unreachable by anything. Measured on a real host, one
+/// session name existed three times across three daemons, the oldest 27 hours
+/// old and still detached.
+///
+/// The two "builds" here are two copies of the same binary under different
+/// installed names, which is exactly what distinguishes two builds at runtime:
+/// the socket is derived from the file name, which `provision` stamps with the
+/// fingerprint.
+#[test]
+fn an_upgraded_agent_adopts_the_old_build_s_session() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    // **A short home, not `temp_dir()`.** These socket names carry a build
+    // fingerprint, which is longer than the plain `agent-<version>` the other
+    // test produces — and macOS's `temp_dir()` is already a deep
+    // `/var/folders/…` path. Together they cross the ~104-byte `sun_path` limit,
+    // and `bind` then fails with an error that never mentions length: the shell
+    // simply never starts and the test sees empty output. That is the exact trap
+    // documented in `ipc::socket_stem`, met again from the other direction.
+    let tag = std::process::id();
+    let home = std::path::PathBuf::from(format!("/tmp/rmux-h{tag}"));
+    let _ = std::fs::remove_dir_all(&home);
+    let bin = home.join(".rmux/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+
+    struct ShortHome(std::path::PathBuf, u32);
+    impl Drop for ShortHome {
+        fn drop(&mut self) {
+            // Only this test's daemons, matched by its unique tag.
+            for name in [format!("old{}", self.1), format!("new{}", self.1)] {
+                let _ = Command::new("pkill").args(["-f", &name]).status();
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = ShortHome(home.clone(), tag);
+    let old = bin.join(format!("rmux-agent-0.1.0-old{tag}"));
+    let new = bin.join(format!("rmux-agent-0.1.0-new{tag}"));
+    for path in [&old, &new] {
+        std::fs::copy(env!("CARGO_BIN_EXE_rmux-agent"), path).unwrap();
+    }
+
+    let run = |exe: &std::path::Path, args: &[&str]| {
+        Command::new(exe)
+            .args(args)
+            .env("HOME", &home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to run the agent")
+    };
+
+    let session = "claude-handoff-1";
+
+    // --- the "old build" creates the session -------------------------------
+    let mut first = run(&old, &["attach", "--session", session, "--cols", "80", "--rows", "24"]);
+    first
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"echo ready-one\n")
+        .unwrap();
+    let seen = read_until(&mut first, "ready-one", std::time::Duration::from_secs(15));
+    assert!(seen.contains("ready-one"), "the first build never started a shell: {seen:?}");
+
+    // Disconnect, leaving the session running under the old daemon.
+    let _ = first.kill();
+    let _ = first.wait();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // --- the "new build" attaches to the same name -------------------------
+    let mut second = run(&new, &["attach", "--session", session, "--cols", "80", "--rows", "24"]);
+    second
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"echo ready-two\n")
+        .unwrap();
+    let seen = read_until(&mut second, "ready-two", std::time::Duration::from_secs(15));
+    assert!(seen.contains("ready-two"), "the second build never got a shell: {seen:?}");
+
+    let _ = second.kill();
+    let _ = second.wait();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // --- exactly one daemon may hold this name -----------------------------
+    //
+    // The assertion that fails without the handoff: each build answers for its
+    // own daemon, and before the fix the new one had created a session of its
+    // own, so the name existed twice and there were two shells.
+    let listing = |exe: &std::path::Path| -> String {
+        let out = Command::new(exe)
+            .arg("list")
+            .env("HOME", &home)
+            .output()
+            .expect("list failed");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let from_new = listing(&new);
+    let copies = from_new.lines().filter(|l| l.starts_with(session)).count();
+    assert_eq!(copies, 1, "the session exists {copies} times, not once:\n{from_new}");
+
+    // And the new build can find it at all — a listing that only asked its own
+    // daemon would report nothing here, which is how the orphans stayed hidden.
+    assert!(from_new.contains(session), "the upgraded build cannot see the session:\n{from_new}");
+
 }

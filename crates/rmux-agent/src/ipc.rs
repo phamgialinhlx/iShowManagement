@@ -88,6 +88,18 @@ impl Endpoint {
         Self::named(&socket_stem(version, current_stem().as_deref()))
     }
 
+    /// The endpoint belonging to some *other* installed agent binary.
+    ///
+    /// Needed because a session lives in the daemon of the build that created
+    /// it, and a newer build has to be able to find it there rather than start
+    /// a second copy. Derived from the file name by the same rule as
+    /// [`Endpoint::current`], so the two cannot disagree about where a given
+    /// binary's socket is.
+    pub fn for_exe_name(version: &str, file_name: &str) -> anyhow::Result<Self> {
+        let stem = file_name.strip_suffix(".exe").unwrap_or(file_name);
+        Self::named(&socket_stem(version, Some(stem)))
+    }
+
     fn named(stem: &str) -> anyhow::Result<Self> {
         #[cfg(unix)]
         {

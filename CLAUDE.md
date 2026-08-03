@@ -113,6 +113,30 @@ ui/                     React 19 + Tailwind 4 + motion
   drives `handle` end to end and asserts the *process* died, not just the map entry.
   Attaching to kill was wrong anyway: it created the session when the name was unknown, in
   order to destroy it.
+- **An upgraded agent must *adopt* the old build's sessions, not duplicate them.** The
+  fingerprinted socket correctly stops a new client inheriting an old daemon — but the other
+  half was missing for weeks and it cost real work. A rebuilt agent could not *see* the
+  sessions the previous daemon still held, so it created a second Claude under the same name
+  while the first kept running, orphaned and unreachable by anything. Measured on a live host:
+  one session name existed **three times** across three daemons, the oldest 27 hours old and
+  still detached; the operator experienced it as "I came back and all my sessions were
+  interrupted", and every agent rebuild did it again.
+  `attach` now asks its own daemon first, then every other binary in `~/.rmux/bin`, and
+  **`exec`s into the build that owns the name** (`hand_off`) — exec rather than spawn, because
+  this process *is* the far end of `ssh -tt` and owns the pty. `RMUX_AGENT_HANDOFF` stops two
+  builds bouncing a session between them forever. `kill` resolves the same way or closing a tab
+  leaks the shell it claimed to close, and `list` unions every daemon — the orphans worth
+  finding are exactly the ones an upgrade left behind, which a single-daemon listing cannot see.
+  Proven red-then-green by a test that copies the binary under two installed names, and on a
+  real host: the new build attached to an existing session and **never started a daemon of its
+  own**.
+- **Tests in `persistence.rs` hold a `SERIAL` mutex.** They spawn real daemons and tear them
+  down with `pkill`, which is process-wide — run in parallel each one's cleanup lands inside the
+  other's run, and they pass alone while failing together.
+- **A fingerprinted socket name is longer than `agent-<version>`, and that matters.** The
+  handoff test had to move off `temp_dir()` to a short `/tmp` home: macOS's deep
+  `/var/folders/…` plus a fingerprint crosses `sun_path`, `bind` fails with an error that never
+  mentions length, and the shell simply never starts.
 - **A fix that lives in the agent is not deployed until a *new daemon* runs it.** Three
   things all have to happen: `scripts/build-agents.sh` rebuilds the musl binaries,
   `pnpm tauri build` embeds them as resources, and the host must start a daemon from the new
@@ -380,6 +404,32 @@ stopped working. These are not aspirations; each one is a rule with a test.
   value behind a click. Selection is carried by more than tone — at 9px a
   tone-only difference is not a state anyone can see, so the selected chip also
   wears an underline.
+- **"Working" is detected from the elapsed timer, not from a phrase.** Detection rested on
+  `esc to interrupt`, which inline rendering frequently does not print — so a session plainly
+  working (`Adding due dates and priority… (2m 40s · ↓ 4.0k tokens)`) reported idle and the rail
+  said nothing was happening anywhere, which is the rail's whole purpose failing. The stable
+  shape is the ellipsis-then-duration; matching that also survives Claude renaming the spinner
+  verb, which it does on every line. The digits must be followed by a time unit, or prose ending
+  "… (see below)" pins the rail to "working" forever — a signal that is always on carries
+  nothing.
+- **Status is published for sessions that are *not* on screen** (`lib/status-watch.ts`). It was
+  published by `ClaudePanel`, which only exists for a rendered session — so in a 2x2 grid the
+  four sessions you could not see never reported anything and sat on "idle" forever. Those are
+  precisely the ones the rail exists for; for the ones on screen you can simply look. It polls
+  slower than the pane (1.5s vs 400ms) because a dot does not need four updates a second, and it
+  leaves a session with no handle alone rather than guessing — reporting "idle" for something
+  never opened is inventing a measurement.
+- **The rail marks every session on screen, not just the focused one.** In a grid the operator
+  is looking at four of eight and nothing said which four, so "is that one visible or do I need
+  to go and find it?" could only be answered by looking away and counting panes. Derived with
+  the same `gridLayout` the workbench uses — two sources for one fact is two chances to drift.
+- **A context menu flips before it clamps.** Right-clicking near the bottom of a file tree put
+  half the items below the window edge, unreachable, with nothing indicating they existed —
+  Delete was simply gone. Growing *upward* from the cursor keeps the pointer on the menu's edge
+  where the hand already is; clamping slides the list under the cursor so it lands on whichever
+  item happens to be there, which is how someone deletes a file they meant to rename. The scale
+  is *measured* (`rect.height / offsetHeight`) rather than assumed, because `getBoundingClientRect`
+  is in viewport pixels while the `top` written is in the zoomed space — see the `zoom` rules.
 - **A terminal must re-fit on every signal, not only on its own resize.** `ResizeObserver`
   correctly bails on a zero-sized host — a hidden pane measures 0x0, and fitting to that tells
   the far side the window collapsed — but that leaves the pane holding whatever cell grid it

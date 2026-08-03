@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
 import { basename, useSessions, type Session, type SessionStatus } from "../lib/sessions";
+import { gridLayout } from "../lib/grid";
 
 /**
  * The session rail.
@@ -85,12 +86,22 @@ function StatusDot({ status, finished }: { status: SessionStatus; finished?: boo
 function Row({
   session,
   active,
+  onScreen,
   collapsed,
   onSelect,
   onClose,
 }: {
   session: Session;
   active: boolean;
+  /**
+   * Whether this session currently occupies a grid cell.
+   *
+   * In a 2x2 the operator is looking at four of maybe eight sessions, and
+   * nothing in the rail said which four — so "is that one on screen or do I
+   * need to go and find it?" could only be answered by looking away from the
+   * rail and counting panes.
+   */
+  onScreen: boolean;
   collapsed: boolean;
   onSelect: () => void;
   onClose: () => void;
@@ -110,7 +121,10 @@ function Row({
         onClick={onSelect}
         title={`${session.name} · ${where}`}
         className="flex h-[34px] w-full items-center justify-center"
-        style={{ background: active ? "var(--hover)" : "transparent" }}
+        style={{
+          background: active ? "var(--hover)" : onScreen ? "rgba(232,230,225,0.03)" : "transparent",
+          boxShadow: onScreen ? `inset 2px 0 0 ${active ? "var(--text)" : "var(--text-faint)"}` : "none",
+        }}
       >
         <StatusDot status={session.status} finished={session.finishedAt !== undefined} />
       </button>
@@ -121,10 +135,15 @@ function Row({
     <div
       className="group relative"
       style={{
-        background: active ? "var(--hover)" : "transparent",
-        // The active session is marked with a hairline, not a fill — colour here
-        // would compete with the status dots, which carry the real signal.
-        boxShadow: active ? "inset 2px 0 0 var(--text)" : "none",
+        // Two levels, because in a grid they are different questions. Every
+        // session *on screen* gets the hairline, so the rail answers "which of
+        // these am I looking at" without counting panes. The focused one keeps
+        // the fill on top of it. Colour is not used for either — that would
+        // compete with the status dots, which carry the real signal.
+        background: active ? "var(--hover)" : onScreen ? "rgba(232,230,225,0.03)" : "transparent",
+        boxShadow: onScreen
+          ? `inset 2px 0 0 ${active ? "var(--text)" : "var(--text-faint)"}`
+          : "none",
       }}
     >
       {editing ? (
@@ -239,6 +258,7 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
   const activate = useSessions((s) => s.activate);
   const remove = useSessions((s) => s.removeSession);
   const grid = useSessions((s) => s.grid);
+  const slots = useSessions((s) => s.gridSlots);
   const focusedCell = useSessions((s) => s.focusedCell);
   const focusCell = useSessions((s) => s.focusCell);
   const assignSlot = useSessions((s) => s.assignSlot);
@@ -247,6 +267,14 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
   // Both kinds of "needs you" — Claude is asking, or Claude finished and nobody
   // has looked. Counting only the first left a rail full of red swells above a
   // header that said everything was fine.
+  // The same layout the workbench computes, so the rail cannot disagree with
+  // what is actually on screen. Derived rather than published from the grid:
+  // two sources for one fact is two chances to drift.
+  const onScreen = useMemo(
+    () => new Set(gridLayout(sessions, slots, grid).flatMap((s) => (s ? [s.id] : []))),
+    [sessions, slots, grid],
+  );
+
   const needing = sessions.filter(
     (s) => s.status === "waiting" || (s.finishedAt !== undefined && s.status !== "working"),
   ).length;
@@ -318,6 +346,7 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
               <Row
                 session={session}
                 active={session.id === active}
+                onScreen={onScreen.has(session.id)}
                 collapsed={collapsed}
                 onSelect={() => {
                   // **In grid mode with a cell selected, this fills that cell.**

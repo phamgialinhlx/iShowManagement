@@ -20,6 +20,25 @@ use crate::protocol::{Frame, Hello};
 pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<ExitCode> {
     let endpoint = daemon::endpoint()?;
 
+    // **Before creating anything, find out whether this session already exists
+    // under a different build.** Our own daemon is asked first, because that is
+    // the overwhelmingly common case and it costs one connect on a socket that
+    // is already open. Only when it does not have the name is the install
+    // directory searched — and if another build's daemon holds it, this process
+    // hands over to that binary rather than starting a rival copy.
+    //
+    // The guard stops two builds bouncing a session between them forever.
+    if start_daemon && std::env::var_os(HANDOFF_GUARD).is_none() {
+        let ours = sessions_of(&endpoint).await;
+        let known = ours.iter().any(|s| s.name == hello.session && s.pid.is_some());
+
+        if !known
+            && let Some(binary) = owner_of(&hello.session).await
+        {
+            return hand_off(&binary);
+        }
+    }
+
     // Held for the whole attachment. Dropping it puts the terminal back, which
     // matters on every exit path — a terminal left raw has no echo and no line
     // editing, and the user is left with an apparently broken shell.
@@ -200,12 +219,149 @@ async fn wait_for_daemon(endpoint: &ipc::Endpoint) -> anyhow::Result<ipc::Stream
 ///
 /// Connects only if a daemon is already running — if none is, there is nothing
 /// to kill, and starting one just to tell it to do nothing would be absurd.
+/// The environment flag that stops a handoff from happening twice.
+///
+/// Without it two installed builds could each decide the other owns a session
+/// and exec into one another forever, which on a host looks like the shell
+/// simply never starting.
+const HANDOFF_GUARD: &str = "RMUX_AGENT_HANDOFF";
+
+/// Every other installed agent binary, newest first.
+///
+/// Reads the install directory rather than remembering anything: `provision`
+/// names each build `rmux-agent-<version>-<fingerprint>`, so the directory *is*
+/// the list of daemons that could exist.
+fn sibling_binaries() -> Vec<std::path::PathBuf> {
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let mine = std::env::current_exe().ok();
+
+    let Ok(entries) = std::fs::read_dir(home.join(".rmux/bin")) else { return Vec::new() };
+    let mut found: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("rmux-agent-"))
+                && Some(p) != mine.as_ref()
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Ask one specific daemon what it holds, without creating anything.
+///
+/// Never starts a daemon: an absent socket means that build has no daemon, and
+/// spawning one to ask an empty question would resurrect a superseded binary.
+async fn sessions_of(endpoint: &ipc::Endpoint) -> Vec<crate::protocol::SessionSummary> {
+    let Ok(mut stream) = ipc::connect(endpoint).await else { return Vec::new() };
+    if stream.write_all(&Frame::List.encode()).await.is_err() {
+        return Vec::new();
+    }
+    let _ = stream.flush().await;
+
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match Frame::decode(&buf) {
+            Ok(Some((Frame::Sessions(sessions), _))) => return sessions,
+            Ok(Some(_)) | Err(_) => return Vec::new(),
+            Ok(None) => {}
+        }
+        match tokio::io::AsyncReadExt::read(&mut stream, &mut chunk).await {
+            // A daemon too old to answer `List` closes instead. Nothing to do
+            // but treat it as empty — it cannot be searched.
+            Ok(0) | Err(_) => return Vec::new(),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// Find the installed binary whose daemon already holds `session`.
+///
+/// **This is what stops an agent upgrade from duplicating live work.** The
+/// daemon socket carries the binary's content fingerprint, so a rebuilt agent
+/// starts its own daemon — deliberately, because upgrading must not kill work in
+/// progress. The half that was missing is this one: without it the new client
+/// cannot *see* the sessions the old daemon still holds, so it creates a second
+/// Claude under the same name while the first keeps running, orphaned and
+/// unreachable. Measured on a real host: one session name existed three times
+/// across three daemons, the oldest 27 hours old and detached.
+pub async fn owner_of(session: &str) -> Option<std::path::PathBuf> {
+    for binary in sibling_binaries() {
+        let Some(name) = binary.file_name().and_then(|n| n.to_str()) else { continue };
+        let Ok(endpoint) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name) else {
+            continue;
+        };
+
+        if sessions_of(&endpoint)
+            .await
+            .iter()
+            // A dead session's name is free to reuse; only a live one owns it.
+            .any(|s| s.name == session && s.pid.is_some())
+        {
+            return Some(binary);
+        }
+    }
+    None
+}
+
+/// Replace this process with the build that owns the session.
+///
+/// `exec`, not spawn: this process *is* the far end of `ssh -tt`, so it owns the
+/// pty, stdin and stdout. Spawning a child and proxying would put a second hop
+/// on every keystroke and leave two processes to kill; replacing the image hands
+/// the terminal over intact and keeps the pipeline exactly as long as before.
+///
+/// Falls through to normal behaviour on any failure — a session started twice is
+/// bad, but a session that cannot start at all is worse.
+fn hand_off(binary: &std::path::Path) -> anyhow::Result<ExitCode> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let error = std::process::Command::new(binary)
+            .args(&args)
+            .env(HANDOFF_GUARD, "1")
+            .exec();
+        // `exec` only returns on failure.
+        anyhow::bail!("could not hand off to {}: {error}", binary.display());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = binary;
+        anyhow::bail!("session handoff needs exec, which this platform does not have");
+    }
+}
+
 /// Ask the daemon what it is running.
 ///
 /// Returns an empty list when there is no daemon at all, which is the ordinary
 /// answer on a host rmux has never touched — not an error to report.
 pub async fn list() -> anyhow::Result<Vec<crate::protocol::SessionSummary>> {
     let endpoint = daemon::endpoint()?;
+
+    // **Every daemon, not just this build's.** Listing is what makes a leak
+    // findable at all, and the leaks that matter most are exactly the ones an
+    // upgrade left behind under a superseded binary — invisible to a listing
+    // that only asks the current one. Reported oldest-first, because age is what
+    // separates "left behind" from "rmux is merely closed".
+    let mut all = sessions_of(&endpoint).await;
+    for binary in sibling_binaries() {
+        let Some(name) = binary.file_name().and_then(|n| n.to_str()) else { continue };
+        let Ok(other) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name) else {
+            continue;
+        };
+        all.extend(sessions_of(&other).await);
+    }
+    if !all.is_empty() {
+        all.sort_by_key(|s| std::cmp::Reverse(s.age_seconds));
+        return Ok(all);
+    }
+
     let Ok(mut stream) = ipc::connect(&endpoint).await else {
         return Ok(Vec::new());
     };
@@ -234,7 +390,21 @@ pub async fn list() -> anyhow::Result<Vec<crate::protocol::SessionSummary>> {
 }
 
 pub async fn kill(session: &str) -> anyhow::Result<()> {
-    let endpoint = daemon::endpoint()?;
+    // **Kill it wherever it actually lives.** A session belongs to the daemon of
+    // the build that created it, so after an agent upgrade the name the client
+    // is closing is held by a *previous* daemon. Sending `Kill` only to our own
+    // would report success and leave the shell running with nothing able to
+    // reach it — a leak created by the very act of tidying up.
+    let mut endpoint = daemon::endpoint()?;
+    let ours = sessions_of(&endpoint).await;
+    if !ours.iter().any(|s| s.name == session)
+        && let Some(binary) = owner_of(session).await
+        && let Some(name) = binary.file_name().and_then(|n| n.to_str())
+        && let Ok(other) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name)
+    {
+        endpoint = other;
+    }
+
     let Ok(mut stream) = ipc::connect(&endpoint).await else {
         return Ok(());
     };
