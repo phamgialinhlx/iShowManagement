@@ -157,6 +157,37 @@ pub fn create_file_script(path: &str) -> String {
     )
 }
 
+/// Shell that writes stdin to a *new* file, refusing to overwrite an existing one.
+///
+/// ## The bytes go through stdin, never argv
+///
+/// This is the same rule the image paste follows and for the same measured
+/// reason: `ARG_MAX` caps a single argument at 128 KiB, so an argv-shaped upload
+/// works for an icon and fails on anything a person would actually drag in. It
+/// is also why the payload is raw here rather than base64 — the wire is already
+/// binary-clean with no PTY attached, so inflating by a third would buy nothing.
+///
+/// ## Refusing to clobber is `set -C`, not a check
+///
+/// A `[ -e ]` test followed by a redirect is a race, and the losing side
+/// silently truncates a file the operator never named. `set -C` (POSIX
+/// noclobber) makes the redirect itself `O_EXCL`, so the refusal is atomic. The
+/// prior test stays only to tell "it was already there" apart from "the write
+/// failed", which are different sentences for the operator to read.
+///
+/// Both failure paths drain stdin. Without that the far side exits while we are
+/// still writing megabytes into the pipe, and the upload surfaces as a broken
+/// pipe rather than the reason it actually stopped.
+pub fn upload_script(path: &str) -> String {
+    let p = rmux_transport::shell_quote_path(path);
+    format!(
+        r#"p={p}
+if [ -e "$p" ]; then cat > /dev/null; printf 'X'; exit 0; fi
+set -C
+if cat > "$p"; then printf 'O'; else cat > /dev/null; printf 'E'; fi"#
+    )
+}
+
 /// Shell that resolves the home directory — the file browser's starting point.
 pub fn home_script() -> String {
     // `cd` with no argument goes home even when $HOME is unset.
@@ -307,6 +338,39 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_upload_refuses_to_clobber_atomically() {
+        let script = upload_script("/srv/app/notes.txt");
+        // `set -C` is the actual refusal — the `[ -e ]` above it only exists to
+        // produce a better message. Losing the noclobber turns this back into a
+        // check-then-write race that silently truncates.
+        assert!(script.contains("set -C"), "{script}");
+        assert!(script.contains("printf 'X'"), "{script}");
+        // Both failure paths drain stdin, or the writer sees a broken pipe
+        // instead of the reason the upload stopped.
+        assert_eq!(script.matches("cat > /dev/null").count(), 2, "{script}");
+    }
+
+    #[test]
+    fn upload_never_puts_the_payload_in_the_command_line() {
+        // The bytes belong on stdin. `ARG_MAX` caps one argument at 128 KiB, so
+        // an argv-shaped upload works in testing and fails on a real file.
+        let script = upload_script("/srv/app/x.bin");
+        assert!(script.contains(r#"cat > "$p""#), "{script}");
+    }
+
+    #[test]
+    fn an_upload_path_is_quoted() {
+        // It reaches a remote login shell that re-parses the line.
+        let hostile = "/srv/'; rm -rf /; echo '/x";
+        let script = upload_script(hostile);
+        // Asserting the substring is *absent* would be wrong — the correctly
+        // quoted form still contains it. What matters is that it appears only
+        // inside the quoting.
+        assert!(script.contains(&rmux_transport::shell_quote_path(hostile)), "{script}");
+        assert!(!script.contains("p=/srv/'; rm"), "escaped its quotes: {script}");
+    }
 
     #[test]
     fn listings_survive_filenames_with_spaces_tabs_and_newlines() {

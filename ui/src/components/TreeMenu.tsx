@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api, type TargetRef } from "../lib/api";
+import { describe, uploadFiles } from "../lib/upload";
 
 export type MenuTarget = {
   x: number;
@@ -63,6 +64,39 @@ export function TreeMenu({
 
   // Which path was just copied, so the menu can say so where it happened.
   const [copied, setCopied] = useState<"full" | "relative" | null>(null);
+
+  // Where an upload lands: into the folder that was clicked, or alongside the
+  // file that was. Right-clicking a file and getting its *parent* is what
+  // everyone means, and it is what "Upload here" has to be able to say.
+  const dir = menu.isDirectory ? menu.path : menu.parent;
+
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [uploaded, setUploaded] = useState<string | null>(null);
+
+  const upload = async (files: File[]) => {
+    if (!files.length) return;
+
+    setError(null);
+    setUploaded(null);
+    const outcome = await uploadFiles(target, dir, files, (done, total, name) =>
+      // Named and counted while it runs. A remote upload of a few megabytes is
+      // seconds of nothing, and a menu that sits there is a menu that has hung.
+      setUploading(total > 1 ? `${done + 1}/${total} · ${name}` : name),
+    );
+    setUploading(null);
+
+    // The tree must show what is now there even when part of the batch failed —
+    // refusing to refresh would hide the files that did arrive.
+    if (outcome.uploaded.length) onChanged(dir);
+
+    if (outcome.failed.length) {
+      setError(describe(outcome));
+      return;
+    }
+    setUploaded(describe(outcome));
+    setTimeout(onClose, 1400);
+  };
 
   const copy = async (value: string, which: "full" | "relative") => {
     try {
@@ -187,6 +221,32 @@ export function TreeMenu({
               setPrompt("folder");
             }}
           />
+
+          {/* Upload sits with the other two "put something here" actions,
+              because that is what it is — the same operation with the bytes
+              coming from this machine instead of from nothing. The label names
+              the destination folder, since a right-click on a *file* uploads
+              beside it, and guessing which is the kind of thing that makes
+              someone drop eight files into the wrong directory. */}
+          <MenuItem
+            label={uploading ? `Uploading ${uploading}…` : uploaded ? uploaded : "Upload files…"}
+            disabled={uploading !== null}
+            hint={uploading || uploaded ? undefined : shortName(dir)}
+            onClick={() => fileInput.current?.click()}
+          />
+          <input
+            ref={fileInput}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              const picked = Array.from(e.target.files ?? []);
+              // Cleared so picking the same file twice in a row still fires.
+              e.target.value = "";
+              void upload(picked);
+            }}
+          />
+
           <hr className="hairline my-1" />
 
           {/* Copying a path is the most-used thing in a file tree and the one
@@ -217,6 +277,18 @@ export function TreeMenu({
             }}
           />
           <MenuItem label="Delete" destructive onClick={() => setConfirming(true)} />
+
+          {/* Errors from an upload have nowhere else to go — this branch has no
+              form to hang them off. They persist until the next attempt. */}
+          {error && (
+            <p
+              role="alert"
+              className="data px-3 py-1 text-[10px]"
+              style={{ color: "rgb(var(--primary))" }}
+            >
+              {error}
+            </p>
+          )}
         </div>
       )}
     </div>
@@ -227,23 +299,47 @@ function MenuItem({
   label,
   onClick,
   destructive,
+  disabled,
+  hint,
 }: {
   label: string;
   onClick: () => void;
   destructive?: boolean;
+  disabled?: boolean;
+  /** Secondary text — used to name where an action will land. */
+  hint?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="data px-3 py-[5px] text-left text-[11px]"
-      style={{ color: destructive ? "rgb(var(--primary))" : "var(--text)" }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover)")}
+      disabled={disabled}
+      className="data flex items-baseline gap-2 px-3 py-[5px] text-left text-[11px]"
+      style={{
+        color: disabled
+          ? "var(--text-faint)"
+          : destructive
+            ? "rgb(var(--primary))"
+            : "var(--text)",
+      }}
+      onMouseEnter={(e) => {
+        if (!disabled) e.currentTarget.style.background = "var(--hover)";
+      }}
       onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
     >
-      {label}
+      <span className="truncate">{label}</span>
+      {hint && (
+        <span className="micro ml-auto shrink-0 truncate" style={{ maxWidth: "9rem" }}>
+          {hint}
+        </span>
+      )}
     </button>
   );
+}
+
+/** The last path segment — enough to say where something lands without wrapping. */
+function shortName(path: string): string {
+  return path.split("/").filter(Boolean).pop() ?? path;
 }
 
 

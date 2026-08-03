@@ -17,6 +17,9 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Only the live test needs it — to compare what a real host received against
+# what was sent, byte for byte.
+base64.workspace = true
 rmux-ssh.workspace = true
 rmux-metrics.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

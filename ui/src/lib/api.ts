@@ -504,6 +504,15 @@ export const api = {
 
   fsDelete: (target: TargetRef, path: string) => call<void>("fs_delete", { target, path }),
 
+  /**
+   * Put a local file onto the target, refusing to overwrite anything.
+   *
+   * Base64 because the IPC bridge is JSON; Rust decodes it and hands raw bytes
+   * to the far side, so binaries survive intact.
+   */
+  fsUpload: (target: TargetRef, path: string, base64: string) =>
+    call<void>("fs_upload", { target, path, base64 }),
+
   metricsSample: (target: TargetRef) => call<MetricsSample>("metrics_sample", { target }),
 
   sshConfigHosts: () => call<ConfigHost[]>("ssh_config_hosts"),

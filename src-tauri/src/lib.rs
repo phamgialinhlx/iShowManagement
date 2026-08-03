@@ -127,6 +127,7 @@ pub fn run() {
             files::fs_create_dir,
             files::fs_rename,
             files::fs_delete,
+            files::fs_upload,
             metrics::metrics_sample,
             metrics::metrics_processes,
             metrics::metrics_kill,

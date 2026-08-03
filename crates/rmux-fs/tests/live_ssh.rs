@@ -105,6 +105,47 @@ async fn run_checks(fs: &dyn FileSystem, root: &str) -> anyhow::Result<()> {
         "create_file must refuse to overwrite an existing file"
     );
 
+    // --- an upload is bytes over stdin, and they arrive intact ---------------
+    //
+    // The part a unit test cannot reach: this crosses a real `ssh` process's
+    // stdin and a remote login shell's redirect. Bytes chosen to break anything
+    // treating the payload as text — invalid UTF-8, an embedded NUL, a newline
+    // and an escape.
+    let dropped = format!("{root}/dropped.bin");
+    let payload: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x00, 0xff, 0xfe, b'\n', 0x1b, 0x0d];
+    fs.upload(&dropped, &payload).await?;
+
+    match fs.read_preview(&dropped).await? {
+        rmux_fs::PreviewContent::Base64 { bytes, base64 } => {
+            anyhow::ensure!(
+                bytes == payload.len() as u64,
+                "upload changed the length: sent {}, host has {bytes}",
+                payload.len()
+            );
+            // Compared as base64 because that is how the bytes come back — a
+            // length match alone would pass for a file of the right size and
+            // the wrong contents, which is exactly what a mangling transport
+            // produces.
+            use base64::Engine as _;
+            let expected = base64::engine::general_purpose::STANDARD.encode(&payload);
+            anyhow::ensure!(base64 == expected, "upload corrupted the bytes in transit");
+        }
+        other => anyhow::bail!("expected a base64 preview, got {other:?}"),
+    }
+
+    // A second upload of the same name is refused, and the first is untouched.
+    anyhow::ensure!(
+        fs.upload(&dropped, b"replacement").await.is_err(),
+        "upload must refuse to overwrite an existing file"
+    );
+    match fs.read_preview(&dropped).await? {
+        rmux_fs::PreviewContent::Base64 { bytes, .. } => anyhow::ensure!(
+            bytes == payload.len() as u64,
+            "the refused upload still changed the file"
+        ),
+        other => anyhow::bail!("expected a base64 preview, got {other:?}"),
+    }
+
     let renamed = format!("{root}/renamed.rs");
     fs.rename(&main, &renamed).await?;
     anyhow::ensure!(

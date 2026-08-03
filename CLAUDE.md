@@ -82,6 +82,16 @@ ui/                     React 19 + Tailwind 4 + motion
   silently discards permissions, ownership and hard links — a `0600` secret would become
   world-readable on save. Tests assert the mode survives on both paths.
 - **Create and rename refuse to clobber.** Silent overwrite is data loss the user did not ask for.
+- **Upload refuses to clobber with `set -C`, not with a check.** A `[ -e ]` test followed by
+  a redirect is a race whose loser truncates a file nobody named; POSIX noclobber makes the
+  redirect itself `O_EXCL`, so the refusal is atomic (`LocalFs` uses `create_new` for the same
+  reason). The `[ -e ]` test stays only to tell "already there" apart from "the write failed".
+  The name is chosen by the *file* rather than typed — a drop lands on whatever folder was
+  under the pointer — so a collision is the likely accident, not the exotic one. Uploaded bytes
+  go through **stdin**, and both failure paths `cat > /dev/null` first: without that the far
+  side exits while we are still writing megabytes into the pipe, and the operator is shown a
+  broken pipe instead of the reason. A live test sends invalid UTF-8 with an embedded NUL to a
+  real host and compares base64 both ways; removing the guard was verified to turn it red.
 - `alacritty_terminal` is pinned with `=` — it offers no stability guarantee across minor
   versions.
 - **xterm ships an opaque terminal.** `allowTransparency` plus a transparent theme is not

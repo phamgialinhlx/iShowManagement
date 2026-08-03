@@ -114,6 +114,39 @@ pub async fn fs_create_dir(
     filesystem(store.inner(), &target).await?.create_dir(&path).await.map_err(err)
 }
 
+/// Write dropped or picked bytes into a new file on the target.
+///
+/// The payload arrives base64-encoded because the IPC bridge is JSON, and is
+/// decoded here so the far side receives raw bytes — a `.png` routed through a
+/// `String` would be corrupted before it ever reached the disk.
+///
+/// The size check happens on the *decoded* length. Checking the base64 instead
+/// would reject files a third smaller than the stated limit, which is a cap that
+/// lies about itself.
+#[tauri::command]
+pub async fn fs_upload(
+    store: State<'_, FsStore>,
+    target: TargetRef,
+    path: String,
+    base64: String,
+) -> Result<(), String> {
+    use base64::Engine as _;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.as_bytes())
+        .map_err(|e| format!("could not decode the upload: {e}"))?;
+
+    if bytes.len() as u64 > rmux_fs::MAX_UPLOAD_BYTES {
+        return Err(format!(
+            "{} is too large to upload — the limit is {} MB",
+            path,
+            rmux_fs::MAX_UPLOAD_BYTES / (1024 * 1024)
+        ));
+    }
+
+    filesystem(store.inner(), &target).await?.upload(&path, &bytes).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn fs_rename(
     store: State<'_, FsStore>,

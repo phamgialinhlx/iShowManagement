@@ -46,6 +46,14 @@ pub struct DirEntry {
 /// anything is shown, so this is a comfort limit rather than a capability one.
 pub const MAX_PREVIEW_BYTES: u64 = 24 * 1024 * 1024;
 
+/// Largest file the tree will upload.
+///
+/// The limit is the IPC bridge, not the disk: the webview has to hand the bytes
+/// over as one base64 string, which inflates them by a third and is built,
+/// copied and parsed in memory on both sides. A cap that says so beats a
+/// several-hundred-megabyte drag that appears to hang the app.
+pub const MAX_UPLOAD_BYTES: u64 = 64 * 1024 * 1024;
+
 /// A non-text file, encoded for the webview.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -75,6 +83,15 @@ pub trait FileSystem: Send + Sync {
     /// Create an empty file. Fails if something is already there, so a mistyped
     /// name can never truncate an existing file.
     async fn create_file(&self, path: &str) -> anyhow::Result<()>;
+    /// Write `bytes` to a new file. Fails if anything is already there.
+    ///
+    /// Separate from `write_file` because that one takes a `String` — an upload
+    /// is arbitrary bytes, and routing a `.png` through UTF-8 would corrupt it.
+    /// Refusing to clobber matters more here than anywhere else: a drop lands on
+    /// whatever folder was under the pointer, so the name is chosen by the file
+    /// rather than typed, and a silent overwrite is the likely accident.
+    async fn upload(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()>;
+
     /// Rename or move. Fails if the destination exists.
     async fn rename(&self, from: &str, to: &str) -> anyhow::Result<()>;
     /// Delete a file or a directory tree.
@@ -173,6 +190,22 @@ impl<T: Target> FileSystem for TargetFs<T> {
         let output = self.run(&protocol::create_file_script(path)).await?;
         anyhow::ensure!(output != b"X", "{path} already exists");
         anyhow::ensure!(output == b"O", "failed to create {path}");
+        Ok(())
+    }
+
+    async fn upload(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()> {
+        // `Tty::None` is load-bearing: a PTY would translate the byte stream on
+        // its way through and quietly corrupt anything that is not text.
+        let spec =
+            CommandSpec::new("sh").arg("-c").arg(protocol::upload_script(path)).tty(Tty::None);
+
+        let out = self.target.exec_with_input(&spec, bytes).await?;
+        anyhow::ensure!(out.stdout.trim_end() != "X", "{path} already exists");
+        anyhow::ensure!(
+            out.status == 0 && out.stdout.trim_end() == "O",
+            "failed to upload {path}: {}",
+            out.stderr.trim()
+        );
         Ok(())
     }
 
@@ -289,6 +322,26 @@ impl FileSystem for LocalFs {
                 std::io::ErrorKind::AlreadyExists => anyhow::anyhow!("{path} already exists"),
                 _ => e.into(),
             })?;
+        Ok(())
+    }
+
+    async fn upload(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        // `create_new` is the atomic refusal, same as `create_file`. Checking
+        // and then opening would race, and the loser truncates a file nobody
+        // named.
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => anyhow::anyhow!("{path} already exists"),
+                _ => e.into(),
+            })?;
+        file.write_all(bytes).await?;
+        file.flush().await?;
         Ok(())
     }
 
@@ -610,6 +663,25 @@ mod tests {
         assert!(err.to_string().contains("already exists"), "got: {err}");
         // The point of the guard: the original content is untouched.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "important");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_upload_never_clobbers_and_keeps_every_byte() {
+        let dir = temp_dir("upload");
+        let path = dir.join("shot.png").to_string_lossy().into_owned();
+
+        // Bytes that are not valid UTF-8 and contain a NUL — the two things a
+        // text-shaped path would corrupt on the way through.
+        let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x00, 0xff, 0xfe, b'\n', 0x1b];
+        LocalFs::new().upload(&path, &bytes).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        // A second drop of the same name is refused, not merged into the first.
+        let err = LocalFs::new().upload(&path, b"different").await.unwrap_err();
+        assert!(err.to_string().contains("already exists"), "got: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
