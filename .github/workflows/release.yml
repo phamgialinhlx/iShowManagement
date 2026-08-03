@@ -87,9 +87,11 @@ jobs:
         with:
           targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
+      # No `version:` here — `package.json` already pins pnpm through
+      # `packageManager`, and the action refuses when both are set rather than
+      # picking one. Letting the manifest be the single source also means CI
+      # cannot drift from what a developer runs locally.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22
