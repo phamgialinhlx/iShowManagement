@@ -785,3 +785,56 @@ body[data-hidden="true"] * {
 .blink {
   animation: blink 1.06s step-end infinite;
 }
+
+/*
+ * The session rail's activity ring.
+ *
+ * A session that is *running* has to look running from across the room — the
+ * rail is how the operator answers "which of my machines needs me right now?",
+ * and a static amber dot cannot distinguish "working" from "stopped an hour
+ * ago". Rule 2 still holds: this rotates, it does not blink. Rotation is
+ * continuous, so it reads as movement rather than as an alarm, and the ring is
+ * an arc of the dot rather than the dot itself appearing and disappearing.
+ */
+@keyframes ring-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ring-spin {
+  animation: ring-spin 1.1s linear infinite;
+}
+
+/*
+ * Finished, and not yet looked at.
+ *
+ * A slow swell rather than a flash. The point is to be findable in peripheral
+ * vision without pulling the eye off whatever is being read — this is "come
+ * back when you can", not "stop".
+ */
+@keyframes done-swell {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(var(--primary) / 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgb(var(--primary) / 0);
+  }
+}
+
+.done-swell {
+  animation: done-swell 2.4s ease-out infinite;
+}
+
+/*
+ * Motion is a signal here, not decoration — so when the operator has asked the
+ * system for less of it, the colours still carry every state and only the
+ * movement stops.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .ring-spin,
+  .done-swell {
+    animation: none;
+  }
+}

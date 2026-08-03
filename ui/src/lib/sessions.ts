@@ -104,6 +104,14 @@ export type Session = {
    */
   contextWindow?: number;
   status: SessionStatus;
+  /**
+   * When this session last stopped working, if nobody has looked since.
+   *
+   * Runtime only, never persisted: a completion from a previous run of the app
+   * has already been seen, or is no longer worth chasing, and restoring it
+   * would greet the operator with a rail full of marks on every launch.
+   */
+  finishedAt?: number;
   /** Set when the target could not be reached, so the rail can show it. */
   error: string | null;
 };
@@ -502,7 +510,16 @@ export const useSessions = create<State>((set, get) => ({
   },
 
   activate: (id) => {
-    set({ activeSession: id });
+    // Opening a session is *looking at it*, so the "finished" mark clears here
+    // rather than on a timer. A marker that expires on its own is one the
+    // operator can miss entirely by being away from the desk — which is exactly
+    // when a long run finishes.
+    set((s) => ({
+      activeSession: id,
+      sessions: s.sessions.map((x) =>
+        x.id === id && x.finishedAt !== undefined ? { ...x, finishedAt: undefined } : x,
+      ),
+    }));
     schedulePersist(get);
   },
 
@@ -622,7 +639,26 @@ export const useSessions = create<State>((set, get) => ({
       // Avoid a state update on every poll when nothing changed — the rail
       // re-renders otherwise, several times a second, forever.
       if (!current || current.status === status) return s;
-      return { sessions: s.sessions.map((x) => (x.id === id ? { ...x, status } : x)) };
+
+      // **The transition is the event, not the state.** "Idle" cannot tell a
+      // session that just finished ten minutes of work from one that has never
+      // run, and those need opposite amounts of the operator's attention. So
+      // the moment work stops is recorded, and the rail marks that session
+      // until it is looked at.
+      const finished =
+        current.status === "working" && status !== "working"
+          ? Date.now()
+          : // Starting work clears any previous completion — the old result is
+            // no longer the thing waiting to be read.
+            status === "working"
+            ? undefined
+            : current.finishedAt;
+
+      return {
+        sessions: s.sessions.map((x) =>
+          x.id === id ? { ...x, status, finishedAt: finished } : x,
+        ),
+      };
     }),
 
   setSessionError: (id, error) =>

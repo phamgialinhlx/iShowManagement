@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 
 import { api, isTauri, type Transcript, type TranscriptEntry } from "../lib/api";
 import type { Session } from "../lib/sessions";
+import { MARKDOWN_COMPONENTS } from "../lib/markdown-code";
 
 /**
  * The conversation, as a document.
@@ -83,7 +84,9 @@ function Turn({ entry }: { entry: TranscriptEntry }) {
 
       {isProse ? (
         <div className="markdown data text-[12.5px] leading-[1.65]">
-          <Markdown remarkPlugins={[remarkGfm]}>{entry.text}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+            {entry.text}
+          </Markdown>
         </div>
       ) : (
         // Tool calls and output are not markdown — they are shell and file

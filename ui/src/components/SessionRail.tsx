@@ -30,18 +30,53 @@ function statusColor(status: SessionStatus): string {
   }
 }
 
-function StatusDot({ status }: { status: SessionStatus }) {
+/**
+ * The one mark that answers "which of my machines needs me right now?".
+ *
+ * Three states, and the difference between them has to survive being seen from
+ * the corner of an eye:
+ *
+ * - **Working** — a turning ring. A static amber dot cannot tell a run that is
+ *   still going from one that stopped an hour ago, and that is the single most
+ *   useful thing the rail can say. Rule 2 holds: this rotates continuously, it
+ *   does not blink; the dot never disappears.
+ * - **Waiting** — red and still. Claude has asked something and nothing is
+ *   moving until it is answered.
+ * - **Finished, unseen** — red with a slow outward swell. Work that stopped
+ *   while the operator was elsewhere is exactly the thing that gets forgotten,
+ *   and "idle" looks identical to a session that has never run. The mark clears
+ *   when the session is opened, not on a timer — an alert that expires by
+ *   itself is one you miss by being away from the desk, which is precisely when
+ *   a long run finishes.
+ */
+function StatusDot({ status, finished }: { status: SessionStatus; finished?: boolean }) {
+  const done = finished && status !== "working";
+
+  if (status === "working") {
+    return (
+      <span
+        className="round ring-spin shrink-0"
+        title="working"
+        style={{
+          width: 9,
+          height: 9,
+          // An arc, not a full ring: a complete circle rotating looks static.
+          border: "1.5px solid rgb(var(--busy) / 0.28)",
+          borderTopColor: "rgb(var(--busy))",
+          boxSizing: "border-box",
+        }}
+      />
+    );
+  }
+
   return (
     <span
-      className="round shrink-0"
-      title={status}
+      className={`round shrink-0${done ? " done-swell" : ""}`}
+      title={done ? "finished — not looked at yet" : status}
       style={{
         width: 7,
         height: 7,
-        background: statusColor(status),
-        // Rule 2: no blinking. A working session breathes via a glow, and a
-        // waiting one is simply red — which is louder than any animation.
-        boxShadow: status === "working" ? "0 0 6px rgb(var(--busy) / 0.7)" : "none",
+        background: done ? "rgb(var(--primary))" : statusColor(status),
       }}
     />
   );
@@ -77,7 +112,7 @@ function Row({
         className="flex h-[34px] w-full items-center justify-center"
         style={{ background: active ? "var(--hover)" : "transparent" }}
       >
-        <StatusDot status={session.status} />
+        <StatusDot status={session.status} finished={session.finishedAt !== undefined} />
       </button>
     );
   }
@@ -94,7 +129,7 @@ function Row({
     >
       {editing ? (
         <div className="flex items-center gap-2 px-3 py-[7px]">
-          <StatusDot status={session.status} />
+          <StatusDot status={session.status} finished={session.finishedAt !== undefined} />
           <input
             autoFocus
             defaultValue={session.name}
@@ -126,7 +161,7 @@ function Row({
           title={`${session.name} — ${where}\nDouble-click to rename`}
           className="flex w-full items-center gap-2 px-3 py-[7px] text-left"
         >
-          <StatusDot status={session.status} />
+          <StatusDot status={session.status} finished={session.finishedAt !== undefined} />
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="data truncate text-[12px]" style={{ color: "var(--text)" }}>
               {session.name}
@@ -209,7 +244,12 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
   const assignSlot = useSessions((s) => s.assignSlot);
   const toggle = useSessions((s) => s.toggleRail);
 
-  const waiting = sessions.filter((s) => s.status === "waiting").length;
+  // Both kinds of "needs you" — Claude is asking, or Claude finished and nobody
+  // has looked. Counting only the first left a rail full of red swells above a
+  // header that said everything was fine.
+  const needing = sessions.filter(
+    (s) => s.status === "waiting" || (s.finishedAt !== undefined && s.status !== "working"),
+  ).length;
 
   return (
     <motion.aside
@@ -227,8 +267,8 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
             SESSIONS
             {/* The count of sessions needing attention, which is the number you
                 actually want to know at a glance. */}
-            {waiting > 0 && (
-              <span style={{ color: "rgb(var(--primary))" }}> · {waiting} waiting</span>
+            {needing > 0 && (
+              <span style={{ color: "rgb(var(--primary))" }}> · {needing} need you</span>
             )}
           </span>
         )}

@@ -277,6 +277,57 @@ over a photograph is worse than a plain one. `applyAppearance` memoises the glas
 last sent, because the overlay slider calls it on every tick and each call crosses IPC to
 mutate AppKit views on the main thread for every open window.
 
+## Code is colour-coded, and that is not a break with rule 0
+
+The Monaco theme was near-monochrome on purpose — the reasoning being that code sits in a
+dense instrument panel and a loud syntax theme would out-shout the controls. It was wrong, and
+a screenshot of a real Python file made it obvious: `keyword` and `identifier` were **both**
+`#e8e6e1`, so the file rendered as one flat grey with a slightly dimmer comment. Syntax colour
+is not decoration, it is the parse; unhighlighted code means doing the tokenizer's job by eye
+on every line.
+
+Rule 0 survives intact — red still appears nowhere in the editor but genuine errors, unmatched
+brackets and the caret. Syntax colour is a *different axis* from the alarm palette, and
+conflating them was the error: suppressing every hue to protect one of them left the app unable
+to say "this is a string".
+
+- **The six hues are the terminal's hues**, taken from `TERMINAL_THEME` verbatim, so a string
+  is the same green in the editor, in a transcript code block and in a shell. Three surfaces
+  disagreeing about what green means is three palettes to learn.
+- **`monaco.editor.colorize` returns class names, not colours.** It emits
+  `<span class="mtk21">`, and the stylesheet that gives `.mtk21` a colour is injected by
+  Monaco's theme service **only when an editor is constructed**. A transcript rendered before
+  any file was opened therefore produced perfectly tokenized HTML that painted in one inherited
+  grey — the exact symptom of no highlighting at all, from code that was working.
+  `ensureThemeStyles` builds one throwaway off-screen editor to trigger it; the stylesheet
+  outlives its disposal (measured, both halves).
+- **`ui/highlight-check.html` counts the colours that actually *paint*** — `getComputedStyle`
+  on the rendered spans, never a regex over the markup. Checking the string would have passed
+  the entirely-grey output, which is the bug. It measured 0 distinct colours before the fix and
+  7 after.
+- **Transcript code blocks go through the same tokenizer** (`lib/markdown-code.tsx` →
+  `CodeBlock`), so there is one definition of what highlighting is. A second highlighter would
+  be a second palette and a second set of language rules, disagreeing within a week. Monaco
+  escapes the source as it tokenizes, which is what makes injecting that HTML safe for text
+  rmux did not write. An unknown language stays plain — guessing produces confidently wrong
+  colours, and a shell transcript tokenized as JavaScript is worse than no colour because it
+  *looks* parsed.
+
+## The session rail is the answer to "which machine needs me?"
+
+- **A running session turns; it does not blink.** A static amber dot cannot distinguish work
+  still going from work that stopped an hour ago, which is the single most useful thing the
+  rail can say. Rule 2 holds — the ring rotates continuously and the dot never disappears.
+- **"Finished" is a transition, not a state.** `idle` cannot tell a session that just finished
+  ten minutes of work from one that has never run, and those deserve opposite amounts of
+  attention. `setStatus` records `finishedAt` on the working→not-working edge; the rail marks
+  that session in the accent colour until it is **opened**. Cleared by looking, never by a
+  timer: an alert that expires on its own is one the operator misses by being away from the
+  desk, which is exactly when a long run finishes. Runtime only — restoring it would greet
+  every launch with a rail full of marks that have already been seen.
+- The header counts **both** kinds of "needs you". Counting only `waiting` left a rail full of
+  accent dots above a header claiming everything was fine.
+
 ## Searching a project
 
 **`grep` runs on the machine that owns the disk** (`crates/rmux-fs/src/search.rs`). Listing
