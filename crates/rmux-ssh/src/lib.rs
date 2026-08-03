@@ -29,9 +29,11 @@ pub mod askpass;
 pub mod forward;
 pub mod config;
 pub mod mux;
+pub mod winshell;
 
 pub use config::{ConfigHost, list_hosts};
 pub use mux::{ControlMaster, MasterState};
+pub use winshell::RemoteShell;
 
 /// An SSH host as a [`Target`].
 #[derive(Debug)]
@@ -73,10 +75,32 @@ impl SshTarget {
 
         // `uname -s` over the freshly established master. Anything we cannot
         // identify is `Other`, which only costs us the /proc metrics fast path.
-        let out = self.exec(&CommandSpec::new("uname").arg("-s").tty(Tty::None)).await?;
-        let platform = match out.stdout_or_err()? {
+        let probe = self.exec(&CommandSpec::new("uname").arg("-s").tty(Tty::None)).await?;
+
+        // **A failed `uname` is the Windows signal, not an error.** OpenSSH for
+        // Windows hands the command to `cmd.exe` unless `DefaultShell` says
+        // otherwise, and `cmd` has no `uname` — so the very first thing rmux
+        // does fails, and before this the connection simply never completed.
+        // Measured on a real Windows 11 host.
+        if probe.status != 0 {
+            if let Some(bash) = self.find_posix_shell().await {
+                tracing::info!(bash = %bash, "windows host: routing commands through a POSIX shell");
+                winshell::remember(&self.host.alias, RemoteShell::Via { bash });
+                *self.platform.write() = Some(Platform::Windows);
+                return Ok(Platform::Windows);
+            }
+            anyhow::bail!(
+                "this host's shell is not POSIX and no bash was found. rmux drives hosts with \
+                 POSIX shell scripts; on Windows install Git for Windows, or set OpenSSH's \
+                 DefaultShell to a POSIX shell."
+            );
+        }
+
+        let platform = match probe.stdout_or_err()? {
             s if s.eq_ignore_ascii_case("linux") => Platform::Linux,
             s if s.eq_ignore_ascii_case("darwin") => Platform::MacOs,
+            // A host already answering `uname` from MSYS/Cygwin is POSIX enough
+            // to drive directly — no wrapper needed.
             s if s.starts_with("MINGW") || s.starts_with("CYGWIN") => Platform::Windows,
             other => {
                 tracing::debug!(uname = other, "unrecognised remote platform");
@@ -86,6 +110,25 @@ impl SshTarget {
 
         *self.platform.write() = Some(platform);
         Ok(platform)
+    }
+
+    /// Which POSIX shell this Windows host has, if any.
+    ///
+    /// Runs as a raw `cmd` line — deliberately *not* through `build_command`,
+    /// which would try to wrap it in the very shell being looked for.
+    async fn find_posix_shell(&self) -> Option<String> {
+        let mut args = self.ssh_argv(Tty::None);
+        args.push("--".to_owned());
+        args.push(winshell::probe_script());
+
+        let out = tokio::process::Command::new("ssh")
+            .args(&args)
+            .envs(askpass::env_for_gui_prompts())
+            .output()
+            .await
+            .ok()?;
+
+        winshell::parse_probe(&String::from_utf8_lossy(&out.stdout))
     }
 
     /// Base `ssh` argv shared by every invocation: multiplexing options, the
@@ -125,7 +168,15 @@ impl Target for SshTarget {
 
         // `--` stops ssh from interpreting the remote command as its own options.
         args.push("--".to_owned());
-        args.push(spec_to_shell_line(spec));
+
+        // The one place a non-POSIX host differs. Everything above this line —
+        // and every caller — still builds an ordinary POSIX shell line, which is
+        // the invariant: there is no `if windows` in feature code, only here.
+        let line = spec_to_shell_line(spec);
+        args.push(match winshell::shell_for(&self.host.alias) {
+            RemoteShell::Posix => line,
+            RemoteShell::Via { bash } => winshell::wrap(&bash, &line),
+        });
 
         Ok(ResolvedCommand {
             program: "ssh".into(),

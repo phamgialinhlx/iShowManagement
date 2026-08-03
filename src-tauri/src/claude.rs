@@ -178,7 +178,15 @@ pub async fn claude_start<R: tauri::Runtime>(
 
     // Hand the stored Claude account to this host's agent first, so the session
     // starts already signed in. No-op when nothing is stored.
-    crate::claude_account::apply_to_target(&app, resolved.as_ref()).await?;
+    // Both of these deliver environment *through the agent*, so on a host that
+    // cannot run one they are skipped rather than fatal — the operator's own
+    // `claude` login on that machine is then what signs the session in, which is
+    // exactly the pre-agent behaviour and works.
+    let agent_available =
+        resolved.platform() != Some(rmux_transport::Platform::Windows);
+    if agent_available {
+        crate::claude_account::apply_to_target(&app, resolved.as_ref()).await?;
+    }
 
     // Then the model profile, which may override the account's variables — a
     // profile that carries its own token is meant to win over the stored Claude
@@ -186,10 +194,25 @@ pub async fn claude_start<R: tauri::Runtime>(
     // is selected: the daemon outlives sessions, so the previous profile's base
     // URL is still in its environment, and starting without clearing it would
     // run this session against the old provider while the UI showed Anthropic.
-    crate::model_profile::apply_to_target(&app, resolved.as_ref(), model_profile.as_deref())
-        .await?;
+    if agent_available {
+        crate::model_profile::apply_to_target(&app, resolved.as_ref(), model_profile.as_deref())
+            .await?;
+    } else if model_profile.is_some() {
+        // Silently ignoring a chosen provider would run the conversation against
+        // Anthropic while the UI named someone else — the exact class of silent
+        // mis-routing the profile design exists to prevent.
+        return Err(
+            "a model profile needs the rmux agent to deliver its credentials, and the agent \
+             does not run on Windows yet — start this session on Anthropic, or run it from a \
+             host with the agent"
+                .to_owned(),
+        );
+    }
 
-    let session = Arc::new(match &session_name {
+    let session = Arc::new(match session_name.as_ref().filter(|_| agent_available) {
+        // Without an agent the conversation cannot outlive the connection, but
+        // it still runs — and `--resume` means reopening picks the transcript
+        // back up, so what is lost is the *process* surviving, not the work.
         Some(name) => {
             let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
             let line = ClaudeSession::launch_line(resume.as_deref(), &args, rendering);

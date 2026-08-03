@@ -166,6 +166,49 @@ ui/                     React 19 + Tailwind 4 + motion
   onto one socket. That very mistake shipped into the first version of this fix and was
   caught only by looking at the socket on the host; a test now pins it.
 
+## Windows hosts
+
+**rmux drives Windows through Git for Windows' bash, and that is the whole design.**
+Every remote operation here is a POSIX script — `for e in *`, `grep -rInZ`, `cat >` — which is
+what lets any `ssh`-reachable host be usable with nothing installed. OpenSSH for Windows hands
+the remote command to `DefaultShell`, and unset (the shipping default) that is `cmd.exe`, which
+cannot parse a word of it. Measured on a real Windows 11 host: no `sh` on `PATH`, no `bash` on
+`PATH`, and `uname -s` — the *first* thing rmux runs — fails, so the connection never completed.
+
+`crates/rmux-ssh/src/winshell.rs` finds the POSIX shell and routes through it. The branch lives
+in the `Target` impl, never in feature code: `rmux-fs`, search, terminals and Claude all still
+emit ordinary POSIX and know nothing about it.
+
+- **A failed `uname` is the Windows signal, not an error.** That is the detection.
+- **The script is base64'd into the command line.** `cmd` re-parses it, so `"`, `|`, `>`, `&`
+  and `%` are all live; base64's alphabet contains nothing it reacts to. A test asserts no
+  fragment of a hostile script survives into the line, and that `%` never does — `cmd` expands it.
+- **The decode goes to a file, never a pipe.** `echo <b64> | base64 -d | bash` gives the inner
+  shell the *pipe* as stdin — so saving a file and uploading, which both stream their payload
+  over stdin, would have received the script instead of the data. Silent corruption.
+- **`SHELL` is corrected to `$BASH`.** Windows sets `SHELL=/c/windows/system32/cmd.exe` and MSYS
+  leaves it there, so `CommandSpec::login_shell()` (`$SHELL -l -i`) would have launched **cmd**
+  through a POSIX wrapper — every terminal and every Claude session. Verified: `/usr/bin/bash`.
+- **The shell is cached per host, not per `SshTarget`.** Several targets exist for one host and
+  only one calls `connect`; held per instance, the others assumed POSIX and every command failed
+  with `'sh' is not recognized`. That is exactly what the first live run did.
+- **Short 8.3 paths** (`C:\PROGRA~1\Git\bin\bash.exe`) so no space needs quoting inside a
+  command line `cmd` is already re-parsing.
+- **MSYS emulates procfs, so metrics work** — `Platform::has_procfs()` includes Windows. But the
+  emulation is partial: `/proc/net/dev`, `/proc/loadavg` and `/proc/uptime` are absent, and
+  unguarded the missing one exited non-zero and took the *whole* sample with it, reporting a
+  host whose CPU and memory were sitting right there as a failed connection. Every optional
+  reading is guarded. `MemAvailable` is also absent, which made an idle 134 GB machine read
+  **100% memory used**; it falls back to `MemFree`.
+- **The agent does not run on Windows** — it is cross-compiled for linux-musl. `ensure_agent`
+  refuses with a reason and callers fall back to a direct login shell, because refusing outright
+  would mean no terminal at all on a host where files, search and Claude all work. What is lost
+  is persistence. A *model profile* is the exception and fails loudly: it delivers credentials
+  through the agent, and running the conversation against Anthropic while the UI named a
+  different provider is the silent mis-routing that design exists to prevent.
+- `tests/live_windows.rs` drives all of it against a real host — a filename containing `&` and
+  `%PATH%`, a binary upload over stdin, search, and the clobber guard.
+
 ## Managing the host
 
 - **A pid crosses the IPC bridge as a `u32`.** This is the one place the operator points at

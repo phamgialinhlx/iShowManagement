@@ -132,18 +132,29 @@ pub async fn terminal_open<R: tauri::Runtime>(
     // A named terminal runs under the agent so it outlives this connection.
     // Without a name there is nothing to reattach *to*, so a plain login shell
     // is the honest behaviour rather than a session nobody can find again.
+    let plain_shell = || {
+        let mut spec = CommandSpec::login_shell();
+        if let Some(cwd) = &cwd {
+            spec = spec.cwd(cwd.clone());
+        }
+        spec
+    };
+
     let mut spec = match &session {
-        Some(name) => {
-            let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
-            installed.attach_spec(name, cwd.as_deref(), cols, rows)
-        }
-        None => {
-            let mut spec = CommandSpec::login_shell();
-            if let Some(cwd) = &cwd {
-                spec = spec.cwd(cwd.clone());
+        // **A host without an agent still gets a terminal.** Windows cannot run
+        // the agent (see `ensure_agent`), and refusing outright would mean no
+        // shell at all on a host where everything else — files, search, Claude —
+        // works. What is lost is persistence, so the shell ends with the
+        // connection; that is worth saying, but it is not worth withholding the
+        // terminal over.
+        Some(name) => match crate::agent::ensure_agent(&app, resolved.as_ref()).await {
+            Ok(installed) => installed.attach_spec(name, cwd.as_deref(), cols, rows),
+            Err(reason) => {
+                tracing::info!(%reason, "opening a non-persistent terminal");
+                plain_shell()
             }
-            spec
-        }
+        },
+        None => plain_shell(),
     };
 
     for (key, value) in terminal_env() {

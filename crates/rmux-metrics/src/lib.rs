@@ -235,6 +235,10 @@ impl Collector {
         let platform = match out.stdout_or_err()? {
             s if s.eq_ignore_ascii_case("linux") => Platform::Linux,
             s if s.eq_ignore_ascii_case("darwin") => Platform::MacOs,
+            // Git Bash / MSYS2 answers `MINGW64_NT-…`, Cygwin `CYGWIN_NT-…`.
+            // Both emulate procfs, so they take the Linux path — see
+            // `Platform::has_procfs`.
+            s if s.starts_with("MINGW") || s.starts_with("CYGWIN") => Platform::Windows,
             _ => Platform::Other,
         };
 
@@ -264,13 +268,22 @@ pub enum SortBy {
 /// plausible wrong number rather than failing. Tags make each line
 /// unambiguous, and `NET` sums every interface except loopback, which otherwise
 /// double-counts local traffic.
+/// **Every optional reading is guarded.** A procfs emulation need not be
+/// complete: measured on a real Windows host reached through Git Bash,
+/// `/proc/stat` and `/proc/meminfo` are faithful but `/proc/net/dev`,
+/// `/proc/loadavg` and `/proc/uptime` are simply absent. Unguarded, the missing
+/// one exited non-zero and took the *whole* sample with it — so CPU and memory,
+/// which were sitting right there, were reported as a failed connection. A
+/// metric that cannot be read is a blank field, not an error.
 const LINUX_SCRIPT: &str = r#"head -n1 /proc/stat
-grep -E '^(MemTotal|MemAvailable):' /proc/meminfo
-cut -d' ' -f1 /proc/loadavg
-echo "HOST $(cat /proc/sys/kernel/hostname 2>/dev/null)"
-echo "UPTIME $(cut -d' ' -f1 /proc/uptime)"
+grep -E '^(MemTotal|MemAvailable|MemFree):' /proc/meminfo
+cut -d' ' -f1 /proc/loadavg 2>/dev/null || true
+echo "HOST $(cat /proc/sys/kernel/hostname 2>/dev/null || hostname 2>/dev/null)"
+echo "UPTIME $(cut -d' ' -f1 /proc/uptime 2>/dev/null || echo 0)"
 echo "CORES $(nproc 2>/dev/null || echo 1)"
-awk 'NR>2 {sub(/:/, " "); if ($1 != "lo") { rx += $2; tx += $10 }} END {print "NET", rx+0, tx+0}' /proc/net/dev"#;
+if [ -r /proc/net/dev ]; then
+awk 'NR>2 {sub(/:/, " "); if ($1 != "lo") { rx += $2; tx += $10 }} END {print "NET", rx+0, tx+0}' /proc/net/dev
+fi"#;
 
 const DARWIN_SCRIPT: &str = r#"sysctl -n hw.memsize
 vm_stat | head -n 6
@@ -287,6 +300,10 @@ fn parse_linux(
     let mut net: Option<NetTotals> = None;
     let mut mem_total = 0u64;
     let mut mem_available = 0u64;
+    // Fallback for procfs emulations that omit `MemAvailable` — MSYS2 on
+    // Windows is one, and without this its host panel reported 100% memory
+    // used on an idle machine, which is a wrong number presented as a fact.
+    let mut mem_free = 0u64;
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("HOST ") {
@@ -312,12 +329,18 @@ fn parse_linux(
             mem_total = parse_kib(rest);
         } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
             mem_available = parse_kib(rest);
+        } else if let Some(rest) = line.strip_prefix("MemFree:") {
+            mem_free = parse_kib(rest);
         } else if let Ok(load) = line.trim().parse::<f32>() {
             sample.load_average = load;
         }
     }
 
     sample.memory_total_bytes = mem_total;
+    // `MemAvailable` accounts for reclaimable cache and is the honest figure;
+    // `MemFree` overstates usage, but overstating beats reporting every host
+    // that lacks the field as completely full.
+    let mem_available = if mem_available > 0 { mem_available } else { mem_free };
     sample.memory_used_bytes = mem_total.saturating_sub(mem_available);
     sample.cpu_percent = cpu_from_delta(previous, totals);
 
@@ -730,5 +753,52 @@ mod tests {
         let (sample, _, _) = parse_linux("not what we expected at all", None).unwrap();
         assert_eq!(sample.memory_total_bytes, 0);
         assert_eq!(sample.memory_percent(), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod msys_tests {
+    use super::*;
+
+    /// `/proc/meminfo` exactly as a real Windows host reports it through Git Bash.
+    const MSYS_MEMINFO: &str = "cpu  100 0 100 1000 0 0 0 0
+MemTotal:      134117944 kB
+MemFree:         4030876 kB";
+
+    #[test]
+    fn a_procfs_without_memavailable_does_not_report_a_full_machine() {
+        // Measured: MSYS2 emulates `/proc/meminfo` but omits `MemAvailable`, so
+        // "available" parsed as zero and the host panel showed **100% memory
+        // used** on an idle 134 GB machine. A wrong number presented as a fact
+        // is worse than no number.
+        let (sample, _, _) = parse_linux(MSYS_MEMINFO, None).unwrap();
+
+        assert_eq!(sample.memory_total_bytes, 134_117_944 * 1024);
+        assert_eq!(sample.memory_used_bytes, (134_117_944 - 4_030_876) * 1024);
+        let used = sample.memory_used_bytes as f64 / sample.memory_total_bytes as f64;
+        assert!(used < 0.98, "still reads as full: {:.1}%", used * 100.0);
+    }
+
+    #[test]
+    fn memavailable_still_wins_where_it_exists() {
+        // The fallback must not displace the honest figure on Linux, where
+        // `MemAvailable` counts reclaimable cache and `MemFree` badly overstates
+        // usage on any host that has been up for a while.
+        let both = "cpu  100 0 100 1000 0 0 0 0
+MemTotal:      1000 kB
+MemFree:        100 kB
+MemAvailable:   800 kB";
+        let (sample, _, _) = parse_linux(both, None).unwrap();
+        assert_eq!(sample.memory_used_bytes, 200 * 1024);
+    }
+
+    #[test]
+    fn windows_takes_the_procfs_path() {
+        // Git Bash gives a faithful `/proc/stat` and `/proc/meminfo`, so the
+        // Linux collector is correct there — excluding Windows cost the host
+        // panel entirely and bought nothing.
+        assert!(Platform::Windows.has_procfs());
+        assert!(Platform::Linux.has_procfs());
+        assert!(!Platform::MacOs.has_procfs());
     }
 }

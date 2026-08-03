@@ -29,6 +29,20 @@ pub async fn ensure_agent<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     target: &dyn Target,
 ) -> Result<Installed, String> {
+    // **The agent is a Linux binary; a Windows host cannot run it.** rmux
+    // reaches Windows through Git for Windows' bash, which is enough for files,
+    // search, terminals and Claude — but `rmux-agent` is cross-compiled for
+    // linux-musl and would be uploaded and then fail to execute, which surfaces
+    // as a shell that never starts. Refused here, with the reason, so callers
+    // fall back to a direct login shell instead of failing.
+    if target.platform() == Some(rmux_transport::Platform::Windows) {
+        return Err(
+            "session persistence needs the rmux agent, which does not run on Windows yet — \
+             this shell will end when the connection does"
+                .to_owned(),
+        );
+    }
+
     let store = app.state::<AgentStore>();
     let cell = {
         let mut guard = store.by_target.lock();

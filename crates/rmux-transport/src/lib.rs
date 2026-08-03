@@ -99,8 +99,16 @@ impl Platform {
     }
 
     /// Whether `/proc/stat` and `/proc/meminfo` can be read for metrics.
+    /// Whether `/proc/stat` and `/proc/meminfo` exist, in Linux format.
+    ///
+    /// **Windows counts.** Not the OS itself — but rmux reaches a Windows host
+    /// through Git for Windows' shell, and MSYS2 emulates procfs faithfully:
+    /// measured on a real machine, `/proc/meminfo` reports `MemTotal:` in kB and
+    /// `/proc/stat` opens with a `cpu` line, both exactly as the Linux collector
+    /// already parses them. Excluding Windows here bought nothing and cost the
+    /// host panel on every Windows target.
     pub fn has_procfs(self) -> bool {
-        matches!(self, Platform::Linux)
+        matches!(self, Platform::Linux | Platform::Windows)
     }
 }
 
