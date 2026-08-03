@@ -427,6 +427,22 @@ with ControlMaster holding the socket. Only the matches cross the network.
   only when focused — from the tree, or right after clicking a search result, the key did
   nothing, which reads as a missing feature rather than a focus rule.
 
+## A widget that is switched off must not run
+
+Instruments are choosable (rail header › INSTRUMENTS), and *off means off* — the widget is
+unmounted, not hidden, so its effects and timers stop with it.
+
+- **The shared host poller is gated too.** `useHostSample` lives in the rail, above the
+  instruments, so unmounting HOST and TOP PROCESSES would not have stopped it: it would have
+  kept opening an SSH channel every couple of seconds for readings nothing rendered. A setting
+  that hides a widget while it keeps working is not a setting.
+- **`enabled` is in the effect's dependency list**, not only in its early return. Without it the
+  poller never restarts when an instrument is switched back on, and the disable switch becomes a
+  one-way door — the widget reappears and stays permanently empty.
+- **Absent preference means all of them.** A first run must not open to an empty rail, and the
+  stored set is reconciled against `INSTRUMENTS` like the order is, so a widget added later
+  appears rather than being silently off for anyone who has ever touched this.
+
 ## The interface must never make anyone feel lost
 
 The operator should be able to use rmux on instinct — without reading labels to

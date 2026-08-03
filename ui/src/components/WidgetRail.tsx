@@ -131,7 +131,15 @@ function Row({ label, value }: { label: string; value: string }) {
  * as one. Polling once for both is the point: two timers against the same host
  * would double the ssh round trips for the same numbers.
  */
-function useHostSample(target: TargetRef) {
+/**
+ * @param enabled  false when neither host instrument is on. **This is the whole
+ *   point of the disable switch.** Unmounting a widget stops its own effects,
+ *   but this poller lives in the *rail*, above them — so with HOST and TOP
+ *   PROCESSES both switched off it would have kept opening an SSH channel every
+ *   couple of seconds for readings nothing rendered. A setting that hides a
+ *   widget while it keeps working is not a setting, it is a lie.
+ */
+function useHostSample(target: TargetRef, enabled: boolean) {
   const [sample, setSample] = useState<MetricsSample | null>(null);
   const [failed, setFailed] = useState(false);
   const [cpuHistory, setCpuHistory] = useState<number[]>([]);
@@ -147,6 +155,7 @@ function useHostSample(target: TargetRef) {
   const [netHistory, setNetHistory] = useState<number[]>([]);
 
   useEffect(() => {
+    if (!enabled) return;
     if (!isTauri()) return;
     let cancelled = false;
 
@@ -184,7 +193,11 @@ function useHostSample(target: TargetRef) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [target]);
+    // `enabled` belongs here, not just in the early return: without it the
+    // effect never re-runs when an instrument is switched back on, so the rail
+    // would show HOST again and never fill it. Leaving it out is the classic
+    // way a disable switch becomes a one-way door.
+  }, [target, enabled]);
 
   // A floor of 1 keeps the division safe on an idle host; the bar reads empty
   // either way, which is correct — an idle link *is* empty.
@@ -389,6 +402,32 @@ const INSTRUMENTS = ["clock", "host", "processes", "uplink", "usage", "jira", "n
 type InstrumentId = (typeof INSTRUMENTS)[number];
 
 const ORDER_KEY = "rmux.widgetRail.order";
+const ENABLED_KEY = "rmux.widgetRail.enabled";
+
+/**
+ * Which instruments are switched on.
+ *
+ * Absent means *all of them* — the default is the full rail, and a first run
+ * must not open to an empty one. Reconciled against `INSTRUMENTS` like the
+ * order is, so a widget added later appears rather than being silently off for
+ * anyone who has ever touched this.
+ */
+function readEnabled(): Set<InstrumentId> {
+  let stored: unknown;
+  try {
+    stored = JSON.parse(localStorage.getItem(ENABLED_KEY) ?? "null");
+  } catch {
+    stored = null;
+  }
+  if (!Array.isArray(stored)) return new Set(INSTRUMENTS);
+
+  const known = new Set<string>(INSTRUMENTS);
+  const on = new Set<InstrumentId>();
+  for (const id of stored) {
+    if (typeof id === "string" && known.has(id)) on.add(id as InstrumentId);
+  }
+  return on;
+}
 
 function readOrder(): InstrumentId[] {
   let stored: unknown;
@@ -487,11 +526,25 @@ function Instrument({
 }
 
 /** The instruments, in the operator's own order. */
-function Instruments({ session }: { session: Session }) {
+function Instruments({ session, customising }: { session: Session; customising: boolean }) {
   const [order, setOrder] = useState<InstrumentId[]>(readOrder);
+  const [enabled, setEnabled] = useState<Set<InstrumentId>>(readEnabled);
+
   // Polled once here and shared, so HOST and TOP PROCESSES can be ordered
-  // independently without doubling the ssh traffic behind them.
-  const host = useHostSample(session.target);
+  // independently without doubling the ssh traffic behind them — and not polled
+  // at all when neither is on.
+  const host = useHostSample(session.target, enabled.has("host") || enabled.has("processes"));
+
+  const toggle = (id: InstrumentId) => {
+    const next = new Set(enabled);
+    if (!next.delete(id)) next.add(id);
+    setEnabled(next);
+    try {
+      localStorage.setItem(ENABLED_KEY, JSON.stringify([...next]));
+    } catch {
+      // A full localStorage costs the preference, not the app.
+    }
+  };
 
   const reorder = (next: InstrumentId[]) => {
     setOrder(next);
@@ -502,19 +555,75 @@ function Instruments({ session }: { session: Session }) {
     }
   };
 
+  if (customising) {
+    // A plain list of switches, in the rail's own order so the two views agree.
+    // Shown *instead of* the instruments rather than beside them: the rail is
+    // 216px wide and there is no room for both.
+    return (
+      <div className="flex flex-col gap-[2px] p-2">
+        <span className="micro pb-1">SHOW</span>
+        {order.map((id) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => toggle(id)}
+            aria-pressed={enabled.has(id)}
+            className="flex items-center gap-2 px-1 py-[4px] text-left"
+          >
+            {/* A filled square reads as on at 9px where a tick does not. */}
+            <span
+              aria-hidden="true"
+              style={{
+                width: 9,
+                height: 9,
+                flexShrink: 0,
+                border: "1px solid var(--border-strong)",
+                background: enabled.has(id) ? "rgb(var(--primary))" : "transparent",
+              }}
+            />
+            <span
+              className="micro truncate"
+              style={{ color: enabled.has(id) ? "var(--text)" : "var(--text-faint)" }}
+            >
+              {LABELS[id]}
+            </span>
+          </button>
+        ))}
+        <span className="micro pt-2" style={{ lineHeight: 1.5 }}>
+          SWITCHED OFF MEANS NOT RUNNING — NO POLLING, NO MEMORY
+        </span>
+      </div>
+    );
+  }
+
   return (
     <Reorder.Group axis="y" values={order} onReorder={reorder} className="flex flex-col">
-      {order.map((id) => (
+      {order.filter((id) => enabled.has(id)).map((id) => (
         <Instrument key={id} id={id} session={session} host={host} />
       ))}
     </Reorder.Group>
   );
 }
 
+/** Names for the switch list. The instruments carry their own headers. */
+const LABELS: Record<InstrumentId, string> = {
+  clock: "CLOCK",
+  host: "HOST",
+  processes: "TOP PROCESSES",
+  uplink: "UPLINK",
+  usage: "TOKEN SPEND",
+  jira: "JIRA",
+  note: "NOTE",
+  session: "SESSION",
+};
+
 export function WidgetRail({ session }: { session: Session | null }) {
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem(COLLAPSE_KEY) === "1",
   );
+  // Not persisted: this is a mode you are *in*, not a preference. Reopening the
+  // app into a settings list rather than the instruments would be a surprise.
+  const [customising, setCustomising] = useState(false);
   const waiting = useSessions((s) => s.sessions.filter((x) => x.status === "waiting").length);
 
   useEffect(() => {
@@ -532,7 +641,17 @@ export function WidgetRail({ session }: { session: Session | null }) {
         className="flex shrink-0 items-center justify-between border-b px-2 py-2"
         style={{ borderColor: "var(--border)" }}
       >
-        {!collapsed && <span className="micro">INSTRUMENTS</span>}
+        {!collapsed && (
+          <button
+            type="button"
+            className="micro"
+            onClick={() => setCustomising((c) => !c)}
+            title={customising ? "Back to the instruments" : "Choose which instruments run"}
+            style={{ color: customising ? "var(--text)" : undefined }}
+          >
+            {customising ? "DONE" : "INSTRUMENTS"}
+          </button>
+        )}
         <button
           type="button"
           className="micro"
@@ -559,7 +678,7 @@ export function WidgetRail({ session }: { session: Session | null }) {
       ) : (
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-2">
           {session ? (
-            <Instruments session={session} />
+            <Instruments session={session} customising={customising} />
           ) : (
             <span className="micro">no session selected</span>
           )}
