@@ -1,0 +1,126 @@
+# Building rmux for the platforms this Mac cannot build.
+#
+# ## Why this exists rather than a cross-compile
+#
+# The *agent* cross-compiles cleanly — it is a plain binary, and
+# `scripts/build-agents.sh` produces the Linux and Windows ones from macOS with
+# zig. The **app** cannot. Tauri links against each platform's own webview:
+# WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS. Those are native
+# system libraries with native toolchains, and no amount of zig makes a Mac
+# produce them. A build on the target OS is the only honest way to get one.
+#
+# ## The agents are built once, on macOS, and shared
+#
+# Every platform's app embeds the *same* Linux and Windows agent binaries — they
+# are what gets uploaded to a host, so they have nothing to do with which machine
+# the app runs on. Building them once and passing them along keeps every artifact
+# carrying byte-identical agents; building them per-runner would give three
+# fingerprints for one release, and a fingerprint is what decides whether a host
+# starts a new daemon.
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. rmux-v0.1.1)"
+        required: true
+  push:
+    tags: ["rmux-v*"]
+
+jobs:
+  agents:
+    name: cross-compile the agents
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install zig and cargo-zigbuild
+        run: |
+          brew install zig
+          cargo install cargo-zigbuild --locked
+      - run: ./scripts/build-agents.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agents
+          path: src-tauri/agents/
+          retention-days: 1
+
+  app:
+    name: ${{ matrix.name }}
+    needs: agents
+    strategy:
+      # One platform failing must not cancel the others: a Linux packaging
+      # problem should still leave a usable Windows build to hand out.
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+            args: --target aarch64-apple-darwin
+          - name: macOS (Intel)
+            os: macos-latest
+            args: --target x86_64-apple-darwin
+          - name: Windows
+            os: windows-latest
+            args: ""
+          - name: Linux
+            os: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # WebKitGTK and its friends. Ubuntu 22.04 rather than latest on purpose:
+      # a binary built against an older glibc runs on newer distributions, and
+      # the reverse is the "GLIBC_2.39 not found" that makes a release useless
+      # to exactly the servers most worth installing on.
+      - name: Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The same agents on every platform — see the note at the top.
+      - uses: actions/download-artifact@v4
+        with:
+          name: agents
+          path: src-tauri/agents
+
+      - name: Make the agents executable
+        if: matrix.os != 'windows-latest'
+        run: chmod +x src-tauri/agents/*
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing. Absent, the build still succeeds and produces an
+          # unsigned bundle — useful for a test run, not for handing to anyone.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: rmux ${{ github.event.inputs.tag || github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
