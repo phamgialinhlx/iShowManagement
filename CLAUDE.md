@@ -473,6 +473,22 @@ stopped working. These are not aspirations; each one is a rule with a test.
   item happens to be there, which is how someone deletes a file they meant to rename. The scale
   is *measured* (`rect.height / offsetHeight`) rather than assumed, because `getBoundingClientRect`
   is in viewport pixels while the `top` written is in the zoomed space — see the `zoom` rules.
+- **A resize is told to the far side once it settles, not on every observation.**
+  `ResizeObserver` fires continuously while a window is dragged, and both xterm hosts used to
+  refit *and* send the new dimensions on each callback — so a two-second drag told the far side
+  about forty widths. A TUI redraws completely on each one, and because Claude runs **inline**
+  rather than on the alternate screen, every one of those redraws stays in the scrollback: the
+  same question printed five times at five widths. Reported as "it look weird, have repeated
+  render". `lib/terminal-resize.ts` debounces only the *message*; the local `fit` still runs on
+  every callback so the grid stays attached to the pointer.
+- **Clicking a pane gives the keyboard back to its terminal.** The terminal was focused once, at
+  start; using any header control or clicking the padding around the rows moved focus away with
+  nothing to restore it. A keystroke then went wherever the browser thought focus was, and for
+  **Space** that means scrolling the nearest scrollable ancestor — xterm's own viewport, jumping
+  to the bottom. It bites hardest in the case that causes it: a window too small to show a
+  multiple-choice question, so you scroll up to read it and then cannot answer. `mousedown`
+  rather than `click`, so focus is back *before* the key is pressed, and interactive elements
+  are skipped or focusing would take it straight off the button being pressed.
 - **A terminal must re-fit on every signal, not only on its own resize.** `ResizeObserver`
   correctly bails on a zero-sized host — a hidden pane measures 0x0, and fitting to that tells
   the far side the window collapsed — but that leaves the pane holding whatever cell grid it

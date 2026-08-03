@@ -7,6 +7,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
 import { contextLimit, sniffWindow } from "../lib/context-window";
+import { settleResize } from "../lib/terminal-resize";
 import { useSessions } from "../lib/sessions";
 import { CLAUDE_THEME, gpuRendering } from "../lib/terminal-theme";
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
@@ -386,14 +387,23 @@ export function ClaudePanel({
       if (id) void invoke("claude_write", { id, data });
     });
 
+    // Fit locally on every callback so the grid tracks the window, but tell
+    // Claude only once the drag stops — see `settleResize` for what forty
+    // redraws during one drag does to an inline TUI.
+    const settle = settleResize(
+      () => fit.fit(),
+      () => {
+        if (id) void invoke("claude_resize", { id, cols: xterm.cols, rows: xterm.rows });
+      },
+    );
+
     const observer = new ResizeObserver(() => {
       if (host.clientWidth === 0 || host.clientHeight === 0) return;
       if (!id) {
         startClaude();
         return;
       }
-      fit.fit();
-      void invoke("claude_resize", { id, cols: xterm.cols, rows: xterm.rows });
+      settle.observe();
     });
     observer.observe(host);
 
@@ -426,6 +436,7 @@ export function ClaudePanel({
     return () => {
       disposed = true;
       observer.disconnect();
+      settle.dispose();
       window.removeEventListener("storage", onAppearance);
       window.removeEventListener("resize", refit);
       onData.dispose();
@@ -594,6 +605,24 @@ export function ClaudePanel({
         if (!images.length) return;
         e.preventDefault();
         void sendImages(images);
+      }}
+      // **Clicking the pane gives the keyboard back to Claude.**
+      //
+      // The terminal was focused once, at start. Use any control in the header —
+      // COPY, the mode toggle — or click the padding around the rows, and focus
+      // moved away with nothing to bring it back. From then on a keystroke went
+      // to whatever the browser considered focused, which for **Space** means
+      // scrolling the nearest scrollable ancestor: xterm's own viewport, jumping
+      // to the bottom. Reported as "space scrolls instead of ticking the box",
+      // and it is worst in exactly the situation that produces it — a window too
+      // small to show a multiple-choice question, so you scroll up to read it.
+      //
+      // `mousedown`, not `click`, so focus is restored before the key is pressed
+      // rather than after. Interactive controls are skipped: focusing the
+      // terminal on the way into a button would take focus straight back off it.
+      onMouseDown={(e) => {
+        if ((e.target as HTMLElement).closest("button, a, input, textarea, select")) return;
+        xtermRef.current?.focus();
       }}
     >
       <header

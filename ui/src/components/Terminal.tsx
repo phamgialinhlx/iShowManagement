@@ -6,6 +6,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import "@xterm/xterm/css/xterm.css";
 
 import { isTauri, type TargetRef } from "../lib/api";
+import { settleResize } from "../lib/terminal-resize";
 import { attachClipboard } from "../lib/terminal-clipboard";
 import { TERMINAL_THEME, gpuRendering } from "../lib/terminal-theme";
 import { PanelLoader } from "./PanelLoader";
@@ -55,6 +56,8 @@ export function TerminalView({
   onExit?: (code: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  /** Kept so a click anywhere in the pane can hand the keyboard back. */
+  const termRef = useRef<Xterm | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // Same reason as the Claude pane: an empty black rectangle reads as a crash.
@@ -95,6 +98,7 @@ export function TerminalView({
       macOptionIsMeta: true,
     });
 
+    termRef.current = xterm;
     const fit = new FitAddon();
     xterm.loadAddon(fit);
     xterm.open(host);
@@ -210,6 +214,17 @@ export function TerminalView({
       if (terminalId) void invoke("terminal_write", { id: terminalId, data });
     });
 
+    // Same settling as the Claude pane: the local grid follows the window on
+    // every callback, the far side hears about it once.
+    const settle = settleResize(
+      () => fit.fit(),
+      () => {
+        if (terminalId) {
+          void invoke("terminal_resize", { id: terminalId, cols: xterm.cols, rows: xterm.rows });
+        }
+      },
+    );
+
     const observer = new ResizeObserver(() => {
       // A hidden pane measures 0x0; fitting to that would tell the far side the
       // window collapsed and make full-screen programs redraw at 1x1.
@@ -219,8 +234,7 @@ export function TerminalView({
         bind();
         return;
       }
-      fit.fit();
-      void invoke("terminal_resize", { id: terminalId, cols: xterm.cols, rows: xterm.rows });
+      settle.observe();
     });
     observer.observe(host);
 
@@ -256,9 +270,11 @@ export function TerminalView({
     return () => {
       disposed = true;
       observer.disconnect();
+      settle.dispose();
       window.removeEventListener("storage", onAppearance);
       window.removeEventListener("resize", refit);
       onData.dispose();
+      termRef.current = null;
       xterm.dispose();
       // The PTY is deliberately left running. This view may be remounting, and
       // killing the shell here is what made the terminal flash and reset. It is
@@ -268,7 +284,16 @@ export function TerminalView({
   }, []);
 
   return (
-    <div className="relative h-full w-full">
+    <div
+      className="relative h-full w-full"
+      // Same reason as the Claude pane: focus lost to a control elsewhere never
+      // came back, and Space then scrolls xterm's viewport instead of reaching
+      // the shell.
+      onMouseDown={(e) => {
+        if ((e.target as HTMLElement).closest("button, a, input, textarea, select")) return;
+        termRef.current?.focus();
+      }}
+    >
       <div ref={hostRef} className="h-full w-full" />
 
       {!ready && !error && (
