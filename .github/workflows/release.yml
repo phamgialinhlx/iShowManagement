@@ -56,12 +56,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macOS (Apple Silicon)
-            os: macos-latest
-            args: --target aarch64-apple-darwin
-          - name: macOS (Intel)
-            os: macos-latest
-            args: --target x86_64-apple-darwin
+          # macOS is deliberately absent. It is built, signed and notarised on
+          # the developer's Mac by `scripts/release-mac.sh`, which has the
+          # Developer ID certificate; CI does not, and `tauri-action` fails
+          # trying to import one rather than falling back to unsigned — which is
+          # exactly what killed both macOS jobs on the first run. An unsigned
+          # macOS build would not be usable by anyone anyway.
           - name: Windows
             os: windows-latest
             args: ""
@@ -84,8 +84,6 @@ jobs:
             librsvg2-dev patchelf libssl-dev
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       # No `version:` here — `package.json` already pins pnpm through
       # `packageManager`, and the action refuses when both are set rather than
@@ -112,14 +110,6 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing. Absent, the build still succeeds and produces an
-          # unsigned bundle — useful for a test run, not for handing to anyone.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: rmux ${{ github.event.inputs.tag || github.ref_name }}

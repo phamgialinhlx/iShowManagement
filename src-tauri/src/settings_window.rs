@@ -37,7 +37,7 @@ pub async fn open_settings(app: AppHandle) -> Result<(), String> {
     // The label is put in the query string so the UI can branch on it
     // *synchronously*, before the first render. Asking Tauri for the label is
     // async, and awaiting it would flash the workbench inside this window.
-    WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App(WINDOW_URL.into()))
+    let builder = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App(WINDOW_URL.into()))
         .title("rmux — settings")
         .inner_size(720.0, 620.0)
         .min_inner_size(560.0, 460.0)
@@ -55,9 +55,16 @@ pub async fn open_settings(app: AppHandle) -> Result<(), String> {
             radius: None,
             color: None,
         })
-        .decorations(true)
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
+        .decorations(true);
+
+    // `title_bar_style` and `hidden_title` are macOS-only on `WebviewWindowBuilder`
+    // — not merely no-ops elsewhere, they do not exist, so calling them
+    // unconditionally fails to *compile* for Linux and Windows. That is what
+    // kept the first CI run from producing anything on either.
+    #[cfg(target_os = "macos")]
+    let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+
+    builder
         .build()
         .map_err(|e| format!("could not open settings: {e}"))?;
 

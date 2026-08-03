@@ -25,6 +25,20 @@
 //! `0600` file to say anything at all.
 
 pub mod protocol;
+// **Unix only, and stubbed rather than half-ported on Windows.**
+//
+// The control socket is a Unix domain socket in a `0700` directory with a
+// `0600` mode — the permissions *are* the security model, and Windows has no
+// equivalent of either. A named pipe can be secured, but with a different API
+// and a different set of mistakes to make, and nothing in the workbench needs
+// this socket: it exists so a separate browser app can drive rmux. Compiling it
+// out keeps Windows building today and leaves the port an explicit piece of
+// work rather than an accidental one.
+#[cfg(unix)]
+pub mod server;
+
+#[cfg(not(unix))]
+#[path = "server_stub.rs"]
 pub mod server;
 
 pub use protocol::{
