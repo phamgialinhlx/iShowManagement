@@ -324,6 +324,15 @@ export type SearchHit = { path: string; line: number; text: string };
 
 export type LogStatus = { path: string; bytes: number; hasPrevious: boolean };
 
+/**
+ * Where a downloaded file landed, and how big it turned out.
+ *
+ * The size is reported rather than assumed: a download that quietly produced a
+ * zero-byte file looks exactly like one that worked, and the operator has no
+ * other way to tell until they open it.
+ */
+export type Downloaded = { path: string; bytes: number };
+
 /** One environment variable of a model profile, as the UI is allowed to see it. */
 export type ProfileVar = {
   key: string;
@@ -542,6 +551,19 @@ export const api = {
    */
   fsUpload: (target: TargetRef, path: string, base64: string) =>
     call<void>("fs_upload", { target, path, base64 }),
+
+  /**
+   * Copy a file off the target into this machine's downloads folder.
+   *
+   * **The bytes never enter the webview.** Unlike `fsUpload`, which has to carry
+   * its payload as a base64 string because the file was chosen in a page, a
+   * download already knows both ends — so Rust reads it and writes it, and the
+   * UI is handed back only where it landed and how big it was. A 200MB log would
+   * otherwise be built, copied and parsed as one JavaScript string on the way to
+   * a disk it never needed to bounce off.
+   */
+  fsDownload: (target: TargetRef, path: string) =>
+    call<Downloaded>("fs_download", { target, path }),
 
   /**
    * Saved model configurations — Kimi, GLM, a gateway, a reseller.

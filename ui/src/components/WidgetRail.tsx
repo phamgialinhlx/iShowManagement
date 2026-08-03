@@ -644,17 +644,38 @@ export function WidgetRail({ session }: { session: Session | null }) {
         {!collapsed && (
           <button
             type="button"
-            className="micro"
+            className="chip"
+            aria-pressed={customising}
             onClick={() => setCustomising((c) => !c)}
-            title={customising ? "Back to the instruments" : "Choose which instruments run"}
-            style={{ color: customising ? "var(--text)" : undefined }}
+            title={
+              customising
+                ? "Back to the instruments"
+                : "Choose which instruments run. A widget switched off is unmounted, not hidden — it stops using memory."
+            }
           >
+            {/* Sliders, because the label alone was the problem. Deliberately
+                coarse: at 10px anything finer than three strokes is mush, and a
+                mark nobody can resolve is decoration. Square caps, 2px, per the
+                icon rule. */}
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="square"
+              aria-hidden="true"
+            >
+              <path d="M3 7h18M3 17h18" />
+              <path d="M9 4v6M16 14v6" />
+            </svg>
             {customising ? "DONE" : "INSTRUMENTS"}
           </button>
         )}
         <button
           type="button"
-          className="micro"
+          className="chip"
           onClick={() => setCollapsed((c) => !c)}
           title={collapsed ? "Expand instruments" : "Collapse instruments"}
           aria-label={collapsed ? "Expand instruments" : "Collapse instruments"}

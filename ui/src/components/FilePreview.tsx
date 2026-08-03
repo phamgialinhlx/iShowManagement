@@ -370,23 +370,24 @@ function SheetsPreview({ sheets }: { sheets: Sheet[] }) {
     <div className="flex h-full flex-col">
       {sheets.length > 1 && (
         <div
-          className="flex shrink-0 gap-1 overflow-x-auto border-b px-2 py-1"
+          className="flex shrink-0 overflow-x-auto border-b px-2 py-1"
           style={{ borderColor: "var(--border)" }}
         >
+          {/* A sheet picker is a segmented control: one frame, one chosen. Bare
+              captions with the active one shaded read as a caption row. */}
+          <div className="seg shrink-0">
           {sheets.map((s, i) => (
             <button
               key={`${s.name}-${i}`}
               type="button"
-              className="micro shrink-0 px-2 py-[2px]"
+              className="shrink-0"
+              aria-pressed={i === active}
               onClick={() => setActive(i)}
-              style={{
-                color: i === active ? "var(--text)" : "var(--text-faint)",
-                background: i === active ? "var(--hover)" : "transparent",
-              }}
             >
               {s.name}
             </button>
           ))}
+          </div>
         </div>
       )}
 

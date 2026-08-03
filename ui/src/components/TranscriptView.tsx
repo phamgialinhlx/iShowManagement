@@ -249,7 +249,7 @@ export function TranscriptView({ session }: { session: Session }) {
 
         <button
           type="button"
-          className="micro"
+          className="chip"
           onClick={() => setShowSystem((s) => !s)}
           style={{ color: showSystem ? "var(--text)" : "var(--text-faint)" }}
         >
@@ -260,7 +260,7 @@ export function TranscriptView({ session }: { session: Session }) {
           {more && (
             <button
               type="button"
-              className="micro"
+              className="chip"
               disabled={loading}
               onClick={() => setTail((t) => t * 2)}
               style={{ color: loading ? "var(--text-faint)" : "var(--text)" }}
@@ -268,7 +268,7 @@ export function TranscriptView({ session }: { session: Session }) {
               {loading ? "loading…" : "load more"}
             </button>
           )}
-          <button type="button" className="micro" onClick={() => void copyAll()}>
+          <button type="button" className="chip" onClick={() => void copyAll()}>
             {copied ? "copied" : "copy all"}
           </button>
         </div>

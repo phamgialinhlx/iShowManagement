@@ -99,16 +99,12 @@ function Processes({ target }: { target: TargetRef }) {
           style={{ border: "1px solid var(--border)", color: "var(--text)", background: "transparent", width: 200 }}
           onChange={(e) => setFilter(e.target.value)}
         />
-        <div className="ml-auto flex items-center gap-1">
+        <div className="seg ml-auto">
           {(["cpu", "memory"] as const).map((k) => (
             <button
               key={k}
               type="button"
-              className="micro px-2 py-[3px]"
-              style={{
-                background: by === k ? "var(--hover)" : "transparent",
-                color: by === k ? "var(--text)" : "var(--text-soft)",
-              }}
+              aria-pressed={by === k}
               onClick={() => setBy(k)}
             >
               {k.toUpperCase()}
@@ -158,7 +154,7 @@ function Processes({ target }: { target: TargetRef }) {
                     appears: the operator is about to end something. */}
                 <button
                   type="button"
-                  className="micro"
+                  className="chip"
                   disabled={busy !== null}
                   style={{ color: "rgb(var(--primary))" }}
                   onClick={() => void signal(p.pid, false)}
@@ -167,7 +163,7 @@ function Processes({ target }: { target: TargetRef }) {
                 </button>
                 <button
                   type="button"
-                  className="micro"
+                  className="chip"
                   disabled={busy !== null}
                   style={{ color: "rgb(var(--primary))" }}
                   title="No chance to flush or clean up. Use TERM unless it has stopped responding."
@@ -175,14 +171,14 @@ function Processes({ target }: { target: TargetRef }) {
                 >
                   KILL
                 </button>
-                <button type="button" className="micro" onClick={() => setConfirming(null)}>
+                <button type="button" className="chip" onClick={() => setConfirming(null)}>
                   CANCEL
                 </button>
               </span>
             ) : (
               <button
                 type="button"
-                className="micro shrink-0"
+                className="chip shrink-0"
                 style={{ color: "var(--text-faint)" }}
                 onClick={() => setConfirming(p.pid)}
               >
@@ -297,7 +293,7 @@ function Ports({ target }: { target: TargetRef }) {
 
         <button
           type="button"
-          className="micro w-[72px] shrink-0 text-right"
+          className="chip w-[72px] shrink-0 text-right"
           disabled={busy === port || local}
           style={{ color: on ? "var(--text)" : "var(--text-faint)" }}
           onClick={() => void toggle(port)}
@@ -323,7 +319,7 @@ function Ports({ target }: { target: TargetRef }) {
         {!local && (
           <button
             type="button"
-            className="micro ml-auto"
+            className="chip ml-auto"
             onClick={() =>
               void api
                 .portProxy(target)

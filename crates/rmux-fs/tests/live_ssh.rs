@@ -349,3 +349,67 @@ async fn compare_encodings(
     let _ = remote.delete(&binary_path).await;
     result
 }
+
+/// Downloading a real file off a real host, including the parts a unit test
+/// cannot reach.
+///
+/// Three things are being proved, and only a live host proves any of them:
+///
+/// 1. **Binary survives.** `Output::stdout` is a `String`, so anything that is
+///    not valid UTF-8 is corrupted by simply crossing `exec`. The fixture is
+///    deliberately invalid UTF-8 with an embedded NUL — the bytes that a
+///    lossy conversion silently replaces.
+/// 2. **The windowing lines up.** The fixture is larger than one chunk, so a
+///    wrong offset or a wrong `head -c` shows as a mismatch rather than as a
+///    file that happens to look right.
+/// 3. **A collision does not clobber.** Downloading twice must produce two
+///    files, never one overwritten one.
+#[tokio::test]
+#[ignore = "needs a real SSH host; set RMUX_LIVE_HOST"]
+async fn a_real_file_downloads_byte_for_byte() {
+    let Some(host) = live_host() else {
+        eprintln!("skipping: set RMUX_LIVE_HOST to a host from your ~/.ssh/config");
+        return;
+    };
+
+    let fs = TargetFs::new(SshTarget::new(SshHostId::new(&host)));
+    let home = fs.home_dir().await.expect("home_dir");
+    let root = format!("{home}/rmux-download-test");
+    let _ = fs.delete(&root).await;
+    fs.create_dir(&root).await.expect("create_dir");
+
+    // Bigger than one 8 MiB window, so the chunk loop is genuinely exercised,
+    // and hostile to UTF-8 so a lossy conversion cannot hide.
+    let mut payload = Vec::with_capacity(9 * 1024 * 1024);
+    while payload.len() < 9 * 1024 * 1024 {
+        payload.extend_from_slice(&[0x00, 0xff, 0xfe, 0x80, b'r', b'm', b'u', b'x']);
+    }
+
+    let remote = format!("{root}/blob.bin");
+    fs.upload(&remote, &payload).await.expect("upload");
+
+    let dir = std::env::temp_dir().join("rmux-download-check");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let dest = dir.join("blob.bin");
+
+    let written = fs.download(&remote, &dest).await.expect("download");
+    let got = std::fs::read(&dest).expect("read back");
+
+    let outcome = (|| {
+        anyhow::ensure!(written == payload.len() as u64, "reported {written} bytes");
+        anyhow::ensure!(got.len() == payload.len(), "got {} bytes", got.len());
+        anyhow::ensure!(got == payload, "the bytes differ — binary did not survive");
+        Ok(())
+    })();
+
+    // The second download must not overwrite the first.
+    let clobber = fs.download(&remote, &dest).await;
+
+    let _ = fs.delete(&root).await;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    outcome.expect("download mismatch");
+    assert!(clobber.is_err(), "downloading onto an existing file must refuse, not overwrite");
+    eprintln!("downloaded {written} bytes intact across {} windows", written.div_ceil(8 * 1024 * 1024));
+}

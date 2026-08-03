@@ -245,11 +245,11 @@ export function LockScreen({
 
         <div className="flex items-center justify-between gap-2">
           {status.face && phase === "pin" ? (
-            <button type="button" className="micro" onClick={() => setPhase("scanning")}>
+            <button type="button" className="chip" onClick={() => setPhase("scanning")}>
               use my face
             </button>
           ) : status.face ? (
-            <button type="button" className="micro" onClick={toPin}>
+            <button type="button" className="chip" onClick={toPin}>
               use my PIN
             </button>
           ) : (
@@ -261,7 +261,7 @@ export function LockScreen({
               asks for the server and a full sign-in. */}
           <button
             type="button"
-            className="micro"
+            className="chip"
             style={{ color: "var(--text-faint)" }}
             onClick={onSignOut}
           >

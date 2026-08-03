@@ -375,7 +375,7 @@ export function FileTree({
         <span className="micro truncate" title={root ?? undefined}>
           {root ?? "…"}
         </span>
-        <button type="button" className="micro" onClick={refresh} style={{ color: "var(--text-soft)" }}>
+        <button type="button" className="chip" onClick={refresh} style={{ color: "var(--text-soft)" }}>
           refresh
         </button>
       </header>

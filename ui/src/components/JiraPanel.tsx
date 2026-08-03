@@ -106,7 +106,7 @@ export function JiraPanel({ session }: { session: Session }) {
         <span className="micro ml-auto" style={{ color: "var(--text-faint)" }}>
           ASSIGNED TO YOU
         </span>
-        <button type="button" className="micro" onClick={() => void reload()}>
+        <button type="button" className="chip" onClick={() => void reload()}>
           REFRESH
         </button>
       </header>
@@ -282,7 +282,7 @@ function IssueRow({ issue, onChanged }: { issue: JiraIssue; onChanged: () => voi
             {issue.url && (
               <button
                 type="button"
-                className="micro ml-auto"
+                className="chip ml-auto"
                 onClick={() => void api.openExternal(issue.url!)}
               >
                 OPEN IN JIRA

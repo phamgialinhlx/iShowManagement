@@ -10,6 +10,10 @@ rmux-transport.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
+# Downloads decode here rather than in the webview. `Output::stdout` is a
+# `String`, so bytes off a target have already been through UTF-8 — base64 is
+# what carries a binary file across intact.
+base64.workspace = true
 dirs.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -17,9 +21,6 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-# Only the live test needs it — to compare what a real host received against
-# what was sent, byte for byte.
-base64.workspace = true
 rmux-ssh.workspace = true
 rmux-metrics.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

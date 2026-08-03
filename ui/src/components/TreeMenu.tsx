@@ -74,6 +74,9 @@ export function TreeMenu({
   const fileInput = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState<string | null>(null);
   const [uploaded, setUploaded] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  /** The folder it landed in, once it has — reported in the label. */
+  const [downloaded, setDownloaded] = useState<string | null>(null);
 
   const upload = async (files: File[]) => {
     if (!files.length) return;
@@ -108,6 +111,32 @@ export function TreeMenu({
       setTimeout(onClose, 900);
     } catch (e) {
       setError(e instanceof Error ? e.message : "could not write to the clipboard");
+    }
+  };
+
+  /**
+   * Take a copy of this file onto this machine.
+   *
+   * Nothing on the host changes, so unlike the mutating items this does not
+   * refresh the tree or close the menu — it reports where the file went and
+   * leaves that on screen to be read. Closing instantly would throw away the
+   * one piece of information the operator needs.
+   */
+  const download = async () => {
+    setDownloading(true);
+    setError(null);
+    try {
+      const result = await api.fsDownload(target, menu.path);
+      // The folder, not the whole path: the menu is 240px wide and the leaf name
+      // is already the thing they right-clicked.
+      const folder = result.path.slice(0, Math.max(0, result.path.lastIndexOf("/")));
+      setDownloaded(folder.split("/").pop() || folder || "downloads");
+    } catch (e) {
+      // Persists until the next attempt. A download that failed silently is
+      // indistinguishable from one that worked until the file is looked for.
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -336,6 +365,32 @@ export function TreeMenu({
             label={copied === "relative" ? "Copied relative path" : "Copy relative path"}
             onClick={() => void copy(relative(menu.path, root), "relative")}
           />
+
+          {/* The reverse of Upload, and it sits with the copy actions rather
+              than the destructive ones because that is what it is: taking a
+              copy of something, changing nothing on the host.
+
+              **It reports the landing place in the label.** There is no save
+              dialog — rmux has no dialog plugin, and Tauri rejects an ungranted
+              plugin command *silently*, which is a failure this app has been
+              bitten by before. So the file goes where the log export goes, to a
+              folder a person can find, and the menu says where. "Check your
+              downloads" is not an answer when the folder holds two hundred
+              things. */}
+          {!menu.isDirectory && (
+            <MenuItem
+              label={
+                downloading
+                  ? "Downloading…"
+                  : downloaded
+                    ? `Saved to ${downloaded}`
+                    : "Download a copy"
+              }
+              hint={downloading || downloaded ? undefined : "to this machine"}
+              disabled={downloading}
+              onClick={() => void download()}
+            />
+          )}
 
           <hr className="hairline my-1" />
           <MenuItem

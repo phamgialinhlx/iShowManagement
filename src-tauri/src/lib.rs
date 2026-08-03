@@ -157,6 +157,7 @@ pub fn run() {
             files::fs_rename,
             files::fs_delete,
             files::fs_upload,
+            files::fs_download,
             model_profile::model_profiles,
             model_profile::model_profile_parse,
             model_profile::model_profile_save,

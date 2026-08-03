@@ -86,7 +86,7 @@ export function DiagnosticsPanel() {
         {status && (
           <button
             type="button"
-            className="micro truncate text-left"
+            className="link truncate text-left"
             title={`${status.path} — click to copy`}
             onClick={() => void copyPath(status.path)}
             style={{ color: "var(--text-faint)" }}

@@ -128,7 +128,7 @@ export function BackgroundPicker({
                 {image && !busy && (
                   <button
                     type="button"
-                    className="micro"
+                    className="chip"
                     onClick={() => {
                       void api.backgroundClear().catch(() => {});
                       onChange({ backgroundImage: undefined, background: "color" });

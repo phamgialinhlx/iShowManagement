@@ -156,7 +156,7 @@ export function Workbench({
             {waiting.length > 0 && (
               <button
                 type="button"
-                className="micro"
+                className="chip"
                 style={{ color: "rgb(var(--primary))" }}
                 onClick={() => activate(waiting[0]!.id)}
                 title="Go to the session waiting on you"
@@ -202,7 +202,7 @@ export function Workbench({
                 are decisions you visit and leave, not things to watch. */}
             <button
               type="button"
-              className="micro"
+              className="chip"
               style={{ color: "var(--text-faint)" }}
               onClick={() => void api.openSettings()}
               title="Accounts, the app lock, and your Claude credential"
@@ -211,7 +211,7 @@ export function Workbench({
             </button>
             <button
               type="button"
-              className="micro"
+              className="chip"
               style={{ color: session ? "var(--text-faint)" : "var(--text)" }}
               onClick={() => {
                 if (!session) {

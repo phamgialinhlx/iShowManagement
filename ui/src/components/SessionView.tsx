@@ -265,6 +265,9 @@ function FileBody({ session, buffer }: { session: Session; buffer: Buffer }) {
           className="flex shrink-0 items-center gap-1 border-b px-2 py-1"
           style={{ borderColor: "var(--border)" }}
         >
+          {/* One frame round the pair — see `.seg`. Styling only the winner
+              left two bare captions with one of them shaded. */}
+          <div className="seg">
           {(["preview", "source"] as const).map((mode) => {
             const isSource = mode === "source";
             if (isSource && kind !== "markdown") return null;
@@ -272,17 +275,14 @@ function FileBody({ session, buffer }: { session: Session; buffer: Buffer }) {
               <button
                 key={mode}
                 type="button"
-                className="micro px-2 py-[2px]"
+                aria-pressed={showSource === isSource}
                 onClick={() => setShowSource(isSource)}
-                style={{
-                  color: showSource === isSource ? "var(--text)" : "var(--text-faint)",
-                  background: showSource === isSource ? "var(--hover)" : "transparent",
-                }}
               >
                 {mode}
               </button>
             );
           })}
+          </div>
           <span className="micro ml-auto">{kind}</span>
         </div>
       )}
@@ -386,7 +386,7 @@ function TerminalsView({ session }: { session: Session }) {
             </button>
           ),
         )}
-        <button type="button" className="micro ml-auto px-2" onClick={() => add(session.id)}>
+        <button type="button" className="chip ml-auto" onClick={() => add(session.id)}>
           + new
         </button>
       </div>

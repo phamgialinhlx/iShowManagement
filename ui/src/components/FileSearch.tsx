@@ -98,7 +98,7 @@ export function FileSearch({
             if (e.key === "Escape") onClose();
           }}
         />
-        <button type="button" className="micro" onClick={onClose} title="Escape">
+        <button type="button" className="chip" onClick={onClose} title="Escape">
           CLOSE
         </button>
       </div>

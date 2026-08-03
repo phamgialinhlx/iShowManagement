@@ -141,7 +141,7 @@ export function SignIn({
           <span className="kicker">
             {step.kind === "server" ? "CONNECT" : (step.config.orgName ?? "SIGN IN")}
           </span>
-          <button type="button" className="micro" onClick={onClose}>
+          <button type="button" className="chip" onClick={onClose}>
             close
           </button>
         </header>
@@ -235,7 +235,7 @@ export function SignIn({
 
             <button
               type="button"
-              className="micro"
+              className="chip"
               onClick={() => setStep({ kind: "server" })}
             >
               use a different server
@@ -257,7 +257,7 @@ export function SignIn({
             </div>
             <button
               type="button"
-              className="micro"
+              className="chip"
               onClick={() => void api.openExternal(step.url)}
             >
               reopen the browser link

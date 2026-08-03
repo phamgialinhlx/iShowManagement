@@ -92,6 +92,17 @@ pub trait FileSystem: Send + Sync {
     /// rather than typed, and a silent overwrite is the likely accident.
     async fn upload(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()>;
 
+    /// Copy a file off the target and onto this machine.
+    ///
+    /// Returns the number of bytes written, which the caller reports — a
+    /// download that silently produced a 0-byte file would look identical to one
+    /// that worked.
+    ///
+    /// `dest` must not already exist. Refusing to clobber rather than
+    /// overwriting is the same rule create and rename follow: the name here is
+    /// chosen by the *file*, not typed, so a collision is the likely accident.
+    async fn download(&self, path: &str, dest: &std::path::Path) -> anyhow::Result<u64>;
+
     /// Rename or move. Fails if the destination exists.
     async fn rename(&self, from: &str, to: &str) -> anyhow::Result<()>;
     /// Delete a file or a directory tree.
@@ -145,6 +156,13 @@ impl<T: Target> TargetFs<T> {
         self.run(script).await
     }
 }
+
+/// How much of a file crosses the wire at a time when downloading.
+///
+/// Big enough that an ordinary file is one round trip, small enough that peak
+/// memory is bounded by this rather than by the file — the payload is resident
+/// twice at this size, encoded and decoded.
+const DOWNLOAD_CHUNK: u64 = 8 * 1024 * 1024;
 
 #[async_trait]
 impl<T: Target> FileSystem for TargetFs<T> {
@@ -201,12 +219,61 @@ impl<T: Target> FileSystem for TargetFs<T> {
 
         let out = self.target.exec_with_input(&spec, bytes).await?;
         anyhow::ensure!(out.stdout.trim_end() != "X", "{path} already exists");
+        // (see `download` below for the reverse direction)
         anyhow::ensure!(
             out.status == 0 && out.stdout.trim_end() == "O",
             "failed to upload {path}: {}",
             out.stderr.trim()
         );
         Ok(())
+    }
+
+    /// Windowed, so peak memory is one chunk rather than the whole file — see
+    /// [`protocol::read_chunk_base64_script`] for why a download cannot just
+    /// stream raw bytes.
+    async fn download(&self, path: &str, dest: &std::path::Path) -> anyhow::Result<u64> {
+        use std::io::Write as _;
+
+        let size = match protocol::parse_size(&self.run(&protocol::file_size_script(path)).await?)? {
+            protocol::SizeOutcome::Size(n) => n,
+            protocol::SizeOutcome::Missing => anyhow::bail!("{path} does not exist"),
+            protocol::SizeOutcome::PermissionDenied => anyhow::bail!("not allowed to read {path}"),
+            // Said as its own case: "is a folder" and "failed" deserve different
+            // answers, and the operator right-clicked something they can see.
+            protocol::SizeOutcome::IsDirectory => {
+                anyhow::bail!("{path} is a folder — download works on one file at a time")
+            }
+        };
+
+        // `create_new`, for the reason the trait states: refuse, never clobber.
+        let mut file = std::fs::File::options().write(true).create_new(true).open(dest)?;
+
+        let mut written = 0u64;
+        while written < size {
+            let len = DOWNLOAD_CHUNK.min(size - written);
+            let out = self.run(&protocol::read_chunk_base64_script(path, written, len)).await?;
+            let encoded: String =
+                String::from_utf8_lossy(&out).chars().filter(|c| !c.is_whitespace()).collect();
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                encoded.as_bytes(),
+            )?;
+
+            // A short read is an error, never a shorter file. Without this a
+            // connection dropped mid-transfer writes a truncated file that looks
+            // complete — the same failure the length-framed reads exist to stop.
+            anyhow::ensure!(
+                bytes.len() as u64 == len,
+                "short read from {path}: wanted {len} bytes at offset {written}, got {}",
+                bytes.len()
+            );
+
+            file.write_all(&bytes)?;
+            written += len;
+        }
+
+        file.flush()?;
+        Ok(written)
     }
 
     async fn rename(&self, from: &str, to: &str) -> anyhow::Result<()> {
@@ -323,6 +390,22 @@ impl FileSystem for LocalFs {
                 _ => e.into(),
             })?;
         Ok(())
+    }
+
+    /// A copy. There is no protocol here and no chunking, because there is no
+    /// wire — which is the whole point of the seam: the *feature* asks for a
+    /// download and never learns which of these ran.
+    async fn download(&self, path: &str, dest: &std::path::Path) -> anyhow::Result<u64> {
+        let meta = tokio::fs::metadata(path).await?;
+        anyhow::ensure!(!meta.is_dir(), "{path} is a folder — download works on one file at a time");
+        // Refuse rather than clobber, exactly as the remote path does. `copy`
+        // would happily overwrite, so the refusal has to be made here.
+        anyhow::ensure!(
+            tokio::fs::try_exists(dest).await.map(|e| !e).unwrap_or(true),
+            "{} already exists",
+            dest.display()
+        );
+        Ok(tokio::fs::copy(path, dest).await?)
     }
 
     async fn upload(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()> {

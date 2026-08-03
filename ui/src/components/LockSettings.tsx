@@ -158,7 +158,7 @@ export function LockSettings({
       >
         <header className="flex items-baseline justify-between">
           <span className="kicker">LOCK RMUX</span>
-          <button type="button" className="micro" onClick={onClose}>
+          <button type="button" className="chip" onClick={onClose}>
             close
           </button>
         </header>

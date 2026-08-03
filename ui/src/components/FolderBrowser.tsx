@@ -149,10 +149,9 @@ export function FolderBrowser({
       <div className="flex items-center gap-3">
         <button
           type="button"
-          className="micro"
+          className="chip"
           onClick={() => void goUp()}
           disabled={loading}
-          style={{ border: "1px solid var(--border)", padding: "2px 8px" }}
         >
           ↑ up
         </button>
@@ -160,14 +159,9 @@ export function FolderBrowser({
             one control — "up hidden" rather than two separate actions. */}
         <button
           type="button"
-          className="micro"
+          className="chip"
+          aria-pressed={showHidden}
           onClick={() => setShowHidden((v) => !v)}
-          style={{
-            border: "1px solid var(--border)",
-            padding: "2px 8px",
-            color: showHidden ? "var(--text)" : "var(--text-faint)",
-            background: showHidden ? "var(--hover)" : "transparent",
-          }}
         >
           {showHidden ? "hiding nothing" : "show hidden"}
         </button>

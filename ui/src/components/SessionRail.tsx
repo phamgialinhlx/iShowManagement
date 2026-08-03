@@ -8,6 +8,7 @@ import {
   readCollapsedGroups,
   writeCollapsedGroups,
   inheritedProfile,
+  nextNameIn,
   type SessionGroup,
 } from "../lib/session-groups";
 
@@ -230,13 +231,13 @@ function Row({
           <div className="flex gap-2">
           <button
             type="button"
-            className="micro"
+            className="chip"
             style={{ color: "rgb(var(--primary))" }}
             onClick={() => onClose()}
           >
             close it
           </button>
-          <button type="button" className="micro" onClick={() => setConfirming(false)}>
+          <button type="button" className="chip" onClick={() => setConfirming(false)}>
             cancel
           </button>
           </div>
@@ -435,7 +436,7 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
       const id = await addSession(
         group.sessions[0]?.target ?? { host: group.host },
         group.folder,
-        undefined,
+        nextNameIn(group),
         undefined,
         undefined,
         inheritedProfile(group.sessions),
@@ -495,7 +496,7 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
         )}
         <button
           type="button"
-          className="micro"
+          className="chip"
           onClick={toggle}
           title={collapsed ? "Expand sessions" : "Collapse sessions"}
           style={{ marginLeft: collapsed ? "auto" : 0, marginRight: collapsed ? "auto" : 0 }}
@@ -515,12 +516,10 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
           <span className="micro" style={{ color: "var(--text)" }}>
             PICK A SESSION FOR CELL {focusedCell + 1}
           </span>
-          <button
-            type="button"
-            className="micro ml-auto"
-            style={{ color: "var(--text-faint)" }}
-            onClick={() => focusCell(null)}
-          >
+          {/* `.chip`, not a bare `.micro`: this sits beside a `.micro` *heading*
+              saying which cell is being filled, and at 9px the two were the same
+              mark. The way out of a mode has to look like a way out. */}
+          <button type="button" className="chip ml-auto" onClick={() => focusCell(null)}>
             CANCEL
           </button>
         </div>
@@ -580,6 +579,12 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
                           collapsed={false}
                           showWhere={false}
                           onSelect={() => {
+                            // **In grid mode with a cell selected, this fills
+                            // that cell.** Which is the only interaction that
+                            // answers "I have eight sessions and four cells":
+                            // pick the pane, then pick what goes in it. Without
+                            // a cell selected it activates as usual, so the rail
+                            // keeps working exactly as before in focus mode.
                             if (grid >= 2 && focusedCell !== null)
                               assignSlot(focusedCell, session.id);
                             activate(session.id);
@@ -591,38 +596,6 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
                 </AnimatePresence>
               </div>
             ))}
-
-        <AnimatePresence initial={false}>
-          {[].map((session: Session) => (
-            <motion.div
-              key={session.id}
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: "auto" }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={{ duration: 0.18, ease: [0.2, 0.9, 0.3, 1] }}
-            >
-              <Row
-                session={session}
-                active={session.id === active}
-                onScreen={onScreen.has(session.id)}
-                collapsed={collapsed}
-                showWhere
-                onSelect={() => {
-                  // **In grid mode with a cell selected, this fills that cell.**
-                  // Which is the only interaction that answers "I have eight
-                  // sessions and four cells": pick the pane, then pick what
-                  // goes in it. Without a cell selected it activates as usual,
-                  // so the rail keeps working exactly as before in focus mode.
-                  if (grid >= 2 && focusedCell !== null) {
-                    assignSlot(focusedCell, session.id);
-                  }
-                  activate(session.id);
-                }}
-                onClose={() => remove(session.id)}
-              />
-            </motion.div>
-          ))}
-        </AnimatePresence>
 
         {sessions.length === 0 && !collapsed && (
           <p className="micro px-3 py-3 leading-relaxed">

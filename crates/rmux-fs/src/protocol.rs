@@ -125,6 +125,77 @@ base64 < "$p" | tr -d '
     )
 }
 
+/// How big is it, and can it be read at all?
+///
+/// The first half of a download. Asking the size up front is what lets the
+/// transfer be *windowed* rather than read in one gulp — see
+/// [`read_chunk_base64_script`] — and it is also the only place a download can
+/// cheaply tell "this is a folder" from "this is a file", which are completely
+/// different answers for the operator.
+pub fn file_size_script(path: &str) -> String {
+    let quoted = rmux_transport::shell_quote_path(path);
+    format!(
+        r#"p={quoted}
+if [ -d "$p" ]; then printf 'D
+'; exit 0; fi
+if [ ! -f "$p" ]; then printf 'M
+'; exit 0; fi
+if [ ! -r "$p" ]; then printf 'P
+'; exit 0; fi
+printf 'S%s
+' "$(wc -c < "$p" | tr -d ' ')""#
+    )
+}
+
+/// What [`file_size_script`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SizeOutcome {
+    Size(u64),
+    Missing,
+    PermissionDenied,
+    IsDirectory,
+}
+
+pub fn parse_size(bytes: &[u8]) -> anyhow::Result<SizeOutcome> {
+    let line = bytes.split(|b| *b == b'\n').next().unwrap_or(bytes);
+    match line.first() {
+        Some(b'D') => Ok(SizeOutcome::IsDirectory),
+        Some(b'M') => Ok(SizeOutcome::Missing),
+        Some(b'P') => Ok(SizeOutcome::PermissionDenied),
+        Some(b'S') => Ok(SizeOutcome::Size(std::str::from_utf8(&line[1..])?.trim().parse()?)),
+        _ => anyhow::bail!("unrecognised size response"),
+    }
+}
+
+/// One window of a file, base64'd.
+///
+/// **Why windowed at all.** `Output::stdout` is a `String`, so every byte a
+/// command returns has already been through a UTF-8 conversion — which is
+/// exactly why previews are base64 and why a download cannot simply `cat`. Base64
+/// then means the whole payload is resident in memory twice over, once encoded
+/// and once decoded, so a single-shot read forces a size cap. A cap would fail on
+/// the build artefact or the 200MB log that is precisely what someone reaches for
+/// "download" to get.
+///
+/// Reading a window at a time keeps the peak bounded by the chunk rather than by
+/// the file, at the cost of one round trip per chunk. That trade is right here:
+/// downloads are not on any hot path, and "slower for very large files" beats
+/// "refuses very large files".
+///
+/// **Redirection rather than a filename argument.** `tail -c +N < "$p"` sidesteps
+/// the question of whether this `tail` understands `--` to end its options — BSD
+/// and GNU disagree, and a path beginning with `-` would otherwise be read as
+/// flags. The offset is 1-based, which is what `+N` means.
+pub fn read_chunk_base64_script(path: &str, offset: u64, len: u64) -> String {
+    let quoted = rmux_transport::shell_quote_path(path);
+    let start = offset + 1;
+    format!(
+        r#"p={quoted}
+tail -c +{start} < "$p" | head -c {len} | base64 | tr -d '
+'"#
+    )
+}
+
 /// Shell that deletes a file or an empty-or-not directory.
 ///
 /// `rm -rf` is deliberate but narrow: it is only ever handed a single quoted
@@ -543,5 +614,54 @@ mod tests {
         assert!(!looks_binary(b"plain text\nwith lines\n"));
         assert!(looks_binary(b"\x7fELF\0\0\0"));
         assert!(!looks_binary(&[]));
+    }
+
+    #[test]
+    fn a_size_probe_tells_the_four_outcomes_apart() {
+        assert_eq!(parse_size(b"S4096\n").unwrap(), SizeOutcome::Size(4096));
+        assert_eq!(parse_size(b"D\n").unwrap(), SizeOutcome::IsDirectory);
+        assert_eq!(parse_size(b"M\n").unwrap(), SizeOutcome::Missing);
+        assert_eq!(parse_size(b"P\n").unwrap(), SizeOutcome::PermissionDenied);
+        // Never guess: an unrecognised answer is an error, not a zero-byte file.
+        assert!(parse_size(b"").is_err());
+        assert!(parse_size(b"what?\n").is_err());
+    }
+
+    #[test]
+    fn download_windows_are_one_based_and_bounded() {
+        // `tail -c +N` counts from 1, so offset 0 is `+1`. Off by one here reads
+        // the file shifted by a byte and corrupts every download silently.
+        let first = read_chunk_base64_script("/var/log/app.log", 0, 1024);
+        assert!(first.contains("tail -c +1 "), "{first}");
+        assert!(first.contains("head -c 1024"), "{first}");
+
+        let second = read_chunk_base64_script("/var/log/app.log", 1024, 512);
+        assert!(second.contains("tail -c +1025 "), "{second}");
+        assert!(second.contains("head -c 512"), "{second}");
+    }
+
+    #[test]
+    fn download_reads_through_a_redirect_rather_than_a_filename_argument() {
+        // BSD and GNU `tail` disagree about `--`, so a path starting with `-`
+        // would otherwise be read as flags.
+        let script = read_chunk_base64_script("-rf", 0, 64);
+        assert!(script.contains(r#"tail -c +1 < "$p""#), "{script}");
+    }
+
+    #[test]
+    fn download_scripts_quote_a_hostile_path() {
+        // The remote login shell re-parses this line, so an unquoted path is an
+        // injection. Assert the *quoted* form is present rather than asserting
+        // the dangerous substring is absent — quoting legitimately preserves it.
+        let hostile = "/tmp/a b; rm -rf ~";
+        let quoted = rmux_transport::shell_quote_path(hostile);
+
+        for script in [file_size_script(hostile), read_chunk_base64_script(hostile, 0, 8)] {
+            assert!(script.contains(&quoted), "path must be quoted: {script}");
+            assert!(
+                !script.contains("; rm -rf ~\n"),
+                "the raw fragment must not reach the line: {script}"
+            );
+        }
     }
 }

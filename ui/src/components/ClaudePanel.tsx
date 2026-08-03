@@ -643,7 +643,7 @@ export function ClaudePanel({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            className="micro"
+            className="chip"
             title="Copy the selection, or the visible screen if nothing is selected"
             onClick={() => {
               const term = xtermRef.current;
@@ -661,7 +661,7 @@ export function ClaudePanel({
           </button>
           <button
             type="button"
-            className="micro"
+            className="chip"
             title="Copy the whole scrollback"
             onClick={() => {
               const term = xtermRef.current;
@@ -688,7 +688,7 @@ export function ClaudePanel({
           )}
           <button
             type="button"
-            className="micro"
+            className="chip"
             disabled={switching}
             title={
               fullscreen
@@ -731,7 +731,7 @@ export function ClaudePanel({
           {fullscreen && (
           <button
             type="button"
-            className="micro"
+            className="chip"
             title={
               selectMode
                 ? "Give the mouse back to Claude"
@@ -781,7 +781,7 @@ export function ClaudePanel({
         <div className="ml-auto flex gap-2">
           <button
             type="button"
-            className="micro"
+            className="chip"
             onClick={() => claudeId && void invoke("claude_interrupt", { id: claudeId })}
             title="Interrupt (Esc)"
           >

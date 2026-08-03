@@ -42,7 +42,7 @@ function OrgUsage({ available }: { available: boolean }) {
         <span className="micro shrink-0">ORG · {report ? `${report.days}D` : "USAGE"}</span>
         <button
           type="button"
-          className="micro"
+          className="chip"
           disabled={busy}
           onClick={() => void load()}
           style={{ color: busy ? "var(--text-faint)" : "var(--text)" }}
@@ -218,7 +218,7 @@ export function ClaudeAccountWidget() {
           <div className="flex gap-2">
             <button
               type="button"
-              className="micro"
+              className="chip"
               disabled={busy || !token.trim()}
               onClick={() => void save()}
               style={{ color: token.trim() ? "var(--text)" : "var(--text-faint)" }}
@@ -227,7 +227,7 @@ export function ClaudeAccountWidget() {
             </button>
             <button
               type="button"
-              className="micro"
+              className="chip"
               onClick={() => {
                 setPasting(false);
                 setToken("");
@@ -239,13 +239,13 @@ export function ClaudeAccountWidget() {
         </div>
       ) : (
         <div className="flex gap-2">
-          <button type="button" className="micro" onClick={() => setPasting(true)}>
+          <button type="button" className="chip" onClick={() => setPasting(true)}>
             {account?.connected ? "replace" : "add credential"}
           </button>
           {account?.connected && (
             <button
               type="button"
-              className="micro"
+              className="chip"
               disabled={busy}
               onClick={() => void forget()}
               style={{ color: "var(--text-faint)" }}

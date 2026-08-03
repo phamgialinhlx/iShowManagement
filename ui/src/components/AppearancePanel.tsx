@@ -544,7 +544,7 @@ function ApplyBar({
           {restarting ? "Restarting…" : "Apply & restart"}
         </button>
         {dirty && !restarting && (
-          <button type="button" className="micro ml-auto" onClick={onDiscard}>
+          <button type="button" className="chip ml-auto" onClick={onDiscard}>
             DISCARD
           </button>
         )}
@@ -599,7 +599,7 @@ function Swatch({
         </span>
         <button
           type="button"
-          className="micro ml-auto"
+          className="chip ml-auto"
           onClick={() => onChange(fallback)}
           style={{ color: changed ? "var(--text)" : "var(--text-faint)" }}
         >

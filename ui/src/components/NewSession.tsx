@@ -173,7 +173,7 @@ export function NewSession({ onClose }: { onClose: () => void }) {
           {(step.kind === "folder" || step.kind === "claude") && (
             <button
               type="button"
-              className="micro ml-auto"
+              className="chip ml-auto"
               onClick={() => {
                 setError(null);
                 // Back one step, not all the way out.
@@ -327,7 +327,7 @@ export function NewSession({ onClose }: { onClose: () => void }) {
                   which of forty checkouts the conversation was in. */}
               <button
                 type="button"
-                className="micro ml-auto"
+                className="chip ml-auto"
                 style={{ color: "var(--text)" }}
                 onClick={() => setStep({ kind: "all", target: step.target, label: step.label })}
               >

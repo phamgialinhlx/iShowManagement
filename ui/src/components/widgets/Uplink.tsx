@@ -72,7 +72,7 @@ export function Uplink({ target }: { target: TargetRef }) {
 
       <button
         type="button"
-        className="micro self-start"
+        className="chip self-start"
         disabled={busy}
         style={{ color: "var(--text-faint)" }}
         onClick={() => load(true)}

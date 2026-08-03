@@ -64,7 +64,7 @@ export function AllSessions({
         <span className="micro">
           on <span style={{ color: "var(--text)" }}>{label}</span>
         </span>
-        <button type="button" className="micro ml-auto" onClick={onBack}>
+        <button type="button" className="chip ml-auto" onClick={onBack}>
           ← BROWSE FOLDERS INSTEAD
         </button>
       </div>

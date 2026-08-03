@@ -136,12 +136,12 @@ export function ClaudeAccountPanel() {
           <div className="flex gap-2">
             <button
               type="button"
-              className="micro"
+              className="chip"
               onClick={() => void navigator.clipboard.writeText(flow.authUrl)}
             >
               copy link
             </button>
-            <button type="button" className="micro" onClick={() => void api.openExternal(flow.authUrl)}>
+            <button type="button" className="chip" onClick={() => void api.openExternal(flow.authUrl)}>
               open again
             </button>
           </div>
@@ -294,7 +294,7 @@ function OrgUsage({ available }: { available: boolean }) {
         <span className="micro">ORG USAGE {report ? `· ${report.days}D` : ""}</span>
         <button
           type="button"
-          className="micro"
+          className="chip"
           disabled={busy}
           onClick={() => {
             setBusy(true);

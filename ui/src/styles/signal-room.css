@@ -487,6 +487,172 @@ textarea,
 }
 
 /*
+ * A control the size of a label.
+ *
+ * `.micro` is this app's 9px caption, and it is worn by headings and by buttons
+ * alike — so a button that carries nothing else is *indistinguishable from a
+ * title*. Reported exactly that way about INSTRUMENTS, which sits in the right
+ * rail's header at the same size, weight, colour and position as the word
+ * SESSIONS in the left rail's header, where it is a plain heading. There was
+ * nothing to tell them apart, so the only way to discover the control was to
+ * click a word that looked inert.
+ *
+ * Tone cannot fix it. At 9px a colour difference is not a state anyone reads —
+ * the same reason the selected chip in a segmented control also wears an
+ * underline rather than relying on being slightly brighter.
+ *
+ * So the affordance is a **border**: the one mark that still says "control" at
+ * nine pixels tall, and the one the rest of the design system already uses to
+ * mean exactly that (`.btn`, `.inset`). `.chip` is `.btn`'s reading at caption
+ * size — same border, same hover, a third of the padding.
+ */
+.chip {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  /* Centred, because a few of these carry a fixed width (a port toggle sized so
+     the column does not jump between "ON" and "…"). Left-aligned text in a
+     fixed-width box reads as a truncated field rather than a button. */
+  justify-content: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.chip:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--text-faint);
+  color: var(--text);
+}
+
+/* Engaged reads as pressed *in*, not merely brighter — see the note above. */
+.chip[aria-pressed="true"] {
+  background: var(--hover);
+  border-color: var(--text-faint);
+  color: var(--text);
+}
+
+.chip:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+/*
+ * The other half of the same fix, for the case a border gets wrong.
+ *
+ * A `.chip` boxes its label, which is right for a word like DISMISS and wrong
+ * for a full-width value that happens to be clickable — a log path you click to
+ * copy, say. Drawing a frame around a truncated path makes it read as a field
+ * rather than an action, and it fights the panel it sits in.
+ *
+ * An underline is the affordance that scales with the text instead of enclosing
+ * it, and it is already the design system's mark for "this is the one selected"
+ * on segmented controls, so it is not a new idea here — just the same one used
+ * where a box will not fit.
+ */
+.link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--text-faint);
+  transition: color var(--dur) var(--ease);
+}
+
+.link:hover {
+  color: var(--text);
+  text-decoration-color: var(--text);
+}
+
+/*
+ * A segmented control — the third shape of the same problem.
+ *
+ * These were the worst case and the least obvious. A group like `CPU  MEM` gave
+ * the *selected* segment a fill and left the others bare, so at rest a
+ * two-option control looked like two 9px captions with one of them slightly
+ * shaded. Nothing said the pair was a control, nothing said the unshaded word
+ * could be clicked, and the shading was easy to read as emphasis rather than
+ * state.
+ *
+ * The frame goes round the **group**, not each segment: that is what says "these
+ * belong together and one of them is chosen", which is the whole grammar of a
+ * segmented control and cannot be expressed by styling the winner alone.
+ *
+ * Selection is then carried by fill *and* underline, deliberately doubled. The
+ * design system already requires this — at 9px a tone-only difference is not a
+ * state anyone can see — and it is the same reason `.chip` uses a border rather
+ * than a brighter grey.
+ */
+.seg {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border-strong);
+}
+
+.seg > button {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+/* A hairline between segments, so the group reads as divided rather than as one
+   long field with a bright patch in it. */
+.seg > button + button {
+  border-left: 1px solid var(--border);
+}
+
+.seg > button:hover:not(:disabled):not([aria-pressed="true"]) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.seg > button[aria-pressed="true"] {
+  background: var(--hover);
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.seg > button:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+/*
+ * A segmented control whose options are *data* rather than a fixed pair — the
+ * model profiles, where the list is whatever the operator has saved. It fills
+ * the row and wraps, because two profiles and nine profiles are both normal and
+ * a single non-wrapping row would push the ninth off the panel.
+ */
+.seg-wrap {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.seg-wrap > button {
+  flex: 1 1 auto;
+}
+
+/*
  * The primary action: a chalk plate that turns signal red on hover. Red on
  * *intent to act* is consistent with rule 0 — it is the one control where the
  * operator is about to do the thing red is reserved for.

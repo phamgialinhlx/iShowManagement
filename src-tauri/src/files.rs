@@ -147,6 +147,87 @@ pub async fn fs_upload(
     filesystem(store.inner(), &target).await?.upload(&path, &bytes).await.map_err(err)
 }
 
+/// What a completed download tells the operator.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Downloaded {
+    /// The full local path. "Check your downloads" is not an answer when the
+    /// folder holds two hundred things — the same reasoning as the log export.
+    pub path: String,
+    pub bytes: u64,
+}
+
+/// Copy a file off the target onto this machine.
+///
+/// ## Why there is no save dialog
+///
+/// rmux has no dialog plugin, and adding one for this would be the wrong trade:
+/// Tauri plugin commands need an explicit ACL grant or they are rejected
+/// *silently* — the promise rejects with nothing surfaced — which is a failure
+/// mode this app has already been bitten by. The app instead has a convention
+/// that works and is already proven by Export Log: **write it where a person can
+/// find it, and print the full path.** One click, no second window, and the
+/// answer to "where did it go?" is on screen.
+///
+/// ## The name is made unique rather than overwritten
+///
+/// `download` refuses to clobber, which is right — but refusing outright would
+/// mean pulling the same log twice is an error the operator has to work around
+/// by renaming things. So a collision becomes `server (2).log`, the convention
+/// every browser uses. Nothing on disk is ever replaced, and nothing is refused
+/// for a reason the operator did not cause.
+#[tauri::command]
+pub async fn fs_download(
+    store: State<'_, FsStore>,
+    target: TargetRef,
+    path: String,
+) -> Result<Downloaded, String> {
+    let name = path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download");
+
+    let dir = dirs::download_dir()
+        .or_else(dirs::desktop_dir)
+        .or_else(dirs::home_dir)
+        .ok_or("could not find a folder to download into")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not open {}: {e}", dir.display()))?;
+
+    let dest = unique_path(&dir, name);
+
+    let bytes = filesystem(store.inner(), &target)
+        .await?
+        .download(&path, &dest)
+        .await
+        .map_err(err)?;
+
+    Ok(Downloaded { path: dest.to_string_lossy().into_owned(), bytes })
+}
+
+/// `report.txt` → `report (2).txt` → `report (3).txt`, until one is free.
+///
+/// The suffix goes before the extension, not after: `report.txt (2)` stops the
+/// file opening in anything, which is a worse outcome than the collision.
+fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+
+    // Split on the *last* dot, so `archive.tar.gz` becomes `archive.tar (2).gz`
+    // rather than `archive (2).tar.gz`. Either is defensible; this one keeps the
+    // extension the OS actually dispatches on untouched.
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+
+    for n in 2.. {
+        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("an unbounded counter always finds a free name")
+}
+
 #[tauri::command]
 pub async fn fs_rename(
     store: State<'_, FsStore>,

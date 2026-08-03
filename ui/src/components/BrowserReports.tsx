@@ -111,7 +111,7 @@ export function BrowserReports({
                 {report.report === "selection" && (
                   <button
                     type="button"
-                    className="micro"
+                    className="chip"
                     disabled={!claudeId}
                     title={
                       claudeId
@@ -136,7 +136,7 @@ export function BrowserReports({
                 {(report.report === "console" || report.report === "har") && (
                   <button
                     type="button"
-                    className="micro"
+                    className="chip"
                     onClick={() => {
                       void navigator.clipboard.writeText(
                         report.report === "har"
@@ -150,7 +150,7 @@ export function BrowserReports({
                 )}
                 <button
                   type="button"
-                  className="micro"
+                  className="chip"
                   style={{ color: "var(--text-faint)" }}
                   onClick={() => drop(index)}
                 >

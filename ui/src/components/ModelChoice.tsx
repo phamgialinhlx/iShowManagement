@@ -59,7 +59,7 @@ export function ModelChoice({
       {/* Segmented rather than a dropdown: a `select` hides both the options and
           the current value behind a click, and the current value is the whole
           point here. */}
-      <div className="flex flex-wrap" style={{ border: "1px solid var(--border-strong)" }}>
+      <div className="seg seg-wrap">
         <Choice
           selected={value === null}
           disabled={disabled}
@@ -113,17 +113,9 @@ function Choice({
       onClick={onClick}
       disabled={disabled}
       aria-pressed={selected}
-      className="micro px-3 py-[6px]"
-      style={{
-        flex: "1 1 auto",
-        color: selected ? "var(--text)" : "var(--text-faint)",
-        background: selected ? "var(--app-elev)" : "transparent",
-        // Selection is carried by more than tone: at this size a tone-only
-        // difference is not a state anyone can see.
-        textDecoration: selected ? "underline" : "none",
-        textUnderlineOffset: 3,
-        opacity: disabled ? 0.5 : 1,
-      }}
+      // Fill, tone and underline all come from `.seg` now — this was a
+      // hand-rolled copy of it, and two definitions of "selected" drift.
+      style={{ padding: "6px 12px" }}
     >
       {label}
     </button>
