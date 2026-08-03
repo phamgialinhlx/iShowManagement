@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rmux_fs::{DirEntry, FileContent, FileSystem, LocalFs, PreviewContent, TargetFs};
+use rmux_fs::{DirEntry, FileContent, FileSystem, LocalFs, PreviewContent, SearchHit, SearchQuery, TargetFs};
 use rmux_ssh::SshTarget;
 use rmux_transport::TargetId;
 use tauri::State;
@@ -206,4 +206,23 @@ mod tests {
     fn trailing_separators_do_not_confuse_the_parent() {
         assert_eq!(parent_path("/home/me/").as_deref(), Some("/home"));
     }
+}
+
+/// Find text under `root`, on whichever machine it lives on.
+///
+/// One command for local and remote, like every other filesystem call — the
+/// branch is inside the `FileSystem` impl, never here.
+#[tauri::command]
+pub async fn fs_search(
+    store: State<'_, FsStore>,
+    target: TargetRef,
+    root: String,
+    query: SearchQuery,
+) -> Result<Vec<SearchHit>, String> {
+    // An empty query would match every line in the project and take a long time
+    // to say nothing. Refused before it reaches a shell.
+    if query.text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    filesystem(&store, &target).await?.search(&root, &query).await.map_err(err)
 }

@@ -78,6 +78,10 @@ export function CodeEditor({
     });
 
     editorRef.current = editor;
+    // The editor that ⌘F and "go to line" act on. Module scope because those
+    // callers are keyboard handlers and search results, neither of which sits
+    // inside this component's tree.
+    active = editor;
 
     // ⌘S / Ctrl+S inside the editor. Registered on the editor rather than the
     // window so it fires even when Monaco has swallowed the keystroke.
@@ -91,6 +95,7 @@ export function CodeEditor({
       editor.setModel(null);
       editor.dispose();
       editorRef.current = null;
+      if (active === editor) active = null;
     };
   }, []);
 
@@ -180,4 +185,35 @@ export function CodeEditor({
       )}
     </div>
   );
+}
+
+
+/**
+ * The editor currently on screen, for callers outside this component.
+ *
+ * There is at most one visible editor per session view, so a single reference is
+ * enough — and it is cleared on unmount so a disposed editor is never messaged.
+ */
+let active: import("monaco-editor").editor.IStandaloneCodeEditor | null = null;
+
+/**
+ * Open Monaco's find widget.
+ *
+ * Needed because Monaco only answers ⌘F when it already has focus. Coming from
+ * the file tree — or straight after clicking a search result — the key did
+ * nothing, which reads as a missing feature rather than a focus rule. Focus is
+ * taken first, because the widget opens against the focused editor.
+ */
+export function findInOpenFile(): void {
+  if (!active) return;
+  active.focus();
+  active.getAction("actions.find")?.run();
+}
+
+/** Scroll to a line and put the caret on it — used by the project search. */
+export function revealLine(line: number): void {
+  if (!active) return;
+  active.revealLineInCenter(line);
+  active.setPosition({ lineNumber: line, column: 1 });
+  active.focus();
 }

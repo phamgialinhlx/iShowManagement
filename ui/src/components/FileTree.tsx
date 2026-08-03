@@ -317,6 +317,7 @@ export function FileTree({
         <TreeMenu
           menu={menu}
           target={target}
+          root={root ?? ""}
           onClose={() => setMenu(null)}
           onChanged={() => {
             invalidateListings(target);

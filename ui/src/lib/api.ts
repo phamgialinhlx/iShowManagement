@@ -319,6 +319,9 @@ export type GlassOptions = {
   tintOpacity?: number;
 };
 
+export type SearchQuery = { text: string; caseSensitive?: boolean; regex?: boolean };
+export type SearchHit = { path: string; line: number; text: string };
+
 export const api = {
   authConfig: (serverUrl: string) => call<AuthConfig>("auth_config", { serverUrl }),
 
@@ -407,6 +410,15 @@ export const api = {
    */
   backgroundSet: (dataBase64: string) => call<string>("background_set", { data: dataBase64 }),
   backgroundClear: () => call<void>("background_clear"),
+
+  /**
+   * Find text under a folder, on whichever machine it lives on.
+   *
+   * Runs `grep` on the target rather than reading files across the wire — see
+   * `crates/rmux-fs/src/search.rs`. Bounded at 500 hits.
+   */
+  fsSearch: (target: TargetRef, root: string, query: SearchQuery) =>
+    call<SearchHit[]>("fs_search", { target, root, query }),
 
   /** Relaunch. Sessions survive it — they run under the agent on the target. */
   restartApp: () => call<void>("restart_app"),

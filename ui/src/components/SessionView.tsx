@@ -6,8 +6,9 @@ import { HostPanel } from "./HostPanel";
 import { invoke } from "@tauri-apps/api/core";
 
 import { ClaudePanel } from "./ClaudePanel";
-import { CodeEditor, disposeBufferModel } from "./CodeEditor";
+import { CodeEditor, disposeBufferModel, findInOpenFile, revealLine } from "./CodeEditor";
 import { FileTree } from "./FileTree";
+import { FileSearch } from "./FileSearch";
 import { BinaryPreview, MarkdownPreview, previewKind } from "./FilePreview";
 import { TerminalView } from "./Terminal";
 import { TranscriptView } from "./TranscriptView";
@@ -142,15 +143,60 @@ function FilesView({ session }: { session: Session }) {
 
   useEffect(() => localStorage.setItem(TREE_KEY, String(treeWidth)), [treeWidth]);
 
+  const [searching, setSearching] = useState(false);
+
+  // ⌘⇧F opens the project search; ⌘F asks the editor to find within the open
+  // file. The second one exists because Monaco only answers ⌘F when *it* has
+  // focus — from the tree, or straight after opening a file, the key did
+  // nothing at all, which reads as a missing feature rather than a focus rule.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "f") return;
+      if (e.shiftKey) {
+        e.preventDefault();
+        setSearching(true);
+        return;
+      }
+      // Let Monaco handle it when the caret is already in the editor; this is
+      // only the fallback for when it is not.
+      if (document.activeElement?.closest(".monaco-editor")) return;
+      e.preventDefault();
+      findInOpenFile();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   return (
     <div className="flex h-full min-h-0">
       <div className="flex shrink-0 flex-col overflow-hidden py-2" style={{ width: treeWidth }}>
-        <FileTree
-          target={session.target}
-          root={session.folder}
-          selected={active?.path ?? null}
-          onSelect={(path) => void openFile(session.id, path)}
-        />
+        {/* The search replaces the tree rather than sitting beside it: the pane
+            is a few hundred pixels wide, and splitting it gives two lists too
+            short to read. Escape or CLOSE puts the tree straight back. */}
+        {searching ? (
+          <FileSearch
+            target={session.target}
+            root={session.folder}
+            onClose={() => setSearching(false)}
+            onOpen={(path, line) => {
+              void openFile(session.id, path).then(() => {
+                // Two frames: the model has to be attached before a line can be
+                // revealed, or the editor scrolls an empty buffer.
+                requestAnimationFrame(() => requestAnimationFrame(() => revealLine(line)));
+              });
+              // Left open on purpose. Finding one match is rarely the end of
+              // it, and closing the results after every click would make the
+              // second one cost another search.
+            }}
+          />
+        ) : (
+          <FileTree
+            target={session.target}
+            root={session.folder}
+            selected={active?.path ?? null}
+            onSelect={(path) => void openFile(session.id, path)}
+          />
+        )}
       </div>
 
       <div

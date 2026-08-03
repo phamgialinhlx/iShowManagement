@@ -21,11 +21,14 @@ export type MenuTarget = {
 export function TreeMenu({
   menu,
   target,
+  root,
   onClose,
   onChanged,
 }: {
   menu: MenuTarget;
   target: TargetRef;
+  /** The project root, so "copy relative path" has something to be relative to. */
+  root: string;
   onClose: () => void;
   onChanged: (parent: string) => void;
 }) {
@@ -57,6 +60,21 @@ export function TreeMenu({
       window.removeEventListener("keydown", onKey);
     };
   }, [onClose]);
+
+  // Which path was just copied, so the menu can say so where it happened.
+  const [copied, setCopied] = useState<"full" | "relative" | null>(null);
+
+  const copy = async (value: string, which: "full" | "relative") => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(which);
+      // Long enough to read, short enough that the menu is not left standing
+      // open on top of the tree.
+      setTimeout(onClose, 900);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not write to the clipboard");
+    }
+  };
 
   const run = async (action: () => Promise<void>, refreshed: string) => {
     setBusy(true);
@@ -170,6 +188,27 @@ export function TreeMenu({
             }}
           />
           <hr className="hairline my-1" />
+
+          {/* Copying a path is the most-used thing in a file tree and the one
+              nobody can do without a menu — you cannot select the text. Both
+              forms are offered because both are asked for constantly: the full
+              path to hand to a shell on that host, the relative one to paste
+              into a message, an import, or a prompt.
+
+              The label reports the outcome in place for a moment rather than
+              closing instantly. A menu that vanishes on click leaves you
+              wondering whether it copied, and the only way to check is to paste
+              somewhere and look. */}
+          <MenuItem
+            label={copied === "full" ? "Copied full path" : "Copy full path"}
+            onClick={() => void copy(menu.path, "full")}
+          />
+          <MenuItem
+            label={copied === "relative" ? "Copied relative path" : "Copy relative path"}
+            onClick={() => void copy(relative(menu.path, root), "relative")}
+          />
+
+          <hr className="hairline my-1" />
           <MenuItem
             label="Rename"
             onClick={() => {
@@ -205,4 +244,17 @@ function MenuItem({
       {label}
     </button>
   );
+}
+
+
+/**
+ * The path as it reads from the project root.
+ *
+ * Falls back to the absolute path when the file is somehow outside the root —
+ * an honest full path beats a mangled relative one, and `../../..` chains are
+ * not what anyone means by "relative path".
+ */
+function relative(path: string, root: string): string {
+  const base = root.endsWith("/") ? root : `${root}/`;
+  return path.startsWith(base) ? path.slice(base.length) : path;
 }

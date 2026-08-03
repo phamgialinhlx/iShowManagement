@@ -267,6 +267,28 @@ over a photograph is worse than a plain one. `applyAppearance` memoises the glas
 last sent, because the overlay slider calls it on every tick and each call crosses IPC to
 mutate AppKit views on the main thread for every open window.
 
+## Searching a project
+
+**`grep` runs on the machine that owns the disk** (`crates/rmux-fs/src/search.rs`). Listing
+directories and reading each file is one round trip per file, which over SSH is unusable on
+any real checkout — a few thousand files is a few thousand connections' worth of latency even
+with ControlMaster holding the socket. Only the matches cross the network.
+
+- **Records are NUL-delimited** (`grep -Z`), for the same reason listings are: a filename may
+  contain newlines, and splitting the stream on `\n` would report files that do not exist.
+  Read to the NUL for the path, *then* to the newline for `line:text`.
+- **`-I` and `--exclude-dir`.** Without `-I` a hit inside a `.png` returns raw bytes; without
+  the excludes, one `node_modules` outweighs the project it sits in and the first page of any
+  search is dependency source, which reads as broken.
+- **`-F` unless a regex was asked for**, or a query full of `.` and `*` matches everything.
+- **`|| true`.** `grep` exits 1 when nothing matched — an answer, not a failure. Without it
+  the most ordinary outcome there is surfaces as an error.
+- **Bounded at 500, and the UI *says* it truncated.** A list that stops at a round number
+  reads as the complete answer.
+- **⌘F is handled by us only when Monaco does not have focus.** Monaco answers ⌘F itself, but
+  only when focused — from the tree, or right after clicking a search result, the key did
+  nothing, which reads as a missing feature rather than a focus rule.
+
 ## The interface must never make anyone feel lost
 
 The operator should be able to use rmux on instinct — without reading labels to

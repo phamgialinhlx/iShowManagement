@@ -165,6 +165,7 @@ pub fn run() {
             claude::claude_stop,
             files::fs_join,
             files::fs_parent,
+            files::fs_search,
             files::ssh_config_hosts,
             background::background_set,
             background::background_clear,

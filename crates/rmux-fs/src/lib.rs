@@ -17,6 +17,9 @@ use rmux_transport::{CommandSpec, Target, Tty};
 use serde::{Deserialize, Serialize};
 
 pub mod protocol;
+pub mod search;
+
+pub use search::{SearchHit, SearchQuery};
 
 pub use protocol::{MAX_READ_BYTES, ReadOutcome};
 
@@ -80,6 +83,9 @@ pub trait FileSystem: Send + Sync {
     async fn read_preview(&self, path: &str) -> anyhow::Result<PreviewContent>;
     /// Where the file browser should open.
     async fn home_dir(&self) -> anyhow::Result<String>;
+    /// Find text under `root`. See `search` for why this runs `grep` on the
+    /// machine that owns the disk rather than walking the tree from here.
+    async fn search(&self, root: &str, query: &SearchQuery) -> anyhow::Result<Vec<SearchHit>>;
 }
 
 /// A filesystem reached by running shell commands on a [`Target`].
@@ -202,6 +208,10 @@ impl<T: Target> FileSystem for TargetFs<T> {
         let output = self.run(&protocol::home_script()).await?;
         Ok(String::from_utf8_lossy(&output).trim().to_owned())
     }
+
+    async fn search(&self, root: &str, query: &SearchQuery) -> anyhow::Result<Vec<SearchHit>> {
+        Ok(search::parse(&self.run(&search::script(root, query)).await?))
+    }
 }
 
 /// The local filesystem, using `std::fs` directly.
@@ -320,6 +330,22 @@ impl FileSystem for LocalFs {
     async fn home_dir(&self) -> anyhow::Result<String> {
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
         Ok(home.to_string_lossy().into_owned())
+    }
+
+    /// The same `grep`, run locally.
+    ///
+    /// Shelling out rather than walking the tree in Rust keeps one definition of
+    /// what a search *is* — the flags, the skipped directories and the record
+    /// format are shared, so a result found on a server and the same result
+    /// found here cannot disagree. This is the one place `LocalFs` spawns a
+    /// process, and it is worth it for exactly that reason.
+    async fn search(&self, root: &str, query: &SearchQuery) -> anyhow::Result<Vec<SearchHit>> {
+        let out = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(search::script(root, query))
+            .output()
+            .await?;
+        Ok(search::parse(&out.stdout))
     }
 }
 
