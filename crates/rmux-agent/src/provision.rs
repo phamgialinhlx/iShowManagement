@@ -61,13 +61,27 @@ pub struct RemotePlatform {
 
 /// `uname -s` / `uname -m` → the Rust target triple whose binary will run there.
 ///
-/// Only the musl Linux targets are produced: a statically linked binary has no
-/// libc version to disagree with, so one build runs on every Linux from an
-/// ancient CentOS to a current Debian. Matching glibc versions across the fleet
-/// is exactly the class of problem this avoids.
+/// The Linux builds are musl: a statically linked binary has no libc version to
+/// disagree with, so one build runs on every Linux from an ancient CentOS to a
+/// current Debian. Matching glibc versions across a fleet is exactly the class
+/// of problem this avoids.
+///
+/// **Windows answers `MINGW64_NT-…` or `CYGWIN_NT-…`**, because rmux reaches it
+/// through Git for Windows' bash — but the agent that gets installed is a
+/// *native* `windows-gnu` binary, not an MSYS one. That distinction matters: the
+/// daemon has to outlive the SSH connection, and a process tied to the MSYS
+/// runtime that spawned it is a worse bet than a plain Win32 one. `gnu` rather
+/// than `msvc` so it cross-compiles from a Mac with no Visual Studio.
 pub fn triple_for(platform: &RemotePlatform) -> anyhow::Result<&'static str> {
     let os = platform.os.to_ascii_lowercase();
     let arch = platform.arch.to_ascii_lowercase();
+
+    if os.starts_with("mingw") || os.starts_with("cygwin") || os.starts_with("msys") {
+        return Ok(match arch.as_str() {
+            "x86_64" | "amd64" => "x86_64-pc-windows-gnu",
+            other => anyhow::bail!("no prebuilt rmux-agent for Windows {other}"),
+        });
+    }
 
     anyhow::ensure!(
         os == "linux",
@@ -80,6 +94,11 @@ pub fn triple_for(platform: &RemotePlatform) -> anyhow::Result<&'static str> {
         "aarch64" | "arm64" => "aarch64-unknown-linux-musl",
         other => anyhow::bail!("no prebuilt rmux-agent for Linux {other}"),
     })
+}
+
+/// Whether a triple names a Windows target, and so needs a `.exe`.
+pub fn is_windows(triple: &str) -> bool {
+    triple.contains("windows")
 }
 
 /// Parse the two-line reply from the probe script.
@@ -104,8 +123,20 @@ pub fn parse_uname(output: &str) -> anyhow::Result<RemotePlatform> {
 /// running daemon from the previous version keeps serving the sessions it owns
 /// instead of being replaced underneath them.
 pub fn remote_path(home: &str, version: &str, fingerprint: &str) -> String {
+    remote_path_for(home, version, fingerprint, "")
+}
+
+/// The install path, with the extension the target needs.
+///
+/// **Windows will not execute a file without `.exe`**, whatever its contents —
+/// so an agent installed under the bare fingerprinted name uploads perfectly,
+/// reports the right size, and then fails to run with an error that says nothing
+/// about extensions. `ipc::socket_stem` already strips `.exe` before deriving
+/// the pipe name, so the two builds still agree on where to talk.
+pub fn remote_path_for(home: &str, version: &str, fingerprint: &str, triple: &str) -> String {
+    let suffix = if is_windows(triple) { ".exe" } else { "" };
     format!(
-        "{}/.rmux/bin/rmux-agent-{version}-{fingerprint}",
+        "{}/.rmux/bin/rmux-agent-{version}-{fingerprint}{suffix}",
         home.trim_end_matches('/')
     )
 }
@@ -151,7 +182,16 @@ pub fn probe_script() -> String {
 /// case, not a failure, and a non-zero exit here would be reported to the user
 /// as an error when the correct response is simply to install it.
 pub fn installed_version_script(home: &str, version: &str, fingerprint: &str) -> String {
-    let path = shell_quote(&remote_path(home, version, fingerprint));
+    installed_version_script_for(home, version, fingerprint, "")
+}
+
+pub fn installed_version_script_for(
+    home: &str,
+    version: &str,
+    fingerprint: &str,
+    triple: &str,
+) -> String {
+    let path = shell_quote(&remote_path_for(home, version, fingerprint, triple));
     format!("{path} version 2>/dev/null || true")
 }
 
@@ -190,8 +230,17 @@ done"#
 /// is the opposite one — a half-written executable being run by a second window
 /// that connects while the upload is still in flight.
 pub fn install_script(home: &str, version: &str, fingerprint: &str) -> String {
+    install_script_for(home, version, fingerprint, "")
+}
+
+pub fn install_script_for(
+    home: &str,
+    version: &str,
+    fingerprint: &str,
+    triple: &str,
+) -> String {
     let home = home.trim_end_matches('/');
-    let path = remote_path(home, version, fingerprint);
+    let path = remote_path_for(home, version, fingerprint, triple);
     // `$$` is left unquoted deliberately — it must expand to the shell's pid so
     // two concurrent installs cannot collide on one temporary file.
     let tmp = format!("{}.partial", shell_quote(&path));
@@ -229,17 +278,18 @@ pub async fn ensure<T: Target + ?Sized>(target: &T, binaries: &dyn BinarySource)
     let triple = triple_for(&platform)?;
     let bytes = binaries.agent_for(triple)?;
     let fingerprint = fingerprint(&bytes);
-    let path = remote_path(home, VERSION, &fingerprint);
+    let path = remote_path_for(home, VERSION, &fingerprint, triple);
 
     // Already installed? The common case, and one round trip.
-    let probe = run(target, &installed_version_script(home, VERSION, &fingerprint)).await?;
+    let probe =
+        run(target, &installed_version_script_for(home, VERSION, &fingerprint, triple)).await?;
     if probe.trim() == VERSION {
         return Ok(Installed { program: path });
     }
 
     let spec = CommandSpec::new("sh")
         .arg("-c")
-        .arg(install_script(home, VERSION, &fingerprint))
+        .arg(install_script_for(home, VERSION, &fingerprint, triple))
         .tty(Tty::None);
     let out = target.exec_with_input(&spec, &bytes).await?;
     anyhow::ensure!(
@@ -487,5 +537,64 @@ mod tests {
         let script = installed_version_script("/home/x", "1.0.0", "abc");
         assert!(script.contains("|| true"), "{script}");
         assert!(script.contains("2>/dev/null"), "{script}");
+    }
+}
+
+#[cfg(test)]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_windows_host_gets_a_native_windows_agent() {
+        // rmux reaches Windows through Git Bash, so `uname -s` answers
+        // `MINGW64_NT-…` — but the agent installed there is a native Win32
+        // binary, not an MSYS one. The daemon has to outlive the connection that
+        // started it, and a process tied to the MSYS runtime is a worse bet.
+        for os in ["MINGW64_NT-10.0-26200", "CYGWIN_NT-10.0", "MSYS_NT-10.0"] {
+            let platform = RemotePlatform { os: os.into(), arch: "x86_64".into() };
+            assert_eq!(triple_for(&platform).unwrap(), "x86_64-pc-windows-gnu", "{os}");
+        }
+    }
+
+    #[test]
+    fn a_windows_agent_is_installed_with_an_exe_extension() {
+        // Windows will not execute a file without it, whatever the contents —
+        // so the upload succeeds, the size is right, and running it fails with
+        // an error that never mentions extensions.
+        let win = remote_path_for("/c/Users/YTAI", "0.1.0", "abc123", "x86_64-pc-windows-gnu");
+        assert!(win.ends_with(".exe"), "{win}");
+
+        // And Unix must not gain one.
+        let unix = remote_path_for("/home/x", "0.1.0", "abc123", "x86_64-unknown-linux-musl");
+        assert!(!unix.ends_with(".exe"), "{unix}");
+        assert_eq!(unix, remote_path("/home/x", "0.1.0", "abc123"));
+    }
+
+    #[test]
+    fn the_exe_reaches_the_install_and_probe_scripts_too() {
+        // A path that gains `.exe` in one place and not another installs to one
+        // name and is then looked for under a different one — which reads as
+        // "the agent is never already installed" and re-uploads on every launch.
+        let triple = "x86_64-pc-windows-gnu";
+        assert!(install_script_for("/c/Users/Y", "0.1.0", "fp", triple).contains(".exe"));
+        assert!(installed_version_script_for("/c/Users/Y", "0.1.0", "fp", triple).contains(".exe"));
+    }
+
+    #[test]
+    fn the_socket_name_still_matches_across_the_extension() {
+        // `ipc::socket_stem` strips `.exe`, so the client and the daemon derive
+        // the same pipe name from the same install. If they ever disagreed, the
+        // client would start a second daemon and every session would double —
+        // the bug that already cost a day.
+        let path = remote_path_for("/c/Users/Y", "0.1.0", "abc123", "x86_64-pc-windows-gnu");
+        let name = path.rsplit('/').next().unwrap();
+        assert_eq!(name, "rmux-agent-0.1.0-abc123.exe");
+        assert_eq!(name.strip_suffix(".exe").unwrap(), "rmux-agent-0.1.0-abc123");
+    }
+
+    #[test]
+    fn an_unknown_windows_architecture_is_refused_rather_than_guessed() {
+        let platform = RemotePlatform { os: "MINGW64_NT-10.0".into(), arch: "arm64".into() };
+        assert!(triple_for(&platform).is_err(), "arm64 Windows has no prebuilt agent yet");
     }
 }

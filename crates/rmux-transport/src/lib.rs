@@ -112,6 +112,25 @@ impl Platform {
     }
 }
 
+/// Where a POSIX shell lives on a Windows machine, in order of likelihood.
+///
+/// One list, used twice and for different reasons — which is why it lives here
+/// rather than in either caller. `rmux-ssh` needs it to *reach* a Windows host
+/// (as a path `cmd.exe` can execute), and the agent needs it once it is
+/// *running* on one, to spawn the shell a session lives in. Two lists would
+/// drift, and the failure would be a host rmux could connect to but not open a
+/// terminal on.
+///
+/// **Short (8.3) paths.** The real location is `C:\Program Files\Git\bin\bash.exe`,
+/// and that space would have to be quoted inside a command line `cmd` is already
+/// re-parsing.
+pub const WINDOWS_BASH_CANDIDATES: &[&str] = &[
+    r"C:\PROGRA~1\Git\bin\bash.exe",
+    r"C:\PROGRA~2\Git\bin\bash.exe",
+    r"C:\msys64\usr\bin\bash.exe",
+    r"C:\cygwin64\bin\bash.exe",
+];
+
 /// Whether the command needs a TTY allocated.
 ///
 /// This maps to `ssh -t` and matters more than it looks: without it a remote

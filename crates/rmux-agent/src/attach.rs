@@ -198,6 +198,20 @@ fn spawn_daemon() -> anyhow::Result<()> {
         }
     }
 
+    // The Windows counterpart of `setsid`, and it is not optional. Without it
+    // the daemon inherits the handles of the shell that spawned it — which over
+    // SSH means the *connection's* pipes. sshd then waits for the daemon before
+    // closing the channel, so the client that started it never returns and every
+    // attach appears to hang forever, on a daemon that is in fact running
+    // perfectly. `DETACHED_PROCESS` also gives it no console to be killed with.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+
     cmd.spawn()?;
     Ok(())
 }
@@ -332,8 +346,21 @@ fn hand_off(binary: &std::path::Path) -> anyhow::Result<ExitCode> {
 
     #[cfg(not(unix))]
     {
-        let _ = binary;
-        anyhow::bail!("session handoff needs exec, which this platform does not have");
+        // Windows has no `exec`, so the older build runs as a child and this
+        // process becomes a pass-through for its lifetime. The pty is inherited
+        // rather than proxied — the child gets this process's own stdin, stdout
+        // and console — so the only cost against the Unix path is one extra
+        // process sitting in the tree, not a second hop on every keystroke.
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let status = std::process::Command::new(binary)
+            .args(&args)
+            .env(HANDOFF_GUARD, "1")
+            .status()?;
+
+        return Ok(match status.code() {
+            Some(0) => ExitCode::SUCCESS,
+            _ => ExitCode::FAILURE,
+        });
     }
 }
 

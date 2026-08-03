@@ -18,12 +18,30 @@ impl LocalTarget {
 }
 
 /// The user's shell, or a reasonable default per platform.
+///
+/// **On Windows this looks for bash before falling back to `COMSPEC`.** rmux
+/// asks for a login shell as `$SHELL -l -i`, and `cmd.exe` understands neither
+/// flag — so resolving to `COMSPEC` produced a shell that refused to start, on
+/// the one platform where the whole session model already runs through a POSIX
+/// layer. `SHELL` itself is no help: Windows sets it to `cmd.exe` and MSYS
+/// leaves it there, and even when it *is* corrected it holds an MSYS path
+/// (`/usr/bin/bash`) that a native Windows process cannot execute. So the disk
+/// is asked instead, which is the only answer that is true for the process
+/// doing the spawning.
+#[cfg(windows)]
 fn default_shell() -> String {
-    if cfg!(windows) {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_owned())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
+    if let Some(found) = crate::WINDOWS_BASH_CANDIDATES
+        .iter()
+        .find(|path| std::path::Path::new(path).exists())
+    {
+        return (*found).to_owned();
     }
+    std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_owned())
+}
+
+#[cfg(not(windows))]
+fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
 }
 
 #[async_trait]
