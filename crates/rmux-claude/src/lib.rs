@@ -19,6 +19,7 @@ use rmux_transport::{CommandSpec, Target, Tty};
 
 pub mod auth;
 pub mod keys;
+pub mod profile;
 pub mod screen;
 pub mod sessions;
 pub mod transcript;

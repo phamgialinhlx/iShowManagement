@@ -322,6 +322,34 @@ export type GlassOptions = {
 export type SearchQuery = { text: string; caseSensitive?: boolean; regex?: boolean };
 export type SearchHit = { path: string; line: number; text: string };
 
+/** One environment variable of a model profile, as the UI is allowed to see it. */
+export type ProfileVar = {
+  key: string;
+  /** Redacted to its last four characters when `secret`. */
+  value: string;
+  secret: boolean;
+};
+
+export type ModelProfile = {
+  id: string;
+  name: string;
+  /**
+   * Where this profile sends requests — and the token — to. Absent means
+   * Anthropic. Shown rather than inferred from the name: a profile called
+   * "GLM" can carry any URL at all.
+   */
+  endpoint?: string;
+  hasCredential: boolean;
+  vars: ProfileVar[];
+};
+
+export type ParsedProfile = {
+  vars: Record<string, string>;
+  /** Keys that were dropped, named, so half a paste never passes for all of it. */
+  ignored: string[];
+  warnings: string[];
+};
+
 export const api = {
   authConfig: (serverUrl: string) => call<AuthConfig>("auth_config", { serverUrl }),
 
@@ -512,6 +540,23 @@ export const api = {
    */
   fsUpload: (target: TargetRef, path: string, base64: string) =>
     call<void>("fs_upload", { target, path, base64 }),
+
+  /**
+   * Saved model configurations — Kimi, GLM, a gateway, a reseller.
+   *
+   * The token in a profile never comes back: `vars` arrives with credentials
+   * already redacted, so editing means sending a whole new block down rather
+   * than round-tripping the old one through the page.
+   */
+  modelProfiles: () => call<ModelProfile[]>("model_profiles"),
+
+  /** What a pasted block would become, before anything is saved. */
+  modelProfileParse: (text: string) => call<ParsedProfile>("model_profile_parse", { text }),
+
+  modelProfileSave: (id: string | null, name: string, text: string) =>
+    call<ModelProfile[]>("model_profile_save", { id, name, text }),
+
+  modelProfileDelete: (id: string) => call<ModelProfile[]>("model_profile_delete", { id }),
 
   metricsSample: (target: TargetRef) => call<MetricsSample>("metrics_sample", { target }),
 

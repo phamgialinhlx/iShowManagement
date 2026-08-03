@@ -71,6 +71,16 @@ export type Session = {
    */
   skipPermissions?: boolean;
   /**
+   * The saved model profile this session runs under — Kimi, GLM, a gateway.
+   *
+   * `undefined` means Anthropic. Per session and kept with it for the same
+   * reason as `skipPermissions`: which provider a piece of work runs against is
+   * a property of that work, and an app-wide default would move a conversation
+   * to another provider — another bill, another model — on the next restart,
+   * with nothing on screen to say so.
+   */
+  modelProfile?: string;
+  /**
    * The Claude credential this session runs as, if it should not use the
    * default one.
    *
@@ -172,12 +182,22 @@ type State = {
     name?: string,
     resume?: string,
     skipPermissions?: boolean,
+    modelProfile?: string,
   ) => Promise<string>;
   removeSession: (id: string) => void;
   activate: (id: string) => void;
   renameSession: (id: string, name: string) => void;
   /** Switch a session between inline and fullscreen Claude rendering. */
   setFullscreen: (id: string, fullscreen: boolean) => void;
+  /**
+   * Point a session at a model profile, or back at Anthropic with `undefined`.
+   *
+   * Takes effect when Claude next starts, because the provider is read from the
+   * environment the session was spawned with — a running conversation cannot be
+   * moved without restarting it, and pretending otherwise would show a provider
+   * that is not the one answering.
+   */
+  setModelProfile: (id: string, profile: string | undefined) => void;
   /** Pin the conversation a session resumes, so a restart keeps its context. */
   setResume: (id: string, resume: string) => void;
   /** 1 = focus one session; 2/3/4 = an NxN grid of them. */
@@ -304,6 +324,7 @@ function persist(state: State) {
             resume,
             fullscreen,
             skipPermissions,
+            modelProfile,
             claudeAccount,
             jiraProject,
             contextWindow,
@@ -319,6 +340,7 @@ function persist(state: State) {
             // this list is explicit, so anything added to `Session` and not
             // added here is silently forgotten on the next start.
             skipPermissions,
+            modelProfile,
             claudeAccount,
             jiraProject,
             contextWindow,
@@ -395,7 +417,7 @@ export const useSessions = create<State>((set, get) => ({
   // name, through the agent, not through a handle from a dead process.
   claudeSessions: {},
 
-  addSession: async (target, folder, name, resume, skipPermissions) => {
+  addSession: async (target, folder, name, resume, skipPermissions, modelProfile) => {
     const id = nextId("session");
     const session: Session = {
       id,
@@ -404,6 +426,7 @@ export const useSessions = create<State>((set, get) => ({
       folder,
       resume,
       skipPermissions,
+      modelProfile,
       status: "idle",
       error: null,
     };
@@ -516,6 +539,13 @@ export const useSessions = create<State>((set, get) => ({
   setFullscreen: (id, fullscreen) => {
     set((s) => ({
       sessions: s.sessions.map((x) => (x.id === id ? { ...x, fullscreen } : x)),
+    }));
+    schedulePersist(get);
+  },
+
+  setModelProfile: (id, modelProfile) => {
+    set((s) => ({
+      sessions: s.sessions.map((x) => (x.id === id ? { ...x, modelProfile } : x)),
     }));
     schedulePersist(get);
   },

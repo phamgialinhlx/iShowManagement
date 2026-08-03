@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { ClaudeAccountPanel } from "../components/ClaudeAccountPanel";
+import { ModelProfilesPanel } from "../components/ModelProfilesPanel";
 import { LockPanel } from "../components/LockPanel";
 import { CoworkPanel } from "../components/CoworkPanel";
 import { AppearancePanel } from "../components/AppearancePanel";
@@ -25,10 +26,11 @@ import { SERVER_KEY } from "../components/SignIn";
  * in to one had something to do with the others.
  */
 
-type Section = "claude" | "lock" | "cowork" | "notifications" | "appearance";
+type Section = "claude" | "models" | "lock" | "cowork" | "notifications" | "appearance";
 
 const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "claude", label: "CLAUDE", blurb: "The account your sessions run as" },
+  { id: "models", label: "MODELS", blurb: "Run against Kimi, GLM or a gateway" },
   { id: "lock", label: "LOCK", blurb: "Ask for a PIN or a face on every start" },
   { id: "cowork", label: "COWORK", blurb: "Your team's server, if you use one" },
   { id: "notifications", label: "NOTIFICATIONS", blurb: "When a session wants you" },
@@ -108,6 +110,11 @@ export function Settings() {
           {section === "claude" && (
             <ErrorBoundary label="Claude account">
               <ClaudeAccountPanel />
+            </ErrorBoundary>
+          )}
+          {section === "models" && (
+            <ErrorBoundary label="Model profiles">
+              <ModelProfilesPanel />
             </ErrorBoundary>
           )}
           {section === "lock" && (

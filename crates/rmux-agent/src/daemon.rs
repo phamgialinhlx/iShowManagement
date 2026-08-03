@@ -59,6 +59,28 @@ struct Sessions {
     env: std::collections::BTreeMap<String, String>,
 }
 
+/// Merge a `SetEnv` frame, treating an empty value as a **removal**.
+///
+/// Merging alone is right for adding an account and wrong for switching model
+/// profiles: moving from a profile that set `ANTHROPIC_BASE_URL` back to
+/// Anthropic proper would leave the old URL in place, and the session would
+/// keep talking to the previous provider while the client said otherwise. There
+/// is no legitimate empty value among the variables sent this way — an empty
+/// base URL or token is indistinguishable from an unset one to Claude Code — so
+/// empty is free to mean "unset", and it keeps the wire format unchanged.
+fn merge_env(
+    into: &mut std::collections::BTreeMap<String, String>,
+    from: std::collections::BTreeMap<String, String>,
+) {
+    for (key, value) in from {
+        if value.is_empty() {
+            into.remove(&key);
+        } else {
+            into.insert(key, value);
+        }
+    }
+}
+
 /// Run the daemon until the socket is closed.
 pub async fn serve() -> anyhow::Result<()> {
     let endpoint = endpoint()?;
@@ -118,7 +140,7 @@ where
                 Frame::Hello(hello) => break hello,
                 // A client that only delivers environment never opens a session.
                 Frame::SetEnv(env) => {
-                    sessions.lock().env.extend(env);
+                    merge_env(&mut sessions.lock().env, env);
                     return Ok(());
                 }
                 // Answered here, during the handshake, because listing must not
@@ -231,7 +253,7 @@ where
                         return Ok(());
                     }
                     Frame::SetEnv(env) => {
-                        sessions.lock().env.extend(env);
+                        merge_env(&mut sessions.lock().env, env);
                     }
                     // A client has no business announcing these.
                     Frame::Hello(_) | Frame::Exited { .. } | Frame::Sessions(_) => {}
@@ -351,6 +373,50 @@ fn summarise(sessions: &Arc<Mutex<Sessions>>) -> Vec<crate::protocol::SessionSum
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_value_unsets_rather_than_setting_an_empty_string() {
+        // The failure this prevents, which is silent and expensive: switch from
+        // a custom provider back to Anthropic, and keep talking to the custom
+        // provider because a merge cannot express a removal. The session would
+        // be billed to, and its prompts sent to, whoever the last profile named.
+        let mut env: std::collections::BTreeMap<String, String> =
+            [("ANTHROPIC_BASE_URL", "https://vendor.test"), ("ANTHROPIC_AUTH_TOKEN", "tok")]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect();
+
+        merge_env(
+            &mut env,
+            [("ANTHROPIC_BASE_URL", ""), ("ANTHROPIC_AUTH_TOKEN", ""), ("ANTHROPIC_MODEL", "opus")]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+        );
+
+        // Removed, not set to "" — an empty `ANTHROPIC_BASE_URL` in the real
+        // environment is not reliably the same as an absent one.
+        assert!(!env.contains_key("ANTHROPIC_BASE_URL"), "{env:?}");
+        assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN"), "{env:?}");
+        assert_eq!(env.get("ANTHROPIC_MODEL").map(String::as_str), Some("opus"));
+    }
+
+    #[test]
+    fn setting_env_still_merges_with_what_is_already_there() {
+        // The account token and a model profile are delivered by two separate
+        // calls; if the second replaced the map, whichever arrived first would
+        // be lost and the session would start signed out.
+        let mut env: std::collections::BTreeMap<String, String> =
+            [("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), "oat".to_owned())].into_iter().collect();
+
+        merge_env(
+            &mut env,
+            [("ANTHROPIC_MODEL".to_owned(), "opus".to_owned())].into_iter().collect(),
+        );
+
+        assert_eq!(env.get("CLAUDE_CODE_OAUTH_TOKEN").map(String::as_str), Some("oat"));
+        assert_eq!(env.get("ANTHROPIC_MODEL").map(String::as_str), Some("opus"));
+    }
 
     #[test]
     fn the_endpoint_is_version_stamped() {

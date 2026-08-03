@@ -440,6 +440,44 @@ either. The Claude account token reaches a host via `rmux-agent setenv`, which r
 it in memory only and applies it to sessions it spawns. Verified on a real host: the token
 reaches the session's environment and appears in **zero** process argv.
 
+## Model profiles — running against Kimi, GLM or a gateway
+
+Claude Code picks its provider out of the environment, so "use GLM here" is a set of
+variables. `rmux_claude::profile` is that set, named and saved; `src-tauri/src/model_profile.rs`
+stores and applies it.
+
+- **A profile decides where the operator's credential is sent.** `ANTHROPIC_BASE_URL` and
+  `ANTHROPIC_AUTH_TOKEN` travel together, so the *endpoint* is printed everywhere a profile is
+  shown and is never inferred from its name — a profile called "GLM" can carry any URL at all.
+- **Applying a profile must be able to *unset*.** The daemon merged the environment it was
+  handed, which is right for adding an account and wrong here: switching from a vendor back to
+  Anthropic would leave the old base URL in place, and the session would talk to — and be
+  billed by — the previous provider while the UI said otherwise. An **empty value now means
+  removal** (`daemon::merge_env`), and every apply sends *every* managed variable, empty for
+  the ones it does not set. `apply_to_target` therefore runs even when no profile is selected:
+  selecting nothing is an instruction to undo, not an absence. The clear-set spans the keys of
+  every *other* stored profile too, or switching leaves behind whatever a different one
+  introduced.
+- **It reaches a host by `rmux-agent setenv`, never argv** — same path and same reason as the
+  account token. Verified on a real host: the variables arrive in the session's environment,
+  removal works, and `ps -eo args` shows the token in **zero** processes.
+- **The profile set lives in the OS keychain as one JSON document**, not `localStorage` — it
+  holds a paid credential, and that quota is shared with the session list. The UI is given a
+  *redacted* view (`ProfileView`), and editing re-sends a whole block rather than round-tripping
+  the stored token back through the webview. The edit form says the box is empty on purpose.
+- **A profile is per-session and kept with it**, like `--dangerously-skip-permissions`: which
+  provider a piece of work runs against is a property of that work, and an app-wide default
+  would move a conversation to another provider on the next restart with nothing on screen to
+  say so. A session naming a deleted profile **refuses to start** rather than falling back to
+  Anthropic, because a silent change of provider is the failure worth being loud about.
+- **Only `ANTHROPIC_*` and `CLAUDE_CODE_*` keys are carried**, and refused keys are *named*.
+  A profile is not a general-purpose environment editor; `PATH` and `LD_PRELOAD` do not belong
+  in one. Unknown keys inside those two namespaces are still carried — Claude Code gains
+  variables faster than a hard-coded list can.
+- **The paste is parsed, not retyped.** People have these as a block of `KEY=value \` lines;
+  eight text fields would mean transcribing a base URL by hand, and a typo there points a
+  credential at the wrong host without ever looking wrong.
+
 ## Reading a conversation back
 
 `crates/rmux-claude/src/transcript.rs` reads Claude's own `.jsonl` rather than scraping the

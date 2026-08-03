@@ -5,6 +5,7 @@ import { api, type ConfigHost, type TargetRef } from "../lib/api";
 import { ClaudeSessionPicker } from "./ClaudeSessionPicker";
 import { AllSessions } from "./AllSessions";
 import { PermissionChoice } from "./PermissionChoice";
+import { ModelChoice } from "./ModelChoice";
 import { FolderBrowser } from "./FolderBrowser";
 import { basename, useSessions } from "../lib/sessions";
 
@@ -41,6 +42,9 @@ export function NewSession({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   // Per-launch, never persisted as a default — see `PermissionChoice`.
   const [skipPermissions, setSkipPermissions] = useState(false);
+  // Which provider this session runs against. Also per-session — see
+  // `ModelChoice`. `null` is Anthropic.
+  const [modelProfile, setModelProfile] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
   const filterRef = useRef<HTMLInputElement>(null);
@@ -115,7 +119,14 @@ export function NewSession({ onClose }: { onClose: () => void }) {
     try {
       // Resuming adopts the conversation's own name; a new one starts as the
       // folder and picks up Claude's title once the work has a shape.
-      await addSession(target, folder, title?.trim() || basename(folder), resume, skipPermissions);
+      await addSession(
+        target,
+        folder,
+        title?.trim() || basename(folder),
+        resume,
+        skipPermissions,
+        modelProfile ?? undefined,
+      );
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -290,11 +301,19 @@ export function NewSession({ onClose }: { onClose: () => void }) {
             starts Claude. Asking on the screen where the decision is made beats
             a setting elsewhere that the operator has to remember the state of. */}
         {(step.kind === "all" || step.kind === "claude") && (
-          <PermissionChoice
-            value={skipPermissions}
-            onChange={setSkipPermissions}
-            disabled={creating}
-          />
+          <>
+            <ModelChoice
+              value={modelProfile}
+              onChange={setModelProfile}
+              disabled={creating}
+              hintWhenEmpty
+            />
+            <PermissionChoice
+              value={skipPermissions}
+              onChange={setSkipPermissions}
+              disabled={creating}
+            />
+          </>
         )}
 
         {step.kind === "folder" && (

@@ -116,6 +116,7 @@ export function ClaudePanel({
   resume,
   fullscreen,
   skipPermissions,
+  modelProfile,
 }: {
   sessionId: string;
   target: TargetRef;
@@ -126,6 +127,15 @@ export function ClaudePanel({
   fullscreen?: boolean;
   /** Launch with `--dangerously-skip-permissions`. Decided when the session was created. */
   skipPermissions?: boolean;
+  /**
+   * The saved model profile to run under. `undefined` is Anthropic.
+   *
+   * Passed on every start, including when absent: the agent daemon outlives
+   * sessions, so the previous profile's variables are still in its environment
+   * and Rust needs the chance to clear them. Omitting this when nothing is
+   * selected would leave a session talking to the last provider used.
+   */
+  modelProfile?: string;
 }) {
   const setStatus = useSessions((s) => s.setStatus);
   const setClaudeSession = useSessions((s) => s.setClaudeSession);
@@ -337,6 +347,7 @@ export function ClaudePanel({
             sessionName: `claude-${sessionId}`,
             fullscreen,
             skipPermissions,
+            modelProfile,
             cols: xterm.cols,
             rows: xterm.rows,
             output,

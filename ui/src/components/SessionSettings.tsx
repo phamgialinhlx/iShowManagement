@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { api, isTauri, type JiraProfile, type JiraProject } from "../lib/api";
 import { useSessions, type Session } from "../lib/sessions";
+import { ModelChoice } from "./ModelChoice";
 
 /**
  * Settings for one session.
@@ -24,6 +25,7 @@ import { useSessions, type Session } from "../lib/sessions";
  */
 export function SessionSettings({ session }: { session: Session }) {
   const configure = useSessions((s) => s.configureSession);
+  const setModelProfile = useSessions((s) => s.setModelProfile);
 
   const [profiles, setProfiles] = useState<JiraProfile[] | null>(null);
   const [profile, setProfile] = useState("");
@@ -110,7 +112,23 @@ export function SessionSettings({ session }: { session: Session }) {
           <span className="micro">{session.target.host ?? "this machine"}</span>
         </header>
 
-        <label className="flex flex-col gap-1">
+        {/* Applied on the next start rather than staged with the rest of this
+            form: the provider is read from the environment Claude was spawned
+            with, so a running conversation cannot be moved without restarting
+            it. The note says so, because a control that appears to do nothing
+            is the same "is this broken?" impression as one that does. */}
+        <div className="flex flex-col gap-1">
+          <ModelChoice
+            value={session.modelProfile ?? null}
+            onChange={(id) => setModelProfile(session.id, id ?? undefined)}
+          />
+          <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+            Takes effect the next time this session's Claude starts — restart the Claude tab to
+            switch provider. Profiles are managed under Settings › Models.
+          </span>
+        </div>
+
+        <label className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
           <span className="micro">CLAUDE ACCOUNT</span>
           <input
             value={account}

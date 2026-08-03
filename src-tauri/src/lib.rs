@@ -24,6 +24,7 @@ mod commands;
 mod face_models;
 mod glass;
 mod lock;
+mod model_profile;
 mod settings_window;
 pub mod files;
 pub mod metrics;
@@ -128,6 +129,10 @@ pub fn run() {
             files::fs_rename,
             files::fs_delete,
             files::fs_upload,
+            model_profile::model_profiles,
+            model_profile::model_profile_parse,
+            model_profile::model_profile_save,
+            model_profile::model_profile_delete,
             metrics::metrics_sample,
             metrics::metrics_processes,
             metrics::metrics_kill,

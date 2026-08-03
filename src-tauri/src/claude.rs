@@ -149,6 +149,12 @@ pub async fn claude_start<R: tauri::Runtime>(
     // judge it. A saved setting would silently apply it to work started weeks
     // later on a different machine.
     skip_permissions: Option<bool>,
+    // Which saved model configuration to run under — Kimi, GLM, a gateway. Kept
+    // *with* the session rather than as an app-wide default, because which
+    // provider a piece of work runs against is a property of that work, and a
+    // conversation that silently changed provider on reconnect would be billed
+    // and answered by whoever happened to be selected at the time.
+    model_profile: Option<String>,
     cols: u16,
     rows: u16,
     output: Channel<Response>,
@@ -173,6 +179,15 @@ pub async fn claude_start<R: tauri::Runtime>(
     // Hand the stored Claude account to this host's agent first, so the session
     // starts already signed in. No-op when nothing is stored.
     crate::claude_account::apply_to_target(&app, resolved.as_ref()).await?;
+
+    // Then the model profile, which may override the account's variables — a
+    // profile that carries its own token is meant to win over the stored Claude
+    // login, which is the whole point of selecting one. Applied even when none
+    // is selected: the daemon outlives sessions, so the previous profile's base
+    // URL is still in its environment, and starting without clearing it would
+    // run this session against the old provider while the UI showed Anthropic.
+    crate::model_profile::apply_to_target(&app, resolved.as_ref(), model_profile.as_deref())
+        .await?;
 
     let session = Arc::new(match &session_name {
         Some(name) => {

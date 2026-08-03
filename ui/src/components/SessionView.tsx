@@ -562,6 +562,7 @@ export function SessionView({ session }: { session: Session }) {
             cwd={session.folder}
             resume={session.resume}
             skipPermissions={session.skipPermissions}
+            modelProfile={session.modelProfile}
             fullscreen={session.fullscreen}
           />
         </div>
