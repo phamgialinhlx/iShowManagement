@@ -12,15 +12,26 @@
 //! the caller logs it and carries on — which is what the caller already does
 //! when the socket cannot be created for any other reason.
 
-use std::path::PathBuf;
+//! ## It must mirror the real API exactly, name for name
+//!
+//! A stub nothing on this machine compiles is a stub that is wrong. The first
+//! version of this one declared `handle` as a hand-rolled RPITIT while the real
+//! trait is `#[async_trait]`, and named the event method `publish` where callers
+//! say `emit` — four compile errors that no macOS or Linux build could ever
+//! show, and that surfaced only after a *different* Windows fix let the build
+//! get far enough to reach this crate's consumer. Change `server.rs`'s public
+//! surface and you must change this file in the same commit.
 
-use crate::protocol::Event;
+use std::path::{Path, PathBuf};
 
+use crate::protocol::{Event, Request, Response};
+
+/// Mirrors `server::Handler`, `async_trait` and all — an `async fn` in an impl
+/// desugars to a lifetime bound to `&self`, which a plain
+/// `-> impl Future` declaration does not match (E0195).
+#[async_trait::async_trait]
 pub trait Handler: Send + Sync + 'static {
-    fn handle(
-        &self,
-        request: crate::protocol::Request,
-    ) -> impl std::future::Future<Output = crate::protocol::Response> + Send;
+    async fn handle(&self, request: Request) -> Response;
 }
 
 pub struct ControlServer {
@@ -36,7 +47,7 @@ impl ControlServer {
         )
     }
 
-    pub fn socket(&self) -> &std::path::Path {
+    pub fn socket_path(&self) -> &Path {
         &self.socket
     }
 
@@ -44,5 +55,6 @@ impl ControlServer {
         &self.token
     }
 
-    pub fn publish(&self, _event: Event) {}
+    /// Unreachable — `start` never returns a value to call this on.
+    pub fn emit(&self, _event: Event) {}
 }
