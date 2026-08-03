@@ -8,7 +8,7 @@
 //! working pty, or that a named pipe survives the client dying.
 //!
 //! ```text
-//! RMUX_LIVE_WINDOWS=ytai-win cargo test -p rmux-agent --test live_windows_agent -- --ignored --nocapture
+//! RMUX_LIVE_WINDOWS=my-windows-host cargo test -p rmux-agent --test live_windows_agent -- --ignored --nocapture
 //! ```
 
 use std::path::PathBuf;

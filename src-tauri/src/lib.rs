@@ -24,6 +24,7 @@ mod commands;
 mod face_models;
 mod glass;
 mod lock;
+mod logs;
 mod model_profile;
 mod settings_window;
 pub mod files;
@@ -41,12 +42,39 @@ pub struct TargetInfo {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rmux=debug,warn".into()),
-        )
-        .init();
+    // **Logs go to a file as well as stdout.** A double-clicked `.app` has no
+    // console, and on Windows the app is launched from Explorer with no console
+    // at all — so before this, the only record of a failure on someone else's
+    // machine was their description of it. Settings › Diagnostics exports the
+    // file; see `logs`.
+    //
+    // The directory is resolved here rather than from the `AppHandle`, because
+    // that does not exist until the builder runs and the most interesting lines
+    // are the ones written before it does. The identifier matches
+    // `tauri.conf.json`; a test pins them together.
+    let log_dir = dirs::data_dir()
+        .map(|d| d.join(logs::IDENTIFIER))
+        .unwrap_or_else(std::env::temp_dir);
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "rmux=debug,warn".into());
+
+    match logs::writer(&log_dir) {
+        Some(file) => {
+            use tracing_subscriber::layer::SubscriberExt as _;
+            use tracing_subscriber::util::SubscriberInitExt as _;
+
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer())
+                // No ANSI in the file: colour codes make an exported log
+                // unreadable in every text editor it will be opened in.
+                .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(file))
+                .init();
+        }
+        // A log file is a convenience; failing to start over one would be absurd.
+        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
 
     tauri::Builder::default()
         // Gives a notification rmux's own icon and name. Driven from Rust (see
@@ -178,6 +206,8 @@ pub fn run() {
             settings_window::restart_app,
             glass::glass_status,
             glass::set_glass,
+            logs::log_status,
+            logs::log_export,
         ])
         .setup(|app| {
             // Bring the askpass bridge up before any connection can need it.

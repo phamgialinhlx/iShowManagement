@@ -4,6 +4,7 @@ import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { ClaudeAccountPanel } from "../components/ClaudeAccountPanel";
 import { ModelProfilesPanel } from "../components/ModelProfilesPanel";
+import { DiagnosticsPanel } from "../components/DiagnosticsPanel";
 import { LockPanel } from "../components/LockPanel";
 import { CoworkPanel } from "../components/CoworkPanel";
 import { AppearancePanel } from "../components/AppearancePanel";
@@ -26,7 +27,7 @@ import { SERVER_KEY } from "../components/SignIn";
  * in to one had something to do with the others.
  */
 
-type Section = "claude" | "models" | "lock" | "cowork" | "notifications" | "appearance";
+type Section = "claude" | "models" | "lock" | "cowork" | "notifications" | "appearance" | "diagnostics";
 
 const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "claude", label: "CLAUDE", blurb: "The account your sessions run as" },
@@ -35,6 +36,7 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "cowork", label: "COWORK", blurb: "Your team's server, if you use one" },
   { id: "notifications", label: "NOTIFICATIONS", blurb: "When a session wants you" },
   { id: "appearance", label: "APPEARANCE", blurb: "How much desktop shows through" },
+  { id: "diagnostics", label: "DIAGNOSTICS", blurb: "Export the log when something breaks" },
 ];
 
 export function Settings() {
@@ -130,6 +132,11 @@ export function Settings() {
           {section === "appearance" && (
             <ErrorBoundary label="Appearance">
               <AppearancePanel />
+            </ErrorBoundary>
+          )}
+          {section === "diagnostics" && (
+            <ErrorBoundary label="Diagnostics">
+              <DiagnosticsPanel />
             </ErrorBoundary>
           )}
           {section === "cowork" && (

@@ -7,7 +7,7 @@
 //! login shell is bash rather than the `cmd.exe` Windows puts in `$SHELL`.
 //!
 //! ```text
-//! RMUX_LIVE_WINDOWS=ytai-win cargo test -p rmux-fs --test live_windows -- --ignored --nocapture
+//! RMUX_LIVE_WINDOWS=my-windows-host cargo test -p rmux-fs --test live_windows -- --ignored --nocapture
 //! ```
 
 use rmux_fs::{FileContent, FileSystem, SearchQuery, TargetFs};

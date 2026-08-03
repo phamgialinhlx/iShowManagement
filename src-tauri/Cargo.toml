@@ -27,6 +27,7 @@ rmux-claude.workspace = true
 
 anyhow.workspace = true
 base64.workspace = true
+dirs.workspace = true
 camino.workspace = true
 parking_lot.workspace = true
 portable-pty.workspace = true

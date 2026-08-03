@@ -295,8 +295,8 @@ mod tests {
     #[test]
     fn unquoted_whitespace_still_separates_aliases() {
         // Faithful to ssh: `Host a b` means `ssh a` and `ssh b` both work.
-        let found = hosts("Host Cuong Pcloud\n    HostName 192.168.100.123\n");
-        assert_eq!(found.iter().map(|h| h.alias.as_str()).collect::<Vec<_>>(), ["Cuong", "Pcloud"]);
+        let found = hosts("Host Build Server\n    HostName 192.168.100.123\n");
+        assert_eq!(found.iter().map(|h| h.alias.as_str()).collect::<Vec<_>>(), ["Build", "Server"]);
     }
 
     #[test]

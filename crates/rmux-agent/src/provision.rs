@@ -561,7 +561,7 @@ mod windows_tests {
         // Windows will not execute a file without it, whatever the contents —
         // so the upload succeeds, the size is right, and running it fails with
         // an error that never mentions extensions.
-        let win = remote_path_for("/c/Users/YTAI", "0.1.0", "abc123", "x86_64-pc-windows-gnu");
+        let win = remote_path_for("/c/Users/dev", "0.1.0", "abc123", "x86_64-pc-windows-gnu");
         assert!(win.ends_with(".exe"), "{win}");
 
         // And Unix must not gain one.

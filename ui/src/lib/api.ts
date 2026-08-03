@@ -322,6 +322,8 @@ export type GlassOptions = {
 export type SearchQuery = { text: string; caseSensitive?: boolean; regex?: boolean };
 export type SearchHit = { path: string; line: number; text: string };
 
+export type LogStatus = { path: string; bytes: number; hasPrevious: boolean };
+
 /** One environment variable of a model profile, as the UI is allowed to see it. */
 export type ProfileVar = {
   key: string;
@@ -557,6 +559,11 @@ export const api = {
     call<ModelProfile[]>("model_profile_save", { id, name, text }),
 
   modelProfileDelete: (id: string) => call<ModelProfile[]>("model_profile_delete", { id }),
+
+  logStatus: () => call<LogStatus>("log_status"),
+
+  /** Writes one shareable file to the desktop and returns its full path. */
+  logExport: () => call<string>("log_export"),
 
   metricsSample: (target: TargetRef) => call<MetricsSample>("metrics_sample", { target }),
 
