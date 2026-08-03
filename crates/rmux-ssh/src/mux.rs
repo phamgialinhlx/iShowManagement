@@ -320,6 +320,9 @@ mod tests {
         }
     }
 
+    // Binds a Unix socket to produce the debris, so it can only run where there
+    // are Unix sockets. ControlMaster is a POSIX-only feature anyway.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stale_socket_is_cleared_before_starting_a_master() {
         // Reproduces the debris a crashed run leaves: binding a listener creates

@@ -15,23 +15,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-use super::{PromptKind, classify};
-
-/// A credential request on its way to the UI.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Prompt {
-    /// Correlates the answer with the request.
-    pub id: String,
-    /// The text OpenSSH gave us, shown verbatim — it names the host and the
-    /// account, which is what tells the user whether to trust it.
-    pub message: String,
-    pub kind: PromptKind,
-}
+use super::{Prompt, classify};
 
 /// What the helper sends us.
 #[derive(Debug, Deserialize)]
@@ -177,6 +165,7 @@ fn short_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::PromptKind;
     use super::*;
 
     fn answer_with(reply: Option<&'static str>) -> Answerer {

@@ -125,6 +125,30 @@ PIN yields nothing. Face unlock is offered as a convenience over typing, never a
 **macOS (Apple Silicon)** — download the `.dmg` from Releases. It is signed and notarised, so
 it opens with no warning.
 
+**Windows (x64)** — download `rmux_<version>_x64-setup.exe` from Releases and run it. The `.msi`
+beside it installs the same app and is there for anyone deploying by policy; pick one, not both.
+Windows will show a SmartScreen warning — the build is not code-signed — so choose *More info →
+Run anyway*. WebView2 is fetched during install if the machine does not already have it, which
+most Windows 11 machines do.
+
+**Linux (x64)** — `.deb`, `.rpm` and an `.AppImage`, built against glibc on Ubuntu 22.04 so they
+also run on newer distributions:
+
+```sh
+sudo apt install ./rmux_<version>_amd64.deb     # Debian, Ubuntu
+sudo dnf install ./rmux-<version>-1.x86_64.rpm  # Fedora, RHEL
+chmod +x rmux_<version>_amd64.AppImage && ./rmux_<version>_amd64.AppImage
+```
+
+The packages depend on **WebKitGTK 4.1**; `apt` and `dnf` pull it in, and the AppImage carries
+its own copy.
+
+> **Key-based hosts only, on every platform right now.** A host that asks for a **password or a
+> 2FA code** fails immediately with a reason rather than hanging. The `SSH_ASKPASS` helper that
+> routes those prompts to the UI is not yet shipped inside any of these packages, and on Windows
+> the bridge it talks to is compiled out besides — it is a Unix socket whose security model is
+> filesystem permissions Windows does not have.
+
 Building from source:
 
 ```sh

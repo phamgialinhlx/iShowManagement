@@ -14,11 +14,13 @@
 //! the server hangs up. Otherwise any local process could ask rmux to pop a
 //! credential dialog and read back what the user typed.
 
-use std::io::{BufRead, BufReader, Write};
 use std::process::ExitCode;
 
 #[cfg(unix)]
 fn main() -> ExitCode {
+    // Imported here rather than at the top: on Windows the whole body below is
+    // compiled out, and top-level imports it no longer uses are warnings.
+    use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 

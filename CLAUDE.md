@@ -209,6 +209,53 @@ emit ordinary POSIX and know nothing about it.
 - `tests/live_windows.rs` drives all of it against a real host — a filename containing `&` and
   `%PATH%`, a binary upload over stdin, search, and the clobber guard.
 
+## Shipping rmux *for* Windows and Linux
+
+The section above is about Windows as a **target**. This one is about rmux **running** there,
+which is a different problem with different answers, and conflating the two wastes an afternoon.
+
+**The app cannot be cross-compiled; the agent can.** Tauri links each platform's own webview —
+WebKitGTK, WebView2, WKWebView — and those are native system libraries with native toolchains.
+`.github/workflows/release.yml` therefore builds the app on the target OS. The *agents* are
+built once on macOS with zig and handed to every runner, because they are uploaded to hosts and
+have nothing to do with which machine the app runs on. Building them per-runner would give three
+fingerprints for one release, and the fingerprint is what decides whether a host starts a new
+daemon.
+
+- **A Unix-socket feature gets a stub on Windows, never a half-port.** Two of them now:
+  `rmux-control::server` and `rmux-ssh::askpass::server`. The pattern is `#[cfg(unix)] pub mod
+  server;` beside a `#[path = "server_stub.rs"]` twin whose `start` bails with a reason.
+  The askpass one is the sharper case — two of its three guards *are* filesystem permissions, and
+  `restrict_to_owner` on Windows is already a no-op, so a naive port would keep the shape of the
+  security model with only the token left behind it. That is fail-open, on the socket that
+  dispenses credentials. Neither stub costs a workbench feature: key-based hosts are untouched,
+  and with no helper registered `env_for_gui_prompts` tells `ssh` not to wait for a terminal, so
+  password and 2FA hosts fail fast with a reason instead of hanging. `askpass::start` failing is
+  already the caller's expected path, so no call site changed.
+- **Check the Windows target locally before spending a CI cycle on it.** `cargo check --target
+  x86_64-pc-windows-msvc -p <crate>` works on this Mac for every crate that does not pull `ring`
+  (only `rmux-claude` does, and its C build needs MSVC headers). Every Windows break so far has
+  been an unconditional `use` of a Unix-only item — exactly what this catches. One CI round trip
+  is ten minutes and finds one error; this finds all of them in seconds.
+- **`tauri.conf.json` carries no `version`.** Tauri falls back to `Cargo.toml`, and two copies is
+  how `rmux_0.1.0_amd64.deb` came to be published under a release tagged `rmux-v0.1.1`. The
+  version an installer's *filename* claims is the one thing a user checks it by.
+- **The workflow checks out the tag, not the branch a dispatch ran from.** `workflow_dispatch`
+  checks out whatever ref was selected while publishing under the `tag` input, so the two can
+  disagree — and did: `rmux-v0.1.1` names a commit two fixes older than the branch built against
+  it, so the release's macOS dmg and its would-be Linux bundles came from different source.
+- **`max-parallel: 1`, and that is not about runner cost.** `tauri-action` creates the release
+  when it cannot find one, so run together both jobs look, both find nothing, both create, and
+  the loser takes a 422 and drops its installers on the floor.
+- **The job needs `permissions: contents: write`.** The default workflow token here is read-only.
+  Without it Linux bundled a `.deb`, an `.rpm` and an AppImage and then died on the first upload
+  with "Resource not accessible by integration" — which reads as a packaging failure and is not
+  one. The build being green up to the last line is precisely what makes it misleading.
+- **CI does not build macOS**, and must not be *made* to. It has no Developer ID certificate, and
+  `tauri-action` fails trying to import one rather than falling back to unsigned. macOS is built,
+  signed and notarised on the developer's Mac by `scripts/release-mac.sh`; CI opens the release
+  as a **draft** so that dmg can be added before anyone publishes it.
+
 ## Managing the host
 
 - **A pid crosses the IPC bridge as a `u32`.** This is the one place the operator points at

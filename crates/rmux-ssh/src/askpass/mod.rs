@@ -22,9 +22,18 @@ use std::path::PathBuf;
 use parking_lot::RwLock;
 use serde::Serialize;
 
+// **Unix only, and stubbed rather than half-ported on Windows.** Two of the
+// three guards on this socket are filesystem permissions, which Windows does
+// not have — see `server_stub.rs` for why that makes a naive port worse than
+// no port at all.
+#[cfg(unix)]
 pub mod server;
 
-pub use server::{AskpassServer, Prompt};
+#[cfg(not(unix))]
+#[path = "server_stub.rs"]
+pub mod server;
+
+pub use server::AskpassServer;
 
 /// A boxed future, spelled out so this crate needn't depend on `futures`.
 pub type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
@@ -97,6 +106,22 @@ fn env_for(config: Option<&AskpassConfig>) -> BTreeMap<String, String> {
     }
 
     env
+}
+
+/// A credential request on its way to the UI.
+///
+/// Lives here rather than beside the server because it is plain data with no
+/// platform in it, and the server it travels through is compiled out on
+/// Windows.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Prompt {
+    /// Correlates the answer with the request.
+    pub id: String,
+    /// The text OpenSSH gave us, shown verbatim — it names the host and the
+    /// account, which is what tells the user whether to trust it.
+    pub message: String,
+    pub kind: PromptKind,
 }
 
 /// What kind of answer a prompt wants — drives which UI is shown.

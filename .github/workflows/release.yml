@@ -33,8 +33,18 @@ jobs:
   agents:
     name: cross-compile the agents
     runs-on: macos-latest
+    permissions:
+      contents: read
     steps:
+      # **The tag, not the branch a dispatch happened to run from.** On
+      # `workflow_dispatch` the default checkout is whatever ref was selected in
+      # the UI, while the artifacts are published under the `tag` input — so the
+      # two can disagree, and a release can be assembled from code the tag does
+      # not point at. That already happened here: `rmux-v0.1.1` names a commit
+      # two fixes older than the branch that was built against it.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install zig and cargo-zigbuild
         run: |
@@ -54,6 +64,13 @@ jobs:
       # One platform failing must not cancel the others: a Linux packaging
       # problem should still leave a usable Windows build to hand out.
       fail-fast: false
+      # **One at a time, and that is not about runner cost.** `tauri-action`
+      # creates the release when it cannot find one, so run together both jobs
+      # look, both find nothing, and both create — the loser gets a 422 and
+      # drops its installers on the floor. Serialising makes the first job the
+      # one that opens the draft and the second the one that joins it. The price
+      # is wall-clock: the two builds add up instead of overlapping.
+      max-parallel: 1
       matrix:
         include:
           # macOS is deliberately absent. It is built, signed and notarised on
@@ -69,8 +86,17 @@ jobs:
             os: ubuntu-22.04
             args: ""
     runs-on: ${{ matrix.os }}
+    # Without this the whole build succeeds and then throws it away. `tauri-action`
+    # uploads to the release with `GITHUB_TOKEN`, and this repository's default
+    # workflow token is read-only — so Linux bundled a .deb, an .rpm and an
+    # AppImage, and died on the first upload with "Resource not accessible by
+    # integration", which reads as a packaging failure and is not one.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       # WebKitGTK and its friends. Ubuntu 22.04 rather than latest on purpose:
       # a binary built against an older glibc runs on newer distributions, and
