@@ -79,3 +79,20 @@ mod tests {
         assert_eq!(WINDOW_URL, format!("index.html?window={LABEL}"));
     }
 }
+
+/// Relaunch the app.
+///
+/// Offered beside Apply rather than required by it. Every appearance change now
+/// takes effect live — the `storage` listener in `AppearancePanel` is what
+/// carries it between windows — so a restart is a *clean slate*, not a
+/// correctness step. It earns its place for one thing: the terminals re-measure
+/// their cell size from scratch, which is the tidiest way to settle xterm and
+/// its WebGL atlas after an interface-scale change.
+///
+/// Sessions survive it. Shells and Claude run under `rmux-agent` on the target,
+/// so relaunching reattaches rather than restarts the work — which is precisely
+/// why offering this is safe at all.
+#[tauri::command]
+pub fn restart_app<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    app.restart();
+}

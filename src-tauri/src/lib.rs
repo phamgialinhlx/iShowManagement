@@ -168,6 +168,7 @@ pub fn run() {
             files::ssh_config_hosts,
             background::background_set,
             background::background_clear,
+            settings_window::restart_app,
             glass::glass_status,
             glass::set_glass,
         ])

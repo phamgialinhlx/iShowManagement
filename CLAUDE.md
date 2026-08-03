@@ -208,6 +208,28 @@ three-level ramp is load-bearing and three independent colours is three chances
 to invert it. `--primary` is a bare `r g b` triplet, never a hex: every use is
 `rgb(var(--primary) / <alpha>)`.
 
+**Interface scale is `zoom` on `#root`, uncompensated, and viewport units are banned under
+it.** Three separate mistakes were made here and each one looked like a layout bug:
+
+- **On `#root`, never `:root`.** Zooming the document element scales the root box while its
+  `height: 100%` still resolves against the *unscaled* viewport, so the app was laid out into
+  a fraction of its own window and clipped at every scale but 100%.
+- **No `calc(100% / zoom)` compensation.** WebKit implements the *standardised* `zoom`, where
+  percentages already resolve inside the zoomed coordinate space — so compensating divides a
+  second time and leaves a band of desktop down the right and bottom edges. Measured, because
+  Chrome still uses the legacy behaviour and gives the opposite answer:
+  `viewport 1712x931 · width:100% → 1695x931 · calc(100%/1.09) → 1555`. `ui/zoom-check.html`
+  reproduces it; run it in **Safari**, not Chrome.
+- **`h-full`, never `h-screen`.** Viewport units resolve against the real viewport and are not
+  scaled by `zoom`, so a `100vh` box renders taller than the window containing it and the
+  sheet overflows its own frame. `#root` is exactly the window, so filling the parent is both
+  correct and scale-proof.
+
+**The Settings window is never scaled** (`--ui-zoom` is pinned to 1 there). It carries the
+control, and a control that resizes itself as it is dragged slides out from under the cursor
+and outgrows its own window. The workbench is visible while Settings is open, so the effect is
+watched on the thing being configured rather than on the instrument doing the configuring.
+
 **Real glass is native, and the class is looked up rather than linked**
 (`src-tauri/src/glass.rs`). The corollary of the paragraph above is that glass cannot come
 from the page at all — you cannot refract light you were never handed. macOS 26's
@@ -275,6 +297,25 @@ stopped working. These are not aspirations; each one is a rule with a test.
   value behind a click. Selection is carried by more than tone — at 9px a
   tone-only difference is not a state anyone can see, so the selected chip also
   wears an underline.
+- **A terminal must re-fit on every signal, not only on its own resize.** `ResizeObserver`
+  correctly bails on a zero-sized host — a hidden pane measures 0x0, and fitting to that tells
+  the far side the window collapsed — but that leaves the pane holding whatever cell grid it
+  last computed. An interface-scale change arriving from the *Settings window* does not
+  reliably move the element, so the terminal drew into a fraction of its pane and left the
+  rest empty. The tell was the operator's: "when I scroll the scale bar it comes back to
+  normal" — a window you have to jiggle to look right is the definition of not responsive. Both
+  xterm hosts now also refit on `storage` (the appearance channel) and on window `resize`,
+  across two animation frames so the zoom lands before a cell is measured.
+- **Settings are staged, not live — and the boundary is labelled.** Appearance edits a draft
+  and nothing moves until Apply; a slider that re-lays the window out on every tick reads as
+  the app changing under the operator's hands, and it makes "I have not applied this yet"
+  invisible. The exceptions are the two controls whose entire value is immediate feedback —
+  user CSS and the GPU toggle — so they sit *below* the Apply bar under a heading that says
+  they apply as you type. An unlabelled mix of staged and live is worse than either.
+  **Restart is offered, never required.** Everything propagates across windows already (the
+  `storage` listener); a relaunch only buys the terminals a clean re-measure after a scale
+  change. The copy states that sessions survive it, because that is the only question anyone
+  has before pressing it.
 - **Every mutating control reports its outcome inline, beside itself.** Disabled
   plus a progress label in flight, then confirmation or the error. Errors persist
   until the next attempt; successes may fade after ~2.5s. An operation that can

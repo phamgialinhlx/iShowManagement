@@ -57,7 +57,13 @@ export function Settings() {
   }, []);
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden">
+    // `h-full w-full`, not `h-screen w-screen`. Viewport units resolve against
+    // the real viewport and are *not* scaled by `zoom`, so under any interface
+    // scale above 100% a `100vh` box renders that much taller than the window it
+    // is in and the sheet overflows its own frame. `#root` is already exactly
+    // the window (see `signal-room.css`), so filling the parent is both correct
+    // and scale-proof.
+    <div className="flex h-full w-full flex-col overflow-hidden">
       {/* The same backdrop the workbench paints. `body` is transparent by
           design — the native window is translucent and this layer is what makes
           it read as glass — so a screen that omits it is genuinely see-through,

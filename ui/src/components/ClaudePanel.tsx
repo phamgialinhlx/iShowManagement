@@ -386,11 +386,37 @@ export function ClaudePanel({
     });
     observer.observe(host);
 
+    // **Refit when the interface scale changes, not only when the pane
+    // resizes.** The `ResizeObserver` above is the normal path, but it bails on
+    // a zero-sized host — correct while a pane is hidden — and an appearance
+    // change arriving from the *Settings window* does not necessarily move this
+    // element in a way that fires it. The terminal was then left at the cell
+    // grid it had computed earlier: content filling part of the pane, the rest
+    // empty, and nudging any slider "fixed" it because that finally produced a
+    // resize. A window that has to be jiggled to look right is the definition
+    // of not responsive.
+    const refit = () => {
+      if (host.clientWidth === 0 || host.clientHeight === 0) return;
+      fit.fit();
+      if (id) void invoke("claude_resize", { id, cols: xterm.cols, rows: xterm.rows });
+    };
+    // Two frames: the first lets the zoom land, the second lets layout settle
+    // before xterm measures a cell.
+    const onAppearance = (event: StorageEvent) => {
+      if (event.key && event.key !== "rmux.appearance") return;
+      requestAnimationFrame(() => requestAnimationFrame(refit));
+    };
+    window.addEventListener("storage", onAppearance);
+    window.addEventListener("resize", refit);
+
+
     if (host.clientWidth > 0 && host.clientHeight > 0) startClaude();
 
     return () => {
       disposed = true;
       observer.disconnect();
+      window.removeEventListener("storage", onAppearance);
+      window.removeEventListener("resize", refit);
       onData.dispose();
       xtermRef.current = null;
       xterm.dispose();

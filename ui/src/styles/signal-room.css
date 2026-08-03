@@ -122,21 +122,26 @@ body,
 /*
  * Interface scale.
  *
- * On `#root` rather than `:root`, and compensated. `zoom` on the document
- * element scales the root box while `height: 100%` still resolves against the
- * unscaled viewport — so at 85% the app was laid out into 85% of its own window
- * and clipped, with a scrollbar stranded in the middle of the settings sheet.
- * Here the percentage resolves against `body`, which is *not* zoomed, so
- * `(100% / z) * z` is exactly the window at every scale.
+ * On `#root` rather than `:root`, and **not** compensated — `100%` is already
+ * right. This browser implements the standardised `zoom`, where percentages
+ * resolve inside the zoomed coordinate space, so a `calc(100% / z)` divides by
+ * the scale a second time: at 109% the app filled 91% of its window and left a
+ * band of desktop down the right and bottom edges. Measured in real WebKit
+ * (`ui/zoom-check.html`), which is the only engine whose answer counts here —
+ * Chrome still uses the legacy behaviour and would have said the opposite:
  *
- * It also fixes the overlays for free: an element with `zoom` other than 1 is a
+ *   viewport 1712x931 · width:100% -> 1695x931 · calc(100%/1.09) -> 1555
+ *
+ * It stays on `#root` rather than `:root` because zooming the document element
+ * scales the root box while `height: 100%` resolves against the *unscaled*
+ * viewport, which clipped the app at any scale but 100%.
+ *
+ * Overlays come out right for free: an element with `zoom` other than 1 is a
  * containing block for fixed-position descendants, so `.atmosphere` and the
- * modals resolve against `#root` — which is, by the line above, the window.
+ * modals resolve against `#root` — which is the window.
  */
 #root {
   zoom: var(--ui-zoom, 1);
-  width: calc(100% / var(--ui-zoom, 1));
-  height: calc(100% / var(--ui-zoom, 1));
 }
 
 body {

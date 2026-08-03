@@ -408,6 +408,9 @@ export const api = {
   backgroundSet: (dataBase64: string) => call<string>("background_set", { data: dataBase64 }),
   backgroundClear: () => call<void>("background_clear"),
 
+  /** Relaunch. Sessions survive it — they run under the agent on the target. */
+  restartApp: () => call<void>("restart_app"),
+
   glassStatus: () => call<GlassStatus>("glass_status"),
   setGlass: (options: GlassOptions) => call<GlassStatus>("set_glass", { options }),
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 
+
 import { api, isTauri } from "../lib/api";
 import { BackgroundPicker } from "./BackgroundPicker";
 import { loadUserCss, saveUserCss } from "../lib/user-css";
@@ -106,6 +107,22 @@ function load(): Appearance {
 }
 
 /**
+ * Is this document the Settings window?
+ *
+ * Read from the URL for the same reason `main.tsx` does: it must be known
+ * synchronously, before the first paint, or the sheet flashes at the wrong
+ * scale.
+ */
+const isSettingsWindow =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("window") === "settings";
+
+/** The scale as a zoom factor, clamped to what the slider offers. */
+function zoom(scale: number): number {
+  return Math.min(Math.max(scale, 60), 200) / 100;
+}
+
+/**
  * `#rrggbb` to the `r g b` triplet `--primary` is built from.
  *
  * Returns null rather than a guess for anything unparseable: a malformed value
@@ -197,7 +214,14 @@ export function applyAppearance(a: Appearance = load()) {
   // scale but 100%. `#root` is compensated with `calc(100% / zoom)`, whose
   // percentage resolves against an *unzoomed* parent, so the product is exactly
   // the window. See `signal-room.css`.
-  root.style.setProperty("--ui-zoom", String(Math.min(Math.max(a.scale, 60), 200) / 100));
+  //
+  // **The settings window is never scaled.** It carries the control, and a
+  // control that resizes itself as you drag it slides out from under the cursor
+  // — the slider moves, the sheet outgrows its own window, and the setting
+  // becomes hard to put back. The workbench is visible while Settings is open,
+  // so the effect is watched there, on the thing being configured, rather than
+  // on the instrument doing the configuring.
+  root.style.setProperty("--ui-zoom", isSettingsWindow ? "1" : String(zoom(a.scale)));
 
   if (a.textColor && a.textColor.toLowerCase() !== DEFAULT_TEXT) {
     root.style.setProperty("--text", a.textColor);
@@ -254,13 +278,30 @@ export function applyAppearance(a: Appearance = load()) {
 }
 
 export function AppearancePanel() {
-  const [appearance, setAppearance] = useState<Appearance>(load);
+  // **Two states, deliberately.** `saved` is what the app is wearing; `draft` is
+  // what the operator is composing. Nothing crosses from one to the other
+  // without Apply.
+  //
+  // Live-applying every keystroke was the original design and it reads as the
+  // app changing under you — worst of all on a slider, where each tick of the
+  // interface scale re-laid the whole window out mid-drag. Editing a copy makes
+  // the change deliberate, makes "I have not applied this yet" visible, and
+  // makes Discard possible at all.
+  const [saved, setSaved] = useState<Appearance>(load);
+  const [draft, setDraft] = useState<Appearance>(saved);
   const [glassAvailable, setGlassAvailable] = useState(false);
+  const [restarting, setRestarting] = useState(false);
 
-  useEffect(() => {
-    applyAppearance(appearance);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(appearance));
-  }, [appearance]);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
+
+  const commit = () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
+    applyAppearance(draft);
+    setSaved(draft);
+    // Other windows learn about this through the `storage` event, which does
+    // not fire in the document that wrote it — so this window applies it
+    // directly and every other one is told.
+  };
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -274,7 +315,7 @@ export function AppearancePanel() {
   // exactly one of these two knobs is meaningful at a time. Showing both would
   // leave a slider that visibly does nothing — the mistake the Frost setting
   // already made once.
-  const native = glassAvailable && appearance.glass;
+  const native = glassAvailable && draft.glass;
 
   const row = (
     label: string,
@@ -318,22 +359,22 @@ export function AppearancePanel() {
       </header>
 
       <BackgroundPicker
-        mode={appearance.background}
-        color={appearance.backgroundColor}
-        image={appearance.backgroundImage}
-        cover={appearance.backgroundCover}
-        onChange={(patch) => setAppearance((a) => ({ ...a, ...patch }))}
+        mode={draft.background}
+        color={draft.backgroundColor}
+        image={draft.backgroundImage}
+        cover={draft.backgroundCover}
+        onChange={(patch) => setDraft((a) => ({ ...a, ...patch }))}
       />
 
       {/* Hidden rather than disabled while a background is painted: glass
           refracts what is behind the *window*, so a painted background covers
           it outright. Offering a switch that cannot show its effect is the
           thing this settings screen is trying hardest not to do. */}
-      {appearance.background === "desktop" && (
+      {draft.background === "desktop" && (
         <LiquidGlass
           available={glassAvailable}
-          value={appearance}
-          onChange={(patch) => setAppearance((a) => ({ ...a, ...patch }))}
+          value={draft}
+          onChange={(patch) => setDraft((a) => ({ ...a, ...patch }))}
         />
       )}
 
@@ -341,20 +382,20 @@ export function AppearancePanel() {
         ? row(
             "OVERLAY",
             "Colour laid over the glass, for contrast under small text. Nothing else here simulates glass any more — macOS is drawing the real thing.",
-            appearance.overlay,
+            draft.overlay,
             0,
             50,
             "%",
-            (overlay) => setAppearance((a) => ({ ...a, overlay })),
+            (overlay) => setDraft((a) => ({ ...a, overlay })),
           )
         : row(
             "GLASS",
             "Lower shows more desktop. Too low and 9px labels stop being readable over a bright wallpaper.",
-            appearance.tint,
+            draft.tint,
             20,
             100,
             "%",
-            (tint) => setAppearance((a) => ({ ...a, tint })),
+            (tint) => setDraft((a) => ({ ...a, tint })),
           )}
 
       {!native && (
@@ -369,11 +410,11 @@ export function AppearancePanel() {
       {row(
         "INTERFACE SCALE",
         "Everything gets bigger together — labels, panels and terminal text. Terminals re-fit to the new size.",
-        appearance.scale,
+        draft.scale,
         60,
         200,
         "%",
-        (scale) => setAppearance((a) => ({ ...a, scale })),
+        (scale) => setDraft((a) => ({ ...a, scale })),
       )}
 
       <div className="flex flex-col gap-3">
@@ -382,17 +423,17 @@ export function AppearancePanel() {
         <Swatch
           label="TEXT"
           hint="The dimmer two levels are derived from this, so headings, prose and micro-labels keep their order."
-          value={appearance.textColor ?? DEFAULT_TEXT}
+          value={draft.textColor ?? DEFAULT_TEXT}
           fallback={DEFAULT_TEXT}
-          onChange={(textColor) => setAppearance((a) => ({ ...a, textColor }))}
+          onChange={(textColor) => setDraft((a) => ({ ...a, textColor }))}
         />
 
         <Swatch
           label="ACCENT"
           hint="Used only where you must act — a waiting prompt, an error, the caret. Everything else stays monochrome."
-          value={appearance.accent ?? DEFAULT_ACCENT}
+          value={draft.accent ?? DEFAULT_ACCENT}
           fallback={DEFAULT_ACCENT}
-          onChange={(accent) => setAppearance((a) => ({ ...a, accent }))}
+          onChange={(accent) => setDraft((a) => ({ ...a, accent }))}
         />
       </div>
 
@@ -402,18 +443,121 @@ export function AppearancePanel() {
         onClick={() => {
           // The stored picture goes too. Resetting the settings while leaving a
           // wallpaper on disk is a file nobody will ever find again.
-          if (appearance.backgroundImage) void api.backgroundClear().catch(() => {});
-          setAppearance(DEFAULTS);
+          if (draft.backgroundImage) void api.backgroundClear().catch(() => {});
+          setDraft(DEFAULTS);
         }}
       >
         Reset everything
       </button>
+
+      <ApplyBar
+        dirty={dirty}
+        restarting={restarting}
+        onApply={commit}
+        onDiscard={() => setDraft(saved)}
+        onApplyAndRestart={() => {
+          commit();
+          setRestarting(true);
+          // No catch that clears the flag: on success this process is replaced,
+          // so there is nothing left to clear. A failure leaves the label
+          // showing, which is the honest state — the restart did not happen.
+          void api.restartApp().catch(() => setRestarting(false));
+        }}
+      />
+
+      {/*
+        Everything below the Apply bar takes effect as it is typed or ticked,
+        and that is on purpose rather than an oversight — a stylesheet you
+        cannot see take effect is a stylesheet you cannot debug. An invisible
+        boundary between "staged" and "live" would be the worst of both, so it
+        is labelled where it happens.
+      */}
+      <div className="flex flex-col gap-1 pt-2">
+        <span className="micro">APPLIED AS YOU TYPE</span>
+        <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+          These two take effect immediately — no Apply. Their whole value is seeing the result
+          while you change them.
+        </span>
+      </div>
 
       <TerminalRendering />
 
       <UserCss />
 
     </section>
+  );
+}
+
+
+/**
+ * Apply, discard, or apply and start clean.
+ *
+ * **Always present, never appearing.** A bar that materialises only once
+ * something is dirty moves the page under the operator at the exact moment they
+ * are reading it, and teaches them nothing about how this screen works until
+ * they have already changed something. It is here from the first render; only
+ * its *state* changes.
+ *
+ * The buttons are disabled rather than hidden when there is nothing to apply,
+ * and the line above them says which of the two situations they are in — so
+ * "why is this greyed out" is answered before it is asked.
+ *
+ * **Restart is offered, not required.** Everything here takes effect
+ * immediately, across windows. A relaunch buys one thing: the terminals
+ * re-measure from scratch, which settles xterm cleanly after an interface-scale
+ * change. Sessions survive it — they run under the agent on the target — and the
+ * copy says so, because "will this kill my work?" is the only question that
+ * matters before pressing it.
+ */
+function ApplyBar({
+  dirty,
+  restarting,
+  onApply,
+  onDiscard,
+  onApplyAndRestart,
+}: {
+  dirty: boolean;
+  restarting: boolean;
+  onApply: () => void;
+  onDiscard: () => void;
+  onApplyAndRestart: () => void;
+}) {
+  return (
+    <div
+      className="sticky bottom-0 -mx-6 mt-1 flex flex-col gap-2 px-6 py-3"
+      style={{
+        borderTop: "1px solid var(--border-strong)",
+        background: "color-mix(in srgb, var(--app-panel) 88%, transparent)",
+      }}
+    >
+      <div className="flex items-center gap-3">
+        <button type="button" className="btn" disabled={!dirty || restarting} onClick={onApply}>
+          Apply
+        </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={restarting}
+          onClick={onApplyAndRestart}
+          title="Applies your changes, then relaunches so the terminals re-measure cleanly."
+        >
+          {restarting ? "Restarting…" : "Apply & restart"}
+        </button>
+        {dirty && !restarting && (
+          <button type="button" className="micro ml-auto" onClick={onDiscard}>
+            DISCARD
+          </button>
+        )}
+      </div>
+
+      <span className="data text-[10px] leading-relaxed" style={{ color: dirty ? "rgb(var(--busy))" : "var(--text-soft)" }}>
+        {restarting
+          ? "Relaunching. Your sessions keep running on their hosts and will reattach."
+          : dirty
+            ? "Not applied yet — the app still looks the way it did."
+            : "Everything here is applied. Restart is only needed if the terminals look off after a scale change; your sessions survive it."}
+      </span>
+    </div>
   );
 }
 
