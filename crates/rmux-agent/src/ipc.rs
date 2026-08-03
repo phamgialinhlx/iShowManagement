@@ -14,9 +14,25 @@ use std::path::PathBuf;
 
 /// Where the daemon listens.
 ///
-/// Version-stamped so a newer client never speaks to an older daemon it does not
-/// understand — a mismatch there surfaces as corrupt terminal output rather than
-/// an honest error.
+/// **Stamped with the build, not just the version — and that distinction cost a
+/// day.** The socket used to be `agent-<version>.sock`, which is wrong for the
+/// one case that happens constantly: two builds sharing a version. Every dev
+/// build is `0.1.0`.
+///
+/// What that produced, on a real host: the fixed agent installed correctly under
+/// its own fingerprinted path and ran as the *client*, then connected to a
+/// daemon from seventeen hours earlier that was still holding the socket. The
+/// daemon is what spawns the shell, so it kept using its own compiled-in code —
+/// the version without `-i` — and `claude` stayed "command not found" through
+/// three rebuilds. Nothing looked wrong anywhere: the binary on the host was new,
+/// its fingerprint was right, and the fix was genuinely in it. It was simply
+/// never the process doing the work.
+///
+/// So the socket now carries the same content fingerprint the install path
+/// already carried. A changed agent gets a changed socket, starts its own
+/// daemon, and cannot inherit an older one. The old daemon keeps serving the
+/// sessions already attached to it until they end, which is the right outcome —
+/// upgrading must not kill work in progress.
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     /// Unix: the socket path. Windows: the pipe name.
@@ -25,14 +41,60 @@ pub struct Endpoint {
     pub parent: Option<PathBuf>,
 }
 
+/// The socket's basename, from the version and the running binary's own name.
+///
+/// Pure so the rule can be tested without installing anything. `provision`
+/// installs as `rmux-agent-<version>-<fingerprint>`, so the stem *is* the
+/// identity — no hashing at startup, and the client and the daemon agree by
+/// construction because `spawn_daemon` launches `current_exe`.
+fn socket_stem(version: &str, exe_stem: Option<&str>) -> String {
+    match exe_stem {
+        // An installed, fingerprinted agent. The `rmux-` prefix is dropped: the
+        // socket already lives in `~/.rmux`, and those five characters are not
+        // free. `sun_path` caps a Unix socket near 104 bytes, the sandbox in
+        // `tests/persistence.rs` sits inside a long `/var/folders/...` temp
+        // path, and keeping the prefix pushed it over — `bind` then fails with
+        // an error that never mentions length, and the shell simply never
+        // starts. Caught by that test going red.
+        Some(stem) if stem.starts_with("rmux-agent-") => {
+            stem.strip_prefix("rmux-").unwrap_or(stem).to_owned()
+        }
+        // A bare `rmux-agent` — a dev build run straight out of `target/`, where
+        // there is no fingerprint to use and sharing one daemon is what you
+        // want anyway.
+        _ => format!("agent-{version}"),
+    }
+}
+
+/// This process's own file name, if it can be read.
+///
+/// **`file_name`, never `file_stem`.** The installed name is
+/// `rmux-agent-0.1.0-<fingerprint>`, and `file_stem` reads `.0-<fingerprint>` as
+/// an extension and throws it away — leaving `rmux-agent-0.1`, which is the same
+/// for every build of 0.1.x and so reintroduces the collision this whole change
+/// exists to remove. Caught on a real host: the socket came out as
+/// `rmux-agent-0.1.sock`. It differed from the old name by luck, not by design.
+///
+/// Only a literal `.exe` is stripped, for Windows.
+fn current_stem() -> Option<String> {
+    let path = std::env::current_exe().ok()?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some(name.strip_suffix(".exe").unwrap_or(&name).to_owned())
+}
+
 impl Endpoint {
-    pub fn for_version(version: &str) -> anyhow::Result<Self> {
+    /// The endpoint for the binary that is running right now.
+    pub fn current(version: &str) -> anyhow::Result<Self> {
+        Self::named(&socket_stem(version, current_stem().as_deref()))
+    }
+
+    fn named(stem: &str) -> anyhow::Result<Self> {
         #[cfg(unix)]
         {
             let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
             let dir = home.join(".rmux");
             Ok(Self {
-                address: dir.join(format!("agent-{version}.sock")).to_string_lossy().into_owned(),
+                address: dir.join(format!("{stem}.sock")).to_string_lossy().into_owned(),
                 parent: Some(dir),
             })
         }
@@ -42,10 +104,7 @@ impl Endpoint {
             // otherwise two people on one machine would share a daemon, and with
             // it each other's shells.
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_owned());
-            Ok(Self {
-                address: format!(r"\\.\pipe\rmux-agent-{version}-{user}"),
-                parent: None,
-            })
+            Ok(Self { address: format!(r"\\.\pipe\{stem}-{user}"), parent: None })
         }
     }
 }
@@ -164,24 +223,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_endpoint_is_version_stamped() {
+    fn two_builds_of_one_version_do_not_share_a_daemon() {
+        // **The bug this exists for.** Every dev build is 0.1.0, so a
+        // version-only socket meant a rebuilt agent installed under a new
+        // fingerprinted path, ran as the client, and then connected to the
+        // *previous* build's daemon — which is the process that actually spawns
+        // the shell. A fix could therefore be present on the host, in the right
+        // binary, and still never run. Verified on a real host: the daemon was
+        // seventeen hours older than the client attached to it.
+        let old = socket_stem("0.1.0", Some("rmux-agent-0.1.0-16fdf898f1317da9"));
+        let new = socket_stem("0.1.0", Some("rmux-agent-0.1.0-efe045f9a5aa5db0"));
+        assert_ne!(old, new, "a changed build must not inherit the old daemon");
+        assert!(old.contains("16fdf898f1317da9"), "{old}");
+    }
+
+    #[test]
+    fn the_same_build_still_shares_one_daemon() {
+        // The other half: reattaching must find the daemon it left, or every
+        // reconnect would strand the previous one holding live shells.
+        assert_eq!(
+            socket_stem("0.1.0", Some("rmux-agent-0.1.0-abc123")),
+            socket_stem("0.1.0", Some("rmux-agent-0.1.0-abc123")),
+        );
+    }
+
+    #[test]
+    fn a_dotted_version_does_not_swallow_the_fingerprint() {
+        // `file_stem` would read `.0-<fingerprint>` as an extension and drop it,
+        // collapsing every 0.1.x build back onto one socket — the collision this
+        // change removes. Observed on a real host as `rmux-agent-0.1.sock`.
+        let stem = socket_stem("0.1.0", Some("rmux-agent-0.1.0-bab16edd2b66591e"));
+        assert!(stem.ends_with("bab16edd2b66591e"), "fingerprint lost: {stem}");
+    }
+
+    #[test]
+    fn a_dev_build_falls_back_to_the_version() {
+        // Run straight out of `target/` there is no fingerprint in the name, and
+        // sharing one daemon is the wanted behaviour there.
+        assert_eq!(socket_stem("0.1.0", Some("rmux-agent")), "agent-0.1.0");
+        assert_eq!(socket_stem("0.1.0", None), "agent-0.1.0");
+    }
+
+    #[test]
+    fn the_endpoint_is_still_version_stamped() {
         // A newer client talking to an older daemon would surface as corrupt
         // terminal output, so they never share an address.
-        let endpoint = Endpoint::for_version("9.9.9").unwrap();
-        assert!(endpoint.address.contains("9.9.9"), "got {}", endpoint.address);
+        let stem = socket_stem("9.9.9", None);
+        assert!(stem.contains("9.9.9"), "got {stem}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_socket_name_leaves_room_for_a_long_home() {
+        // `sun_path` is capped near 104 bytes *including the directory*, and the
+        // test sandbox lives under `/var/folders/…/T/rmux-agent-test-…`, which
+        // is already ~90 of them. The name itself therefore has to stay short —
+        // this is the budget, checked directly, because the failure mode is a
+        // `bind` error that never mentions length.
+        let stem = socket_stem("0.1.0", Some("rmux-agent-0.1.0-565cb104276563fc"));
+        assert!(stem.len() + ".sock".len() <= 34, "socket name too long: {stem}");
     }
 
     #[cfg(unix)]
     #[test]
     fn the_unix_endpoint_stays_within_the_socket_path_limit() {
         // sun_path is capped near 104 bytes on macOS and exceeding it fails at
-        // bind with an error that never mentions length.
-        let endpoint = Endpoint::for_version(env!("CARGO_PKG_VERSION")).unwrap();
-        assert!(
-            endpoint.address.len() < 100,
-            "socket path too long: {}",
-            endpoint.address
-        );
+        // bind with an error that never mentions length. The fingerprint made
+        // this name meaningfully longer, so it is checked against the real
+        // installed shape rather than the short dev one.
+        let stem = socket_stem(env!("CARGO_PKG_VERSION"), Some("rmux-agent-0.1.0-efe045f9a5aa5db0"));
+        let endpoint = Endpoint::named(&stem).unwrap();
+        assert!(endpoint.address.len() < 100, "socket path too long: {}", endpoint.address);
     }
 
     #[cfg(windows)]
@@ -189,7 +301,7 @@ mod tests {
     fn the_windows_endpoint_is_per_user() {
         // Pipes share one global namespace; without the user in the name, two
         // people on a machine would share a daemon and each other's shells.
-        let endpoint = Endpoint::for_version("1.0.0").unwrap();
+        let endpoint = Endpoint::named(&socket_stem("1.0.0", None)).unwrap();
         assert!(endpoint.address.starts_with(r"\\.\pipe\"));
         let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_owned());
         assert!(endpoint.address.contains(&user));

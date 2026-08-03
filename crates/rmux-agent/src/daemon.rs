@@ -22,7 +22,7 @@ use crate::protocol::{Frame, Hello, encode_data_into};
 
 /// Where the daemon listens, on whichever platform this is.
 pub fn endpoint() -> anyhow::Result<Endpoint> {
-    Endpoint::for_version(env!("CARGO_PKG_VERSION"))
+    Endpoint::current(env!("CARGO_PKG_VERSION"))
 }
 
 /// A session, plus what the daemon knows about it that the terminal does not.

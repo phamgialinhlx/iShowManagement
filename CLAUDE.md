@@ -103,16 +103,34 @@ ui/                     React 19 + Tailwind 4 + motion
   drives `handle` end to end and asserts the *process* died, not just the map entry.
   Attaching to kill was wrong anyway: it created the session when the name was unknown, in
   order to destroy it.
+- **A fix that lives in the agent is not deployed until a *new daemon* runs it.** Three
+  things all have to happen: `scripts/build-agents.sh` rebuilds the musl binaries,
+  `pnpm tauri build` embeds them as resources, and the host must start a daemon from the new
+  binary. Skipping any one leaves the old behaviour with nothing looking wrong. When a remote
+  fix appears not to work, check `ps -eo pid,lstart,args | grep rmux-agent` on the host and
+  compare the *daemon's* binary against the client's before touching the code again.
 - **`rmux-agent list` is what makes a leak findable.** Without it the only way to discover an
   abandoned shell is `ps` on the host and correlating by hand, which means nobody does.
   It reports name, pid, age and whether anything is attached — age and attachment are what
   separate "left behind" from "rmux is merely closed". Dead sessions are excluded: their pid
   may already have been reused, and reporting one sends the operator to kill something else.
-- **The daemon socket is versioned, not fingerprinted.** `agent-<version>.sock`, so two
-  builds of the same version share one daemon and a newer client meets an older daemon —
-  which surfaces as "this host's agent is too old to list sessions" rather than as garbage.
-  The install *path* carries a content fingerprint; this does not, and that asymmetry is a
-  known rough edge.
+- **The daemon socket carries the build, not just the version** — and the version-only form
+  was a real, expensive bug rather than a rough edge. Every dev build is `0.1.0`, so
+  `agent-<version>.sock` meant a rebuilt agent installed correctly under its own
+  fingerprinted path, ran as the *client*, and then connected to the previous build's
+  daemon. **The daemon is what spawns the shell**, so it kept using its own compiled-in code
+  and the fix never ran. Measured on a real host: a client from 03:00 attached to a daemon
+  from 09:58 the day before, and `command not found: claude` survived three rebuilds while
+  every visible artefact — binary present, fingerprint correct, fix genuinely inside it —
+  looked right.
+  The socket name is now the running binary's own file name (`ipc::socket_stem`), which
+  `provision` already stamps with the content fingerprint. A changed agent starts its own
+  daemon and cannot inherit an older one; the old daemon keeps serving its live sessions
+  until they end, because upgrading must not kill work in progress.
+  **`file_name`, never `file_stem`.** The installed name contains dots, so `file_stem` reads
+  `.0-<fingerprint>` as an extension and discards it — collapsing every `0.1.x` build back
+  onto one socket. That very mistake shipped into the first version of this fix and was
+  caught only by looking at the socket on the host; a test now pins it.
 
 ## Managing the host
 
