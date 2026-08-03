@@ -23,6 +23,52 @@
  * text far more than as a background — fading it would make Claude's own
  * asides unreadable rather than subtle.
  */
+/**
+ * Read a design token as it is *currently* resolved.
+ *
+ * The appearance settings write these onto the root element, so asking the
+ * computed style is what makes a terminal obey a choice the operator made after
+ * the palette module was first imported.
+ */
+function token(name: string, fallback: string): string {
+  if (typeof window === "undefined") return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+/**
+ * The palette, resolved against the current appearance.
+ *
+ * **The terminals were the one surface the appearance settings did not reach.**
+ * `foreground` was `#e8f4f2` — a cooler, brighter white than the app's own
+ * `--text` (`#e8e6e1`) — so the terminal and Claude panes read as whiter than
+ * everything around them even at default settings, and a chosen text colour
+ * changed every surface except the two the operator spends all day looking at.
+ * Reported exactly that way: "the main terminal and claude section always feels
+ * more white".
+ *
+ * `white` and `brightWhite` follow too. `brightWhite` was pure `#ffffff`, which
+ * is what bold text in a TUI uses constantly — so the brightest thing on screen
+ * was brighter than anything the design system allows anywhere else.
+ */
+export function terminalTheme(): Record<string, string> {
+  const text = token("--text", "#e8e6e1");
+  return {
+    ...TERMINAL_THEME,
+    foreground: text,
+    white: text,
+    // Still a step up from `white`, because a TUI uses bold to mean something —
+    // but derived from the operator's colour rather than overshooting it.
+    brightWhite: token("--text-bright", text),
+    cursor: token("--text", TERMINAL_THEME.cursor),
+  };
+}
+
+/** The Claude pane differs in one thing only: red, because that is its cursor. */
+export function claudeTheme(): Record<string, string> {
+  return { ...terminalTheme(), cursor: "#e63b2e" };
+}
+
 export const TERMINAL_THEME = {
   /** Fully clear: the panel behind provides the tint. */
   background: "rgba(0, 0, 0, 0)",
@@ -51,7 +97,7 @@ export const TERMINAL_THEME = {
   brightWhite: "#ffffff",
 } as const;
 
-/** The Claude pane differs in one thing only: red, because that is its cursor. */
+/** Kept for callers that want the static defaults; the live one is `claudeTheme()`. */
 export const CLAUDE_THEME = { ...TERMINAL_THEME, cursor: "#e63b2e" } as const;
 
 /**

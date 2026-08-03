@@ -9,7 +9,7 @@ import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
 import { contextLimit, sniffWindow } from "../lib/context-window";
 import { settleResize } from "../lib/terminal-resize";
 import { useSessions } from "../lib/sessions";
-import { CLAUDE_THEME, gpuRendering } from "../lib/terminal-theme";
+import { claudeTheme, gpuRendering } from "../lib/terminal-theme";
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { ContextMeter } from "./ContextMeter";
 import { BrowserReports } from "./BrowserReports";
@@ -246,7 +246,7 @@ export function ClaudePanel({
     let id: string | null = null;
 
     const xterm = new Xterm({
-      theme: CLAUDE_THEME,
+      theme: claudeTheme(),
       allowTransparency: true,
       fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
       fontSize: 12,
@@ -425,6 +425,11 @@ export function ClaudePanel({
     // before xterm measures a cell.
     const onAppearance = (event: StorageEvent) => {
       if (event.key && event.key !== "rmux.appearance") return;
+      // The palette is derived from the live design tokens, so a colour chosen
+      // in Settings has to be pushed into xterm — it does not re-read CSS on
+      // its own. Without this the terminals keep the colours they were born
+      // with, which is the whole complaint being fixed.
+      xterm.options.theme = claudeTheme();
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     window.addEventListener("storage", onAppearance);

@@ -270,6 +270,16 @@ dead knob. Stored tints are clamped: a 64% saved against the old opaque blur lay
 nearly solid without it. Fonts (SFU Futura, IBM Plex Mono) are bundled, never
 fetched from a CDN; this app must look right with no network.
 
+**The terminals are part of the appearance system, not exempt from it.** They were the one
+surface it did not reach: `TERMINAL_THEME.foreground` was `#e8f4f2`, a cooler and brighter white
+than the app's own `--text` (`#e8e6e1`), so the terminal and Claude panes read as whiter than
+everything around them *at default settings* — and a chosen text colour changed every surface
+except the two an operator looks at all day. `brightWhite` was pure `#ffffff`, which a TUI uses
+for bold constantly, making the brightest thing on screen brighter than the design system allows
+anywhere else. `terminalTheme()` now derives them from the live tokens, and both hosts push the
+new palette into xterm on the appearance channel — xterm does not re-read CSS on its own, so
+without that they keep the colours they were constructed with.
+
 **The operator may replace the backdrop, the type scale and the two colours.**
 Background is `desktop | color | image`; the picture is copied to
 `$APPDATA/backgrounds` by `background_set` and served over the asset protocol,

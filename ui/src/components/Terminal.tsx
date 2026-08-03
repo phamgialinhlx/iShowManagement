@@ -8,7 +8,7 @@ import "@xterm/xterm/css/xterm.css";
 import { isTauri, type TargetRef } from "../lib/api";
 import { settleResize } from "../lib/terminal-resize";
 import { attachClipboard } from "../lib/terminal-clipboard";
-import { TERMINAL_THEME, gpuRendering } from "../lib/terminal-theme";
+import { gpuRendering, terminalTheme } from "../lib/terminal-theme";
 import { PanelLoader } from "./PanelLoader";
 
 /**
@@ -86,7 +86,7 @@ export function TerminalView({
     let terminalId: string | null = null;
 
     const xterm = new Xterm({
-      theme: TERMINAL_THEME,
+      theme: terminalTheme(),
       allowTransparency: true,
       fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
       fontSize: 13,
@@ -258,6 +258,11 @@ export function TerminalView({
     // before xterm measures a cell.
     const onAppearance = (event: StorageEvent) => {
       if (event.key && event.key !== "rmux.appearance") return;
+      // The palette is derived from the live design tokens, so a colour chosen
+      // in Settings has to be pushed into xterm — it does not re-read CSS on
+      // its own. Without this the terminals keep the colours they were born
+      // with, which is the whole complaint being fixed.
+      xterm.options.theme = terminalTheme();
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     window.addEventListener("storage", onAppearance);
