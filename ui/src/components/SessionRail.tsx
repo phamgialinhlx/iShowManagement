@@ -3,6 +3,13 @@ import { motion, AnimatePresence } from "motion/react";
 
 import { basename, useSessions, type Session, type SessionStatus } from "../lib/sessions";
 import { gridLayout } from "../lib/grid";
+import {
+  groupSessions,
+  readCollapsedGroups,
+  writeCollapsedGroups,
+  inheritedProfile,
+  type SessionGroup,
+} from "../lib/session-groups";
 
 /**
  * The session rail.
@@ -88,6 +95,7 @@ function Row({
   active,
   onScreen,
   collapsed,
+  showWhere,
   onSelect,
   onClose,
 }: {
@@ -103,6 +111,15 @@ function Row({
    */
   onScreen: boolean;
   collapsed: boolean;
+  /**
+   * Whether the row prints `host · folder` under the name.
+   *
+   * False inside a group, where the header above already says it. Repeating it
+   * on every row was the flat rail's way of answering "which project is this?",
+   * and once the question is answered once per folder, saying it again on each
+   * child is noise that also halves how many sessions fit on screen.
+   */
+  showWhere: boolean;
   onSelect: () => void;
   onClose: () => void;
 }) {
@@ -185,9 +202,11 @@ function Row({
             <span className="data truncate text-[12px]" style={{ color: "var(--text)" }}>
               {session.name}
             </span>
-            <span className="micro truncate" style={{ letterSpacing: "0.12em" }}>
-              {where}
-            </span>
+            {showWhere && (
+              <span className="micro truncate" style={{ letterSpacing: "0.12em" }}>
+                {where}
+              </span>
+            )}
           </span>
         </button>
       )}
@@ -251,6 +270,127 @@ function Row({
   );
 }
 
+/**
+ * The heading for one folder's sessions.
+ *
+ * Three jobs, and the third is the one that is easy to leave out:
+ *
+ * 1. Say which project these are, once, instead of once per row.
+ * 2. Fold, because eight sessions across three projects is a rail you scroll.
+ * 3. **Keep saying "needs you" while folded.** A group that hid an alarm when
+ *    shut would break the rail's entire purpose — the operator collapses the
+ *    project they are not working on, which is precisely the one whose finished
+ *    run they will otherwise miss. So the count moves onto the header the
+ *    moment its rows go away.
+ */
+function GroupHeader({
+  group,
+  folded,
+  needing,
+  busy,
+  onToggle,
+  onAdd,
+}: {
+  group: SessionGroup<Session>;
+  folded: boolean;
+  /** Sessions inside that are waiting, or finished and not yet looked at. */
+  needing: number;
+  /** True while this group's `+` is creating a session. */
+  busy: boolean;
+  onToggle: () => void;
+  onAdd: () => void;
+}) {
+  return (
+    <div
+      className="group/hdr flex items-center gap-1 border-b px-2 py-[5px]"
+      style={{ borderColor: "var(--border)", background: "rgba(232,230,225,0.02)" }}
+    >
+      <button
+        type="button"
+        className="flex min-w-0 flex-1 items-center gap-[6px] text-left"
+        onClick={onToggle}
+        aria-expanded={!folded}
+        title={`${group.folder} on ${group.host}\n${folded ? "Expand" : "Collapse"}`}
+      >
+        {/* Rule 3: inline SVG, square caps, no glyph fonts and no emoji. It
+            rotates rather than swapping shape, so the control reads as one
+            thing in two states instead of two different marks. */}
+        <svg
+          width="8"
+          height="8"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeLinecap="square"
+          aria-hidden="true"
+          style={{
+            color: "var(--text-faint)",
+            transform: folded ? "rotate(-90deg)" : "none",
+            transition: "transform 140ms cubic-bezier(0.2,0.9,0.3,1)",
+            flexShrink: 0,
+          }}
+        >
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+        <span className="data truncate text-[11px]" style={{ color: "var(--text-soft)" }}>
+          {group.label}
+        </span>
+        <span className="micro shrink-0" style={{ color: "var(--text-faint)" }}>
+          {group.sessions.length}
+        </span>
+        {/* Only while shut. Open, the dots on the rows themselves say it more
+            precisely, and a second copy would be two things to reconcile. */}
+        {folded && needing > 0 && (
+          <span className="micro shrink-0" style={{ color: "rgb(var(--primary))" }}>
+            · {needing} NEED YOU
+          </span>
+        )}
+        {folded && needing === 0 && busyCount(group) > 0 && (
+          <span className="micro shrink-0" style={{ color: "rgb(var(--busy))" }}>
+            · {busyCount(group)} RUNNING
+          </span>
+        )}
+      </button>
+
+      {/* Always visible, not hover-only. This is the reason the header exists as
+          far as most days are concerned — "another Claude on this project" — and
+          a control nobody can see is a control nobody uses. It stays quiet at
+          `--text-faint` until the pointer is near it. */}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onAdd}
+        aria-label={`New session in ${group.label}`}
+        title={`New Claude session in ${group.folder} on ${group.host}\nStarts fresh, with permission prompts on.`}
+        className="shrink-0 px-1 opacity-70 hover:opacity-100"
+        style={{ color: busy ? "var(--text-faint)" : "var(--text-soft)" }}
+      >
+        {busy ? (
+          <span className="micro">…</span>
+        ) : (
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="square"
+            aria-hidden="true"
+          >
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
+function busyCount(group: SessionGroup<Session>): number {
+  return group.sessions.filter((s) => s.status === "working").length;
+}
+
 export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
   const sessions = useSessions((s) => s.sessions);
   const active = useSessions((s) => s.activeSession);
@@ -263,6 +403,59 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
   const focusCell = useSessions((s) => s.focusCell);
   const assignSlot = useSessions((s) => s.assignSlot);
   const toggle = useSessions((s) => s.toggleRail);
+  const addSession = useSessions((s) => s.addSession);
+
+  const groups = useMemo(() => groupSessions(sessions), [sessions]);
+  const [folded, setFolded] = useState<Set<string>>(readCollapsedGroups);
+  const [adding, setAdding] = useState<string | null>(null);
+
+  const toggleGroup = (key: string) => {
+    setFolded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
+      writeCollapsedGroups(next);
+      return next;
+    });
+  };
+
+  /**
+   * Another session on the same project.
+   *
+   * Inherits the host and the folder — that is the whole request — and nothing
+   * else by default. It starts a *fresh* conversation rather than resuming one:
+   * a second session on a project is a second line of work, and silently
+   * attaching it to the first one's transcript would put two Claudes in one
+   * history. The model profile comes across only when the group is unanimous
+   * about it; see `inheritedProfile`, which also explains why
+   * `skipPermissions` never does.
+   */
+  const addToGroup = async (group: SessionGroup<Session>) => {
+    setAdding(group.key);
+    try {
+      const id = await addSession(
+        group.sessions[0]?.target ?? { host: group.host },
+        group.folder,
+        undefined,
+        undefined,
+        undefined,
+        inheritedProfile(group.sessions),
+      );
+      // A new session while a cell is selected belongs in that cell — the
+      // operator is holding a pane open waiting to be filled, and making them
+      // click the new row afterwards is a step that answers nothing.
+      if (grid >= 2 && focusedCell !== null) assignSlot(focusedCell, id);
+      // Opening a folded group would otherwise create a session you cannot see.
+      setFolded((prev) => {
+        if (!prev.has(group.key)) return prev;
+        const next = new Set(prev);
+        next.delete(group.key);
+        writeCollapsedGroups(next);
+        return next;
+      });
+    } finally {
+      setAdding(null);
+    }
+  };
 
   // Both kinds of "needs you" — Claude is asking, or Claude finished and nobody
   // has looked. Counting only the first left a rail full of red swells above a
@@ -334,8 +527,73 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+        {/* Collapsed, the rail is only status dots — there is no width for a
+            folder name, and folding a group you cannot read is a control with
+            no meaning. So the grouping simply does not apply here and every
+            session keeps its dot, which is what the collapsed rail is for. */}
+        {collapsed
+          ? sessions.map((session) => (
+              <Row
+                key={session.id}
+                session={session}
+                active={session.id === active}
+                onScreen={onScreen.has(session.id)}
+                collapsed
+                showWhere={false}
+                onSelect={() => {
+                  if (grid >= 2 && focusedCell !== null) assignSlot(focusedCell, session.id);
+                  activate(session.id);
+                }}
+                onClose={() => remove(session.id)}
+              />
+            ))
+          : groups.map((group) => (
+              <div key={group.key}>
+                <GroupHeader
+                  group={group}
+                  folded={folded.has(group.key)}
+                  needing={
+                    group.sessions.filter(
+                      (s) =>
+                        s.status === "waiting" ||
+                        (s.finishedAt !== undefined && s.status !== "working"),
+                    ).length
+                  }
+                  busy={adding === group.key}
+                  onToggle={() => toggleGroup(group.key)}
+                  onAdd={() => void addToGroup(group)}
+                />
+                <AnimatePresence initial={false}>
+                  {!folded.has(group.key) &&
+                    group.sessions.map((session) => (
+                      <motion.div
+                        key={session.id}
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.18, ease: [0.2, 0.9, 0.3, 1] }}
+                      >
+                        <Row
+                          session={session}
+                          active={session.id === active}
+                          onScreen={onScreen.has(session.id)}
+                          collapsed={false}
+                          showWhere={false}
+                          onSelect={() => {
+                            if (grid >= 2 && focusedCell !== null)
+                              assignSlot(focusedCell, session.id);
+                            activate(session.id);
+                          }}
+                          onClose={() => remove(session.id)}
+                        />
+                      </motion.div>
+                    ))}
+                </AnimatePresence>
+              </div>
+            ))}
+
         <AnimatePresence initial={false}>
-          {sessions.map((session) => (
+          {[].map((session: Session) => (
             <motion.div
               key={session.id}
               initial={{ opacity: 0, height: 0 }}
@@ -348,6 +606,7 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
                 active={session.id === active}
                 onScreen={onScreen.has(session.id)}
                 collapsed={collapsed}
+                showWhere
                 onSelect={() => {
                   // **In grid mode with a cell selected, this fills that cell.**
                   // Which is the only interaction that answers "I have eight

@@ -283,19 +283,43 @@ textarea,
  * it: **the scrim is not one of the two knobs**, so an operator turning Glass
  * all the way down still saw an opaque app. Verified by removing it.
  *
- * So it now does the one job worth doing — a whisper of vignette and the
- * registration grid — and legibility is left to `--panel-tint`, which is
- * tunable.
+ * So it now does the one job worth doing — the registration grid — and
+ * legibility is left to `--panel-tint`, which is tunable.
+ *
+ * ## Why the vignette and the bloom are gone
+ *
+ * They were reported as "big color differences from sidebar and main panel",
+ * and the report was exactly right. Every `.panel` computes the same background
+ * — measured, identical to the byte — so the difference had to come from what
+ * was *behind* them, and it did.
+ *
+ * The vignette ran `transparent` at 50%/42% out to `rgba(6,6,6,0.14)` at the
+ * edge. **The rails are the edge.** The panels are translucent, so a gradient
+ * across the window prints itself straight onto the chrome standing on it.
+ * Sampled over white with the browser's own renderer: the left rail read
+ * `231,231,231` against the session deck's `251,251,251` — twenty levels of
+ * darkening applied to one half of the app's own furniture and not the other.
+ *
+ * The red bloom was worse in kind. Centred at 22%/24%, it sat on the *top of the
+ * session rail* and gave it a warm cast the deck did not have — `231,227,227`
+ * against a neutral `247,247,247`. Rule 0 says red marks something the operator
+ * must act on; a decorative wash tinting the one surface whose whole job is
+ * signalling attention is that rule inverted.
+ *
+ * Both were atmosphere over the *desktop*, which is a coherent idea right up
+ * until translucent panels are laid over it — then they stop being backdrop and
+ * become an uneven coat of paint on the UI. The native-glass path had already
+ * reached this conclusion and stripped them for the same reason ("the vignette
+ * and the glow were the parts pretending to be glass"); this is that rule
+ * applied where it was always true. `ui/atmosphere-check.html` pins it.
  */
 .atmosphere::after {
   content: "";
   position: absolute;
   inset: 0;
-  background:
-    radial-gradient(ellipse at 50% 42%, transparent, rgba(6, 6, 6, 0.14) 96%),
-    radial-gradient(640px 480px at 22% 24%, rgb(var(--primary) / 0.05), transparent 70%),
-    radial-gradient(rgba(232, 230, 225, 0.05) 1px, transparent 1px);
-  background-size: auto, auto, 26px 26px;
+  /* Flat by construction: whatever is behind one panel is behind every panel. */
+  background: radial-gradient(rgba(232, 230, 225, 0.05) 1px, transparent 1px);
+  background-size: 26px 26px;
 }
 
 /*
@@ -364,12 +388,9 @@ textarea,
  * what makes a dialog readable. A see-through dialog over a photograph is worse
  * than a plain one.
  */
-:root[data-native-glass="on"] .atmosphere::after {
-  /* The registration grid only. It is design language, not material — the
-     vignette and the glow were the parts pretending to be glass. */
-  background: radial-gradient(rgba(232, 230, 225, 0.045) 1px, transparent 1px);
-  background-size: 26px 26px;
-}
+/* `.atmosphere::after` needs no glass override any more: the base rule is
+   already the registration grid alone. The vignette and the glow this used to
+   strip are gone from both paths — see the note on that rule. */
 
 :root[data-native-glass="on"] .panel {
   background: color-mix(in srgb, var(--app-panel) var(--glass-overlay, 14%), transparent);

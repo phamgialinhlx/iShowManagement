@@ -678,7 +678,23 @@ export function SessionDeck() {
         style={{
           gridTemplateColumns: `repeat(${grid}, minmax(0, 1fr))`,
           gridAutoRows: "minmax(0, 1fr)",
-          background: "var(--border)",
+          // **No background here.** The obvious way to draw the hairlines
+          // between cells is to tint the container and let it show through the
+          // gaps — and it works on an opaque app. This one is translucent, so
+          // that tint does not stay in the gaps: it is a full-bleed sheet of
+          // `rgba(232,230,225,0.14)` sitting under every cell, and the cells
+          // let it through.
+          //
+          // That is the whole of "big color differences from sidebar and main
+          // panel". Measured in the running app: the deck read rgb(80,79,66)
+          // against the rails' rgb(55,54,40), stepping across 20px at the seam
+          // — a hard edge, so a layer rather than the wallpaper. Measured again
+          // in the DOM: one background over the rail, two over the deck.
+          //
+          // Nothing is needed in its place. Every cell is a `.panel`, and
+          // `.panel` already carries `border: 1px solid var(--border)` — the
+          // hairline was always being drawn by the cells themselves, and this
+          // was a second copy of it laid under the entire grid.
         }}
       >
         {cells.map((session, index) => (

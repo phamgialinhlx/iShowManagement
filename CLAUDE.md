@@ -222,6 +222,14 @@ have nothing to do with which machine the app runs on. Building them per-runner 
 fingerprints for one release, and the fingerprint is what decides whether a host starts a new
 daemon.
 
+- **A stub is an API mirror, and nothing on this machine compiles it.** `rmux-control`'s stub
+  had been wrong since the day it was written — `handle` declared as a hand-rolled
+  `-> impl Future` against an `#[async_trait]` trait (an `async fn` in an impl carries a
+  lifetime bound to `&self`, so E0195), plus `publish` for `emit` and `socket` for
+  `socket_path`. No macOS or Linux build reaches the file, and the Windows build had been dying
+  in an earlier crate, so four errors sat there invisibly until a *different* fix let the build
+  get far enough to reach the consumer. Change `server.rs`'s public surface and change the stub
+  in the same commit — and check it with the Windows target below, because nothing else will.
 - **A Unix-socket feature gets a stub on Windows, never a half-port.** Two of them now:
   `rmux-control::server` and `rmux-ssh::askpass::server`. The pattern is `#[cfg(unix)] pub mod
   server;` beside a `#[path = "server_stub.rs"]` twin whose `start` bails with a reason.
@@ -232,11 +240,23 @@ daemon.
   and with no helper registered `env_for_gui_prompts` tells `ssh` not to wait for a terminal, so
   password and 2FA hosts fail fast with a reason instead of hanging. `askpass::start` failing is
   already the caller's expected path, so no call site changed.
-- **Check the Windows target locally before spending a CI cycle on it.** `cargo check --target
-  x86_64-pc-windows-msvc -p <crate>` works on this Mac for every crate that does not pull `ring`
-  (only `rmux-claude` does, and its C build needs MSVC headers). Every Windows break so far has
-  been an unconditional `use` of a Unix-only item — exactly what this catches. One CI round trip
-  is ten minutes and finds one error; this finds all of them in seconds.
+- **Compile the Windows target on this Mac before spending a CI cycle on it.**
+
+  ```sh
+  brew install mingw-w64        # tauri-winres shells out to x86_64-w64-mingw32-windres
+  rustup target add x86_64-pc-windows-gnu
+  cargo-zigbuild check --workspace --target x86_64-pc-windows-gnu
+  ```
+
+  `cfg(windows)` is identical for the gnu and msvc targets, so this exercises every path CI
+  does. **Use the gnu target, not msvc**: plain `cargo check --target x86_64-pc-windows-msvc`
+  cannot build `ring`'s C (no MSVC headers), which excludes `rmux-claude` — and it never gets to
+  `src-tauri` at all, because `tauri-winres` needs a resource compiler. Both exclusions matter:
+  the second round of Windows errors was *entirely* inside `src-tauri`. zig supplies the C
+  compiler and mingw the resource compiler, and the whole workspace then checks in seconds.
+
+  One CI round trip is twenty minutes and finds one crate's worth of errors. This finds all of
+  them at once, which is the difference between two attempts and five.
 - **`tauri.conf.json` carries no `version`.** Tauri falls back to `Cargo.toml`, and two copies is
   how `rmux_0.1.0_amd64.deb` came to be published under a release tagged `rmux-v0.1.1`. The
   version an installer's *filename* claims is the one thing a user checks it by.
