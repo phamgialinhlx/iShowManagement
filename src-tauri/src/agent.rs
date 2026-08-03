@@ -29,6 +29,26 @@ pub async fn ensure_agent<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     target: &dyn Target,
 ) -> Result<Installed, String> {
+    // **Persistence on Windows is gated off, deliberately and provisionally.**
+    // The agent itself is built, ships, installs and runs there — verified on a
+    // real host, down to the daemon spawning a genuine `bash.exe`. What is not
+    // yet working is the last link: input written into a session does not come
+    // back out of the pty (see `tests/live_windows_agent.rs`, which is committed
+    // red at exactly that assertion).
+    //
+    // Letting callers through would take the agent path and hand the operator a
+    // terminal that accepts keystrokes and shows nothing — strictly worse than
+    // the non-persistent shell they get by falling back, on a platform where
+    // files, search, metrics and Claude all work. Remove this the moment that
+    // test goes green; nothing else has to change.
+    if target.platform() == Some(rmux_transport::Platform::Windows) {
+        return Err(
+            "session persistence is not enabled on Windows yet — this shell will end when \
+             the connection does"
+                .to_owned(),
+        );
+    }
+
     let store = app.state::<AgentStore>();
     let cell = {
         let mut guard = store.by_target.lock();
