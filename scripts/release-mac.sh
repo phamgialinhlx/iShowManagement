@@ -161,7 +161,16 @@ while IFS= read -r binary; do
       codesign --force --timestamp --options runtime --sign "$IDENTITY" "$binary"
       ;;
   esac
-done < <(find "$APP/Contents/Resources" -type f -perm -u+x)
+#   **`Contents/MacOS` as well as `Contents/Resources`, and that is not
+#   symmetry for its own sake.** `rmux-askpass` is a *sidecar*: Tauri puts it
+#   beside the main executable, because that is where `askpass::helper_path`
+#   looks for it. Sealing the wrapper does not give a nested Mach-O its own
+#   signature, and notarisation checks every executable in the bundle
+#   individually — so a sidecar missed here fails the whole submission with a
+#   complaint about one binary, after the upload and the wait. The main `rmux`
+#   binary is matched too; signing it here is harmless, since the bundle seal
+#   below replaces that signature anyway.
+done < <(find "$APP/Contents/MacOS" "$APP/Contents/Resources" -type f -perm -u+x)
 
 # Re-seal the wrapper now that its contents have changed.
 codesign --force --timestamp --options runtime --sign "$IDENTITY" "$APP"
