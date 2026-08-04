@@ -143,7 +143,14 @@ impl ControlMaster {
         // ProxyJump is in play.
         cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
 
-        let child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
+        // Taken now, while we still own the handle. `ssh` writes the *reason* for
+        // every failure here — "cloudflared: command not found", "Permission
+        // denied", "Host key verification failed" — and without this the operator
+        // is shown `exit status: 255` and nothing else. 255 is OpenSSH's generic
+        // "it did not work"; on its own it is indistinguishable between a missing
+        // ProxyCommand helper, a rejected key and an unreachable host.
+        let mut stderr = child.stderr.take();
         *self.child.lock() = Some(child);
 
         // The socket appears asynchronously, after authentication completes.
@@ -153,11 +160,24 @@ impl ControlMaster {
                 *self.state.lock() = MasterState::Running;
                 return Ok(MasterState::Running);
             }
-            if let Some(child) = self.child.lock().as_mut()
-                && let Ok(Some(status)) = child.try_wait()
-            {
+            // The lock is taken and released *before* the await below. A
+            // `parking_lot` guard is `!Send`, so holding one across an await
+            // makes this future `!Send` — and every `#[tauri::command]` that
+            // reaches it then fails to compile, several files away from the
+            // cause. Scoping it here keeps the borrow off the await point.
+            let exited = {
+                let mut child = self.child.lock();
+                child.as_mut().and_then(|c| c.try_wait().ok().flatten())
+            };
+
+            if let Some(status) = exited {
                 *self.state.lock() = MasterState::Stopped;
-                anyhow::bail!("ssh master for {} exited early ({status})", self.host.alias);
+                let reason = read_stderr(stderr.take()).await;
+                anyhow::bail!(
+                    "ssh master for {} exited early ({status}){}",
+                    self.host.alias,
+                    if reason.is_empty() { String::new() } else { format!(": {reason}") }
+                );
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -355,5 +375,84 @@ mod tests {
             assert_eq!(master.state(), MasterState::Unsupported);
             assert_eq!(master.ensure_started().await.unwrap(), MasterState::Unsupported);
         }
+    }
+}
+
+/// What `ssh` said before it gave up.
+///
+/// Trimmed to the last few lines and stripped of the noise OpenSSH prints on the
+/// way down. The line that matters is almost always the last one — the earlier
+/// ones are `debug1:` chatter or a banner — and an error card that reproduces
+/// forty lines of transcript is one nobody reads.
+async fn read_stderr(stderr: Option<tokio::process::ChildStderr>) -> String {
+    use tokio::io::AsyncReadExt as _;
+
+    let Some(mut stderr) = stderr else { return String::new() };
+    let mut buf = Vec::new();
+    // The process has already exited, so this cannot block on a live pipe.
+    let _ = stderr.read_to_end(&mut buf).await;
+
+    summarise_stderr(&String::from_utf8_lossy(&buf))
+}
+
+/// The useful part of what `ssh` printed.
+///
+/// Pure, so the filtering is testable without a real failing connection — the
+/// two cases below are transcripts from actual runs against a `cloudflared`
+/// host, which is where this behaviour was pinned down.
+pub(crate) fn summarise_stderr(text: &str) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        // Verbose tracing and the version banner explain nothing about *why*,
+        // and they crowd out the line that does.
+        .filter(|l| !l.starts_with("debug") && !l.starts_with("OpenSSH_"))
+        .collect();
+
+    // Last three at most: a failing ProxyCommand prints its own message and then
+    // ssh prints one of its own, and both are worth seeing.
+    let keep = lines.len().saturating_sub(3);
+    lines[keep..].join(" \u{b7} ")
+}
+
+#[cfg(test)]
+mod stderr_tests {
+    use super::summarise_stderr;
+
+    /// Exit 255 is OpenSSH's only failure code, so the *reason* is the whole
+    /// diagnostic. These two transcripts differ in cause and are identical in
+    /// status — which is why discarding stderr made them indistinguishable.
+    #[test]
+    fn a_missing_proxycommand_helper_is_reported() {
+        // Measured: a Finder-launched app has no /opt/homebrew/bin on PATH.
+        let out = summarise_stderr(
+            "/bin/sh: line 0: exec: cloudflared: not found\nConnection closed by UNKNOWN port 65535\n",
+        );
+        assert!(out.contains("cloudflared: not found"), "{out}");
+        assert!(out.contains("Connection closed"), "{out}");
+    }
+
+    #[test]
+    fn a_rejected_credential_is_reported_differently() {
+        let out = summarise_stderr("deploy@example.invalid: Permission denied (publickey,password).\n");
+        assert!(out.contains("Permission denied"), "{out}");
+        assert!(!out.contains("not found"), "the two causes must not blur: {out}");
+    }
+
+    #[test]
+    fn the_banner_and_debug_chatter_are_dropped() {
+        let out = summarise_stderr(
+            "OpenSSH_9.8p1, LibreSSL 3.3.6\ndebug1: Reading configuration data\ndebug1: Connecting\nHost key verification failed.\n",
+        );
+        assert_eq!(out, "Host key verification failed.");
+    }
+
+    #[test]
+    fn nothing_printed_yields_nothing_rather_than_punctuation() {
+        // The caller appends ": {reason}" only when this is non-empty; a lone
+        // separator would read as a truncated message.
+        assert_eq!(summarise_stderr(""), "");
+        assert_eq!(summarise_stderr("\n  \n"), "");
     }
 }

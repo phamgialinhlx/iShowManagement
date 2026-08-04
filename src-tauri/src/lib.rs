@@ -14,6 +14,7 @@ mod control;
 mod notify;
 mod paste;
 mod uplink;
+mod userpath;
 mod tunnels;
 pub mod agent;
 mod claude;
@@ -74,6 +75,15 @@ pub fn run() {
         }
         // A log file is a convenience; failing to start over one would be absurd.
         None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
+
+    // **Before anything spawns a process.** A Finder-launched .app inherits
+    // launchd's minimal PATH, so a `ProxyCommand` helper like `cloudflared` —
+    // which lives in /opt/homebrew/bin — cannot be found, and the host fails with
+    // a bare `exit status: 255`. See `userpath`.
+    match userpath::adopt_login_path() {
+        Some(path) => tracing::info!(%path, "adopted the login shell's PATH"),
+        None => tracing::debug!("PATH left as inherited"),
     }
 
     tauri::Builder::default()

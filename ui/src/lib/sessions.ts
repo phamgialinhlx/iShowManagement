@@ -3,6 +3,14 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 
 import { api, isTauri, type FileContent, type TargetRef } from "./api";
+import {
+  autosaveDecision,
+  autosaveEnabled,
+  autosavePending,
+  cancelAutosave,
+  scheduleAutosave,
+  RETRY_DELAY,
+} from "./autosave";
 
 /**
  * Coding sessions — the thing rmux is actually for.
@@ -731,7 +739,18 @@ export const useSessions = create<State>((set, get) => ({
     }
   },
 
-  closeBuffer: (key) =>
+  closeBuffer: (key) => {
+    // Closing a tab must not be how work is lost. With autosave on, a pending
+    // write is *flushed* rather than cancelled — the operator's edits are
+    // already committed as far as they are concerned, and a timer that had not
+    // fired yet is an implementation detail they cannot see. The write is
+    // started before the buffer is dropped, because `save` reads it from the
+    // store; it tolerates the buffer disappearing underneath it.
+    if (autosavePending(key) && autosaveDecision(get().buffers[key]) !== "skip") {
+      void get().save(key);
+    }
+    cancelAutosave(key);
+
     set((s) => {
       const buffer = s.buffers[key];
       if (!buffer) return s;
@@ -748,19 +767,34 @@ export const useSessions = create<State>((set, get) => ({
         openOrder: { ...s.openOrder, [sessionId]: order },
         activeBuffer: { ...s.activeBuffer, [sessionId]: active },
       };
-    }),
+    });
+  },
 
   activateBuffer: (sessionId, key) => {
     set((s) => ({ activeBuffer: { ...s.activeBuffer, [sessionId]: key } }));
     schedulePersist(get);
   },
 
-  edit: (key, text) =>
+  edit: (key, text) => {
     set((s) => {
       const b = s.buffers[key];
       if (!b) return s;
       return { buffers: { ...s.buffers, [key]: { ...b, text } } };
-    }),
+    });
+
+    // Scheduled here rather than in the editor component: `CodeEditor` is
+    // mounted only for the *active* buffer, so switching tabs would cancel a
+    // pending write and lose the edits. See `lib/autosave.ts`.
+    if (!autosaveEnabled()) return;
+    scheduleAutosave(key, function attempt() {
+      const decision = autosaveDecision(get().buffers[key]);
+      // A write is already in flight. Coming back rather than giving up is the
+      // point: the edits made *during* that write are the ones that would
+      // otherwise never reach the disk.
+      if (decision === "retry") return scheduleAutosave(key, attempt, RETRY_DELAY);
+      if (decision === "write") void get().save(key);
+    });
+  },
 
   save: async (key) => {
     const buffer = get().buffers[key];

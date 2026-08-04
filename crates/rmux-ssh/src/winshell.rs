@@ -100,6 +100,31 @@ pub fn probe_script() -> String {
     line
 }
 
+/// Is this the WSL launcher rather than a POSIX shell for *this* machine?
+///
+/// **`C:\Windows\System32\bash.exe` is not a shell — it is a door into another
+/// operating system.** Windows installs it with WSL, and it runs the default
+/// distribution: a different kernel, a different filesystem, a different home
+/// directory, a different `claude`. The Windows host's own `C:` appears there as
+/// `/mnt/c`, if it is mounted at all.
+///
+/// It has to be excluded explicitly because it passes every other test we could
+/// think to apply. It is named `bash.exe`, it is on `PATH`, its path contains no
+/// space, and `where` reports it **first** — before any of the candidate paths
+/// are even consulted. Routed through it, rmux would list the distro's files
+/// while naming the Windows host, run commands that cannot see the operator's
+/// checkout, and start Claude in a place they never chose. Nothing would look
+/// broken; it would simply be the wrong machine.
+///
+/// So a host **with** WSL is the hazard here, not a host without one — rmux
+/// never wanted WSL, and Git for Windows' bash is what it is looking for.
+/// `Sysnative` is included because a 32-bit process sees System32 under that
+/// name, and it is the same binary.
+fn is_wsl_launcher(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase().replace('/', "\\");
+    lower.ends_with("\\system32\\bash.exe") || lower.ends_with("\\sysnative\\bash.exe")
+}
+
 /// Pick the shell out of [`probe_script`]'s output.
 ///
 /// First line wins, and a path is only accepted if it looks like one — a
@@ -110,7 +135,9 @@ pub fn parse_probe(output: &str) -> Option<String> {
         .lines()
         .map(str::trim)
         .find(|line| {
-            line.to_ascii_lowercase().ends_with("bash.exe") && !line.contains(' ')
+            line.to_ascii_lowercase().ends_with("bash.exe")
+                && !line.contains(' ')
+                && !is_wsl_launcher(line)
         })
         .map(str::to_owned)
 }
@@ -213,6 +240,41 @@ mod tests {
         let line = wrap("bash", "cat > f");
         assert!(line.contains("bash $s"), "the script must be run from a file: {line}");
         assert!(!line.contains("base64 -d|bash"), "stdin was piped away: {line}");
+    }
+
+    #[test]
+    fn wsls_bash_exe_is_never_mistaken_for_a_posix_shell() {
+        // What a WSL-equipped host actually answers. `where` runs first, so the
+        // launcher is the *first* line — ahead of the real shell underneath it.
+        let probe = "C:\\Windows\\System32\\bash.exe\n\
+                     C:\\PROGRA~1\\Git\\bin\\bash.exe";
+
+        assert_eq!(
+            parse_probe(probe).as_deref(),
+            Some("C:\\PROGRA~1\\Git\\bin\\bash.exe"),
+            "System32\\bash.exe runs the WSL distribution: a different filesystem, a \
+             different home, no access to the operator's checkout. Picking it points \
+             every file listing and every command at the wrong machine while the UI \
+             still names the Windows host."
+        );
+    }
+
+    #[test]
+    fn a_host_with_only_wsl_reports_no_posix_shell_rather_than_the_wrong_one() {
+        // Refusing is right. The fallback is a clear "no POSIX shell here";
+        // silently landing inside a Linux VM is not a lesser failure than that,
+        // it is a worse one, because it looks like it worked.
+        assert_eq!(parse_probe("C:\\Windows\\System32\\bash.exe"), None);
+        assert_eq!(parse_probe("C:\\Windows\\Sysnative\\bash.exe"), None);
+        // Case is not meaningful on Windows paths, and neither is the separator.
+        assert_eq!(parse_probe("c:/windows/system32/BASH.EXE"), None);
+    }
+
+    #[test]
+    fn a_real_git_bash_is_still_accepted() {
+        for path in CANDIDATES {
+            assert_eq!(parse_probe(path).as_deref(), Some(*path), "{path} must still be found");
+        }
     }
 
     #[test]

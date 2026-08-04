@@ -50,3 +50,7 @@ CLAUDE.local.md
 # *can* be published — but that is a decision to make on purpose, not a default,
 # and it is a separate project with its own history.
 server/
+
+# The askpass sidecar: a host-native binary staged by scripts/build-askpass.mjs
+# on every `pnpm build`, so it is always rebuilt rather than committed.
+/src-tauri/binaries/

@@ -368,7 +368,27 @@ pub fn default_source(resource_dir: Option<&Path>, exe_dir: Option<&Path>) -> Di
         .map(|d| d.to_path_buf())
         .collect();
 
-    let local = candidates.iter().map(|d| d.join(local_name)).find(|p| p.exists());
+    // **Both `<dir>/rmux-agent` and `<dir>/agents/rmux-agent`**, and the second
+    // one is not a nicety — without it a session on *this Mac* could not be
+    // persistent at all.
+    //
+    // `scripts/build-agents.sh` writes the host build to `src-tauri/agents/`
+    // alongside the cross-compiled ones, and `tauri.conf.json` ships that whole
+    // directory as `resources`, so in a bundle it lands at
+    // `Contents/Resources/agents/rmux-agent`. Only the bare `<dir>/rmux-agent`
+    // was checked, which is where a `cargo run` build puts it and nowhere a
+    // bundle ever does. So `local` was `None` in every shipped app, `ensure`
+    // fell through to the *remote install* path, and `triple_for` — which only
+    // knows Linux and Windows, because those are the platforms an agent is
+    // cross-compiled for — refused with "no prebuilt rmux-agent for Darwin".
+    //
+    // The message sent the reader after a missing cross-compilation target,
+    // when the binary was sitting in the bundle the whole time and the local
+    // case needs no upload at all.
+    let local = candidates
+        .iter()
+        .flat_map(|d| [d.join(local_name), d.join("agents").join(local_name)])
+        .find(|p| p.exists());
     let dir = candidates
         .iter()
         .map(|d| d.join("agents"))
@@ -382,6 +402,67 @@ pub fn default_source(resource_dir: Option<&Path>, exe_dir: Option<&Path>) -> Di
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LOCAL_NAME: &str = if cfg!(windows) { "rmux-agent.exe" } else { "rmux-agent" };
+
+    /// A scratch directory of our own. The pid keeps two concurrent test
+    /// binaries from sharing one, which is the same reasoning `rmux-fs`'s tests
+    /// use.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rmux-provision-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The shape a real bundle has: the agents are a resource *directory*, so
+    /// the host build is one level deeper than the naive lookup expected.
+    ///
+    /// This is the regression that made a local Mac session refuse to start
+    /// with a message about a missing cross-compilation target — while the
+    /// binary it wanted was inside the app.
+    #[test]
+    fn the_bundled_local_agent_is_found_inside_the_resources_directory() {
+        let root = scratch("bundle-local");
+        let resources = root.join("Resources");
+        let exe = root.join("MacOS");
+        std::fs::create_dir_all(resources.join("agents")).unwrap();
+        std::fs::create_dir_all(&exe).unwrap();
+
+        let bundled = resources.join("agents").join(LOCAL_NAME);
+        std::fs::write(&bundled, b"host build").unwrap();
+
+        let source = default_source(Some(&resources), Some(&exe));
+        assert_eq!(
+            source.local.as_deref(),
+            Some(bundled.as_path()),
+            "a bundle keeps the host agent in Resources/agents; missing it sends `ensure` \
+             down the remote-install path, which has no Darwin target"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A `cargo run` build puts the agent straight beside the executable, and
+    /// that copy must keep winning — otherwise a developer silently tests
+    /// against whatever stale binary the last bundle left behind.
+    #[test]
+    fn a_binary_beside_the_executable_beats_the_bundled_one() {
+        let root = scratch("bundle-fresh");
+        let resources = root.join("Resources");
+        let exe = root.join("MacOS");
+        std::fs::create_dir_all(resources.join("agents")).unwrap();
+        std::fs::create_dir_all(&exe).unwrap();
+
+        std::fs::write(resources.join("agents").join(LOCAL_NAME), b"bundled").unwrap();
+        let beside = exe.join(LOCAL_NAME);
+        std::fs::write(&beside, b"fresh").unwrap();
+
+        let source = default_source(Some(&resources), Some(&exe));
+        assert_eq!(source.local.as_deref(), Some(beside.as_path()));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn linux_architectures_map_to_static_musl_builds() {

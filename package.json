@@ -5,7 +5,7 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node scripts/build-askpass.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

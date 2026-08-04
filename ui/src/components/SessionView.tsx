@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { SessionSettings } from "./SessionSettings";
 import { JiraPanel } from "./JiraPanel";
@@ -14,6 +14,13 @@ import { TerminalView } from "./Terminal";
 import { TranscriptView } from "./TranscriptView";
 import { useSessions, isDirty, type Buffer, type Session } from "../lib/sessions";
 import { gridLayout } from "../lib/grid";
+import {
+  measureScale,
+  widthFromPointer,
+  TREE_DEFAULT,
+  TREE_MIN,
+  TREE_MAX,
+} from "../lib/pane-resize";
 
 /**
  * One session's workspace.
@@ -124,18 +131,39 @@ function FilesView({ session }: { session: Session }) {
   // and only once — the store drops the record after the first call.
   useEffect(() => restoreFiles(session.id), [session.id, restoreFiles]);
 
-  const [treeWidth, setTreeWidth] = useState(() => readSize(TREE_KEY, 260));
+  const [treeWidth, setTreeWidth] = useState(() => readSize(TREE_KEY, TREE_DEFAULT));
   const [dragging, setDragging] = useState(false);
+  const pane = useRef<HTMLDivElement>(null);
 
   const active = activeKey ? buffers[activeKey] : null;
 
   useEffect(() => {
     if (!dragging) return;
-    const onMove = (e: MouseEvent) => setTreeWidth(Math.min(Math.max(e.clientX - 220, 150), 560));
+
+    // Measured once per drag, not per move: the pane cannot move or rescale
+    // while the pointer is down, and `getBoundingClientRect` forces layout —
+    // running it on every mousemove is a reflow per frame for an answer that
+    // cannot have changed.
+    const el = pane.current;
+    if (!el) return;
+    const left = el.getBoundingClientRect().left;
+    const scale = measureScale(el);
+
+    const onMove = (e: MouseEvent) => setTreeWidth(widthFromPointer(e.clientX, left, scale));
     const onUp = () => setDragging(false);
+
+    // Without this a drag selects text across every pane it crosses, and the
+    // cursor flickers between col-resize and the I-beam the moment the pointer
+    // leaves the divider — which reads as the drag having been dropped.
+    const previous = document.body.style.cursor;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => {
+      document.body.style.cursor = previous;
+      document.body.style.userSelect = "";
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
@@ -168,7 +196,7 @@ function FilesView({ session }: { session: Session }) {
   }, []);
 
   return (
-    <div className="flex h-full min-h-0">
+    <div ref={pane} className="flex h-full min-h-0">
       <div className="flex shrink-0 flex-col overflow-hidden py-2" style={{ width: treeWidth }}>
         {/* The search replaces the tree rather than sitting beside it: the pane
             is a few hundred pixels wide, and splitting it gives two lists too
@@ -199,13 +227,40 @@ function FilesView({ session }: { session: Session }) {
         )}
       </div>
 
+      {/* The grab area is wider than the line it draws. A 4px target is one the
+          pointer misses more often than it hits — and a divider that does
+          nothing when you aim at it is indistinguishable from one that is not
+          draggable, which is how this was reported. The visible seam stays
+          hairline-thin so the widening costs no ink. */}
       <div
         role="separator"
         aria-orientation="vertical"
-        className="w-[4px] shrink-0 cursor-col-resize"
+        aria-label="Resize the file tree"
+        aria-valuenow={treeWidth}
+        aria-valuemin={TREE_MIN}
+        aria-valuemax={TREE_MAX}
+        tabIndex={0}
+        className="group flex w-[9px] shrink-0 cursor-col-resize items-stretch justify-center"
         onMouseDown={() => setDragging(true)}
-        style={{ background: dragging ? "rgb(var(--primary))" : "var(--border)" }}
-      />
+        // Back to the default, for a pane dragged somewhere unusable. Cheaper
+        // than aiming at a number, and it is the conventional gesture.
+        onDoubleClick={() => setTreeWidth(TREE_DEFAULT)}
+        onKeyDown={(e) => {
+          const step = e.shiftKey ? 40 : 8;
+          if (e.key === "ArrowLeft") {
+            e.preventDefault();
+            setTreeWidth((w) => Math.max(w - step, TREE_MIN));
+          } else if (e.key === "ArrowRight") {
+            e.preventDefault();
+            setTreeWidth((w) => Math.min(w + step, TREE_MAX));
+          }
+        }}
+      >
+        <div
+          className="w-[3px] transition-colors group-hover:!bg-[var(--text-faint)]"
+          style={{ background: dragging ? "rgb(var(--primary))" : "var(--border)" }}
+        />
+      </div>
 
       <div className="flex min-w-0 flex-1 flex-col">
         <EditorTabs session={session} />

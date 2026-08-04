@@ -54,6 +54,9 @@
     "resources": [
       "agents/*"
     ],
+    "externalBin": [
+      "binaries/rmux-askpass"
+    ],
     "macOS": {
       "entitlements": "Entitlements.plist"
     }
