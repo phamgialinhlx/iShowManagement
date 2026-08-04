@@ -91,6 +91,46 @@ function StatusDot({ status, finished }: { status: SessionStatus; finished?: boo
   );
 }
 
+/**
+ * How a row shows that it is the one you are working in.
+ *
+ * The selected row was `--hover` (5.5% white) and an on-screen one 3% — a
+ * two-and-a-half point difference in opacity, over a panel that is itself
+ * translucent and frequently sitting on a photograph. Measured against a real
+ * wallpaper it is not a weak signal, it is no signal: the operator could not
+ * tell which of sixteen rows was selected.
+ *
+ * The fix is **three cues at once**, because any single one has to survive
+ * whatever is behind the window:
+ *
+ * - a fill heavy enough to read as a filled row rather than a tint,
+ * - a left bar at full `--text` and 3px, against 2px of `--text-faint`,
+ * - and the label at `--text` while every other row drops to `--text-soft`.
+ *
+ * That last one is the cheapest and was doing nothing: *every* row printed its
+ * name at full `--text`, so the brightest thing in the rail was equally bright
+ * on all of them. Dimming the rest is what makes the selected one stand out
+ * without adding any ink.
+ *
+ * **Still monochrome.** Colour would collide with the status dots, which carry
+ * the signal that actually needs acting on — and rule 0 reserves red for that.
+ * Selection is a question of "where am I", not "what needs me".
+ */
+export function rowSurface(active: boolean, onScreen: boolean) {
+  return {
+    background: active
+      ? "rgba(232, 230, 225, 0.14)"
+      : onScreen
+        ? "rgba(232, 230, 225, 0.035)"
+        : "transparent",
+    boxShadow: active
+      ? "inset 3px 0 0 var(--text)"
+      : onScreen
+        ? "inset 2px 0 0 var(--text-faint)"
+        : "none",
+  };
+}
+
 function Row({
   session,
   active,
@@ -139,10 +179,7 @@ function Row({
         onClick={onSelect}
         title={`${session.name} · ${where}`}
         className="flex h-[34px] w-full items-center justify-center"
-        style={{
-          background: active ? "var(--hover)" : onScreen ? "rgba(232,230,225,0.03)" : "transparent",
-          boxShadow: onScreen ? `inset 2px 0 0 ${active ? "var(--text)" : "var(--text-faint)"}` : "none",
-        }}
+        style={rowSurface(active, onScreen)}
       >
         <StatusDot status={session.status} finished={session.finishedAt !== undefined} />
       </button>
@@ -152,17 +189,10 @@ function Row({
   return (
     <div
       className="group relative"
-      style={{
-        // Two levels, because in a grid they are different questions. Every
-        // session *on screen* gets the hairline, so the rail answers "which of
-        // these am I looking at" without counting panes. The focused one keeps
-        // the fill on top of it. Colour is not used for either — that would
-        // compete with the status dots, which carry the real signal.
-        background: active ? "var(--hover)" : onScreen ? "rgba(232,230,225,0.03)" : "transparent",
-        boxShadow: onScreen
-          ? `inset 2px 0 0 ${active ? "var(--text)" : "var(--text-faint)"}`
-          : "none",
-      }}
+      // Two levels, because in a grid they are different questions: every
+      // session *on screen* is marked, and the focused one is marked harder.
+      // See `rowSurface`.
+      style={rowSurface(active, onScreen)}
     >
       {editing ? (
         <div className="flex items-center gap-2 px-3 py-[7px]">
@@ -200,7 +230,13 @@ function Row({
         >
           <StatusDot status={session.status} finished={session.finishedAt !== undefined} />
           <span className="flex min-w-0 flex-1 flex-col">
-            <span className="data truncate text-[12px]" style={{ color: "var(--text)" }}>
+            <span
+              className="data truncate text-[12px]"
+              // The selected row is the only one at full strength. Every row
+              // being `--text` meant the name carried no selection information
+              // at all — see `rowSurface`.
+              style={{ color: active ? "var(--text)" : "var(--text-soft)" }}
+            >
               {session.name}
             </span>
             {showWhere && (
@@ -304,7 +340,7 @@ function GroupHeader({
   return (
     <div
       className="group/hdr flex items-center gap-1 border-b px-2 py-[5px]"
-      style={{ borderColor: "var(--border)", background: "rgba(232,230,225,0.02)" }}
+      style={{ borderColor: "var(--border)", background: "rgba(232, 230, 225, 0.05)" }}
     >
       <button
         type="button"
@@ -326,7 +362,7 @@ function GroupHeader({
           strokeLinecap="square"
           aria-hidden="true"
           style={{
-            color: "var(--text-faint)",
+            color: "var(--text-soft)",
             transform: folded ? "rotate(-90deg)" : "none",
             transition: "transform 140ms cubic-bezier(0.2,0.9,0.3,1)",
             flexShrink: 0,
@@ -334,7 +370,17 @@ function GroupHeader({
         >
           <path d="M6 9l6 6 6-6" />
         </svg>
-        <span className="data truncate text-[11px]" style={{ color: "var(--text-soft)" }}>
+        {/* **The heading has to outrank the rows it heads.** It was
+            `--text-soft`, which is exactly what an unselected session name
+            wears — so a folder read as just another row, and the rail's
+            structure was invisible on a photographic wallpaper. Full `--text`
+            plus weight puts it a clear step above, without uppercasing: these
+            are real folder names, and `CSD-AttackModule` loses its word
+            boundaries in capitals. */}
+        <span
+          className="data truncate text-[11px]"
+          style={{ color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em" }}
+        >
           {group.label}
         </span>
         <span className="micro shrink-0" style={{ color: "var(--text-faint)" }}>

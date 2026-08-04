@@ -44,6 +44,52 @@ pub struct SshTarget {
     platform: parking_lot::RwLock<Option<Platform>>,
 }
 
+/// `ssh`'s own exit code for "I could not do this at all".
+///
+/// It is the one value OpenSSH reserves for itself, and it is deliberately
+/// indistinguishable from any remote exit code — which is why it has to be
+/// separated out before anything is inferred about the *remote* machine.
+const SSH_FAILURE: i32 = 255;
+
+
+/// Did `ssh` fail, rather than the command it was asked to run?
+///
+/// Split out so the rule can be tested without a host: it is the difference
+/// between "this machine is unreachable" and "this machine is Windows", and
+/// those two send the reader to completely different places.
+fn is_transport_failure(status: i32) -> bool {
+    status == SSH_FAILURE
+}
+
+
+/// Turn ssh's stderr into something that names the fix.
+///
+/// One case is worth singling out. rmux rides every channel over a single
+/// `ControlMaster` connection, and sshd's **`MaxSessions` caps the channels on
+/// one connection at 10 by default**. Several sessions on one host — each with
+/// terminals, a Claude, metrics polling and file reads — pass that quietly, and
+/// the eleventh channel is refused with "administratively prohibited".
+///
+/// That phrase reads like a permissions or policy problem with the *account*,
+/// which is the wrong place to look entirely: nothing is prohibited, a counter
+/// is full. Measured on a host with `MaxSessions` unset and 25 sshd processes
+/// for one user.
+fn explain(stderr: &str) -> String {
+    let reason = stderr.trim();
+    if reason.is_empty() {
+        return ": ssh exited 255 without saying why".to_owned();
+    }
+    if reason.contains("administratively prohibited") {
+        return format!(
+            ": {reason}\n\nThis is usually sshd's MaxSessions (default 10) rather than a \
+             permissions problem — rmux multiplexes every channel over one connection, so \
+             several sessions on one host reach it. Raise MaxSessions in the host's \
+             /etc/ssh/sshd_config, or use fewer sessions against it."
+        );
+    }
+    format!(": {reason}")
+}
+
 impl SshTarget {
     pub fn new(host: SshHostId) -> Self {
         let master = ControlMaster::new(host.clone());
@@ -83,6 +129,24 @@ impl SshTarget {
         // does fails, and before this the connection simply never completed.
         // Measured on a real Windows 11 host.
         if probe.status != 0 {
+            // **255 is ssh's own failure, not the remote command's.** OpenSSH
+            // uses it for every connection-level problem it has — a dropped
+            // ControlMaster, an auth failure, `MaxSessions` reached, a network
+            // blip — and it never reaches a remote shell to find out what that
+            // shell is.
+            //
+            // Treating it as the Windows signal told the operator that a
+            // perfectly ordinary Linux host "is not POSIX and no bash was
+            // found", and advised them to install Git for Windows on it. That
+            // is a confident answer to a question rmux never got to ask, and it
+            // sends the reader somewhere with no relation to what went wrong.
+            //
+            // `cmd.exe` failing to find `uname` is a *remote* exit code, so the
+            // real Windows signal is any non-zero status other than this one.
+            if is_transport_failure(probe.status) {
+                anyhow::bail!("could not reach {}{}", self.host.alias, explain(&probe.stderr));
+            }
+
             if let Some(bash) = self.find_posix_shell().await {
                 tracing::info!(bash = %bash, "windows host: routing commands through a POSIX shell");
                 winshell::remember(&self.host.alias, RemoteShell::Via { bash });
@@ -250,6 +314,48 @@ mod tests {
 
     fn target() -> SshTarget {
         SshTarget::new(SshHostId::new("devbox"))
+    }
+
+
+    /// The bug: **a Linux host that ssh could not reach was reported as
+    /// "not POSIX", with advice to install Git for Windows on it.**
+    ///
+    /// `connect` reads a non-zero `uname -s` as the Windows signal, which is
+    /// right when the non-zero came from `cmd.exe`. It is wrong when it came
+    /// from ssh itself — 255 means ssh never reached a remote shell at all, so
+    /// there is nothing to conclude about what that shell is.
+    ///
+    /// This pins the classification rather than the message, because the
+    /// classification is the part that sent the operator to the wrong machine.
+
+    #[test]
+    fn a_full_channel_counter_is_not_reported_as_a_permissions_problem() {
+        let msg = explain("channel 3: open failed: administratively prohibited: open failed");
+        assert!(msg.contains("MaxSessions"), "must name the actual limit: {msg}");
+        // The original text is kept — it is what the operator will search for.
+        assert!(msg.contains("administratively prohibited"));
+
+        // Anything else is passed through untouched rather than guessed at.
+        let other = explain("Permission denied (publickey).");
+        assert!(!other.contains("MaxSessions"), "{other}");
+        assert!(other.contains("Permission denied"));
+
+        assert!(explain("   ").contains("without saying why"));
+    }
+
+    #[test]
+    fn sshs_own_failure_is_not_a_verdict_on_the_remote_shell() {
+        assert_eq!(SSH_FAILURE, 255, "OpenSSH reserves 255 for its own failures");
+
+        // A dropped connection, an auth failure, MaxSessions — all 255, and
+        // none of them say anything about the far side.
+        assert!(is_transport_failure(255));
+
+        // `cmd.exe` not finding `uname` is a *remote* exit code. Those are the
+        // ones that may legitimately mean Windows.
+        assert!(!is_transport_failure(1), "cmd.exe's 'not recognized'");
+        assert!(!is_transport_failure(9009), "cmd.exe's command-not-found");
+        assert!(!is_transport_failure(127), "a POSIX shell's command-not-found");
     }
 
     #[test]

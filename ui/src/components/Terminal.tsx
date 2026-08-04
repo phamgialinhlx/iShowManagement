@@ -211,7 +211,10 @@ export function TerminalView({
     };
 
     const onData = xterm.onData((data) => {
-      if (terminalId) void invoke("terminal_write", { id: terminalId, data });
+      // NFC for the same reason as the Claude pane: macOS hands over
+      // decomposed Vietnamese, and a shell receiving a letter followed by
+      // separate combining marks miscounts every column. See ClaudePanel.
+      if (terminalId) void invoke("terminal_write", { id: terminalId, data: data.normalize("NFC") });
     });
 
     // Same settling as the Claude pane: the local grid follows the window on

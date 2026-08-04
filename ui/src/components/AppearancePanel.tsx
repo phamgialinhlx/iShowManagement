@@ -91,7 +91,19 @@ const DEFAULTS: Appearance = {
   glass: false,
   glassClear: false,
   overlay: 14,
-  background: "desktop",
+  // **A first run is opaque black, not the desktop.**
+  //
+  // Showing the wallpaper through is the more striking default and it was the
+  // original one, but it is the wrong thing to *start* someone on: the app's
+  // legibility then depends on a picture rmux did not choose and cannot see.
+  // A busy or light wallpaper puts 9px labels over arbitrary colour, which is
+  // a first impression of "I cannot read this" rather than of the design.
+  //
+  // Black is the neutral floor every token in `signal-room.css` was measured
+  // against — the contrast ratios in the design rules assume it. Anyone who
+  // wants the desktop is one radio button away, and that choice is theirs to
+  // make once they can see the interface.
+  background: "color",
   backgroundColor: "#0b0b0d",
   backgroundCover: 100,
   scale: 100,

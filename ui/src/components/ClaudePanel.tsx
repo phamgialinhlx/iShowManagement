@@ -384,7 +384,18 @@ export function ClaudePanel({
     // Typing goes straight to Claude's TUI, so anything the cards do not cover
     // is still reachable.
     const onData = xterm.onData((data) => {
-      if (id) void invoke("claude_write", { id, data });
+      // **NFC, because macOS composes Vietnamese decomposed.**
+      //
+      // `ế` is one code point precomposed (U+1EBF) and three decomposed
+      // (`e` + U+0302 + U+0301). macOS's text system hands over the decomposed
+      // form, and a terminal program receiving it sees a letter followed by two
+      // separate combining marks — so cursor arithmetic, width measurement and
+      // any per-character editing all disagree with what is on screen. The
+      // reported symptom is simply "Vietnamese does not work".
+      //
+      // Normalising costs nothing for ASCII (`normalize` returns the same
+      // string) and is the form a terminal should receive in any case.
+      if (id) void invoke("claude_write", { id, data: data.normalize("NFC") });
     });
 
     // Fit locally on every callback so the grid tracks the window, but tell

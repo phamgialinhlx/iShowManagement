@@ -23,5 +23,5 @@
   // The browser harnesses (`ui/*-check.ts`) are included deliberately. They were
   // outside this list and therefore silently unchecked, so `tsc --noEmit` passed
   // while one of them referenced an undefined symbol.
-  "include": ["ui/src", "ui/office-check.ts", "ui/terminal-check.ts", "ui/xterm-clipboard-check.ts", "ui/xterm-glass-check.ts", "ui/lock-check.ts", "ui/context-check.ts", "ui/grid-check.ts", "ui/highlight-check.ts", "ui/atmosphere-check.ts", "ui/groups-check.ts", "ui/affordance-check.ts", "ui/resize-check.ts", "ui/autosave-check.ts", "vite.config.ts"]
+  "include": ["ui/src", "ui/office-check.ts", "ui/terminal-check.ts", "ui/xterm-clipboard-check.ts", "ui/xterm-glass-check.ts", "ui/lock-check.ts", "ui/context-check.ts", "ui/grid-check.ts", "ui/highlight-check.ts", "ui/atmosphere-check.ts", "ui/groups-check.ts", "ui/affordance-check.ts", "ui/resize-check.ts", "ui/autosave-check.ts", "ui/rail-selection-check.ts", "ui/ime-check.ts", "vite.config.ts"]
 }
