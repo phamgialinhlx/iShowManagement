@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "motion/react";
 
 import { basename, useSessions, type Session, type SessionStatus } from "../lib/sessions";
 import { gridLayout } from "../lib/grid";
+import { QuickAdd } from "./QuickAdd";
 import {
   groupSessions,
   readCollapsedGroups,
@@ -455,6 +456,8 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
   const groups = useMemo(() => groupSessions(sessions), [sessions]);
   const [folded, setFolded] = useState<Set<string>>(readCollapsedGroups);
   const [adding, setAdding] = useState<string | null>(null);
+  /** Which group's `+` is currently asking how the session should start. */
+  const [asking, setAsking] = useState<string | null>(null);
 
   const toggleGroup = (key: string) => {
     setFolded((prev) => {
@@ -476,7 +479,10 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
    * about it; see `inheritedProfile`, which also explains why
    * `skipPermissions` never does.
    */
-  const addToGroup = async (group: SessionGroup<Session>) => {
+  const addToGroup = async (
+    group: SessionGroup<Session>,
+    choice: { skipPermissions: boolean; modelProfile?: string },
+  ) => {
     setAdding(group.key);
     try {
       const id = await addSession(
@@ -484,8 +490,8 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
         group.folder,
         nextNameIn(group),
         undefined,
-        undefined,
-        inheritedProfile(group.sessions),
+        choice.skipPermissions,
+        choice.modelProfile,
       );
       // A new session while a cell is selected belongs in that cell — the
       // operator is holding a pane open waiting to be filled, and making them
@@ -501,6 +507,7 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
       });
     } finally {
       setAdding(null);
+      setAsking(null);
     }
   };
 
@@ -606,8 +613,21 @@ export function SessionRail({ onNewSession }: { onNewSession: () => void }) {
                   }
                   busy={adding === group.key}
                   onToggle={() => toggleGroup(group.key)}
-                  onAdd={() => void addToGroup(group)}
+                  onAdd={() => setAsking((k) => (k === group.key ? null : group.key))}
                 />
+                {/* Between the header and the rows, so it reads as belonging to
+                    this folder rather than floating over the rail — and it
+                    cannot cover the group it is about. */}
+                {asking === group.key && (
+                  <QuickAdd
+                    label={nextNameIn(group)}
+                    where={`${group.folder} on ${group.host}`}
+                    inheritedProfile={inheritedProfile(group.sessions)}
+                    busy={adding === group.key}
+                    onCancel={() => setAsking(null)}
+                    onCreate={(choice) => void addToGroup(group, choice)}
+                  />
+                )}
                 <AnimatePresence initial={false}>
                   {!folded.has(group.key) &&
                     group.sessions.map((session) => (
