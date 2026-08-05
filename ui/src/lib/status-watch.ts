@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { isTauri } from "./api";
-import { useSessions } from "./sessions";
+import { useWorkspace } from "./workspace";
 
 /**
  * Keep every session's status current, not only the ones on screen.
@@ -38,12 +38,14 @@ export function startStatusWatch(): () => void {
   if (!isTauri() || timer !== null) return () => {};
 
   const tick = async () => {
-    const state = useSessions.getState();
-    const { claudeSessions, sessions, setStatus } = state;
+    const state = useWorkspace.getState();
+    const { live, sessions, setStatus } = state;
 
     await Promise.all(
       sessions.map(async (session) => {
-        const claudeId = claudeSessions[session.id];
+        // Terminals are status-neutral in v1 (ADR-001); only Claude reports.
+        if (session.kind !== "claude") return;
+        const claudeId = live[session.id];
         // No handle means this session has not been opened in this run, so
         // there is genuinely nothing to report. Leaving it alone is honest;
         // guessing "idle" would be inventing a measurement.

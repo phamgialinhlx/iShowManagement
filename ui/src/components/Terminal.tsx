@@ -9,6 +9,7 @@ import { isTauri, type TargetRef } from "../lib/api";
 import { settleResize } from "../lib/terminal-resize";
 import { attachClipboard } from "../lib/terminal-clipboard";
 import { gpuRendering, terminalTheme } from "../lib/terminal-theme";
+import { readMonoStack } from "../lib/fonts";
 import { PanelLoader } from "./PanelLoader";
 
 /**
@@ -88,7 +89,10 @@ export function TerminalView({
     const xterm = new Xterm({
       theme: terminalTheme(),
       allowTransparency: true,
-      fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
+      // The operator's chosen mono font (ADR-003), read from the live token so
+      // it reflects a preview as well as a committed value. Pushed in on the
+      // appearance/theme events below, because xterm caches this at construction.
+      fontFamily: readMonoStack(),
       fontSize: 13,
       lineHeight: 1.25,
       // Rule 2: the cursor is the one thing in this design allowed to blink.
@@ -264,12 +268,24 @@ export function TerminalView({
       // The palette is derived from the live design tokens, so a colour chosen
       // in Settings has to be pushed into xterm — it does not re-read CSS on
       // its own. Without this the terminals keep the colours they were born
-      // with, which is the whole complaint being fixed.
+      // with, which is the whole complaint being fixed. Same story for the mono
+      // font (ADR-003): the token changed, but xterm cached the family.
       xterm.options.theme = terminalTheme();
+      xterm.options.fontFamily = readMonoStack();
+      requestAnimationFrame(() => requestAnimationFrame(refit));
+    };
+    // Switching the ANSI theme *or the font* fires this in *this* document (a
+    // `storage` event only reaches other windows; `applyFonts` dispatches it for
+    // the live preview). Same push as above: xterm caches palette and font and
+    // does not watch CSS.
+    const onTheme = () => {
+      xterm.options.theme = terminalTheme();
+      xterm.options.fontFamily = readMonoStack();
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     window.addEventListener("storage", onAppearance);
     window.addEventListener("resize", refit);
+    window.addEventListener("rmux-theme", onTheme);
 
 
     // A container that is already sized emits no resize event, so kick it off.
@@ -281,6 +297,7 @@ export function TerminalView({
       settle.dispose();
       window.removeEventListener("storage", onAppearance);
       window.removeEventListener("resize", refit);
+      window.removeEventListener("rmux-theme", onTheme);
       onData.dispose();
       termRef.current = null;
       xterm.dispose();

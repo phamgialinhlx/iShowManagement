@@ -35,6 +35,8 @@ reqwest.workspace = true
 sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
+notify.workspace = true
 # `protocol-asset` is required by the `assetProtocol` block in tauri.conf.json —
 # the build script refuses to proceed if the two disagree. It is what lets the
 # webview load the downloaded face models off disk.

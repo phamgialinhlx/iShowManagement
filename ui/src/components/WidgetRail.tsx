@@ -19,7 +19,24 @@ import {
 } from "../lib/api";
 import { contextLimit } from "../lib/context-window";
 import { ContextMeter } from "./ContextMeter";
-import { basename, useSessions, type Session } from "../lib/sessions";
+import { basename } from "../lib/workspace-model";
+import { useWorkspace } from "../lib/workspace";
+
+/**
+ * What the instruments need from the active session, flattened.
+ *
+ * v3 splits the fused `Session`: `target` comes from the Server, `folder` from
+ * the Project. `Workbench` resolves them and hands this down, so the widgets do
+ * not each reach into the store's tree.
+ */
+export type Active = {
+  id: string;
+  target: TargetRef;
+  folder: string;
+  resume?: string;
+  contextWindow?: number;
+  jiraProject?: string;
+};
 
 /**
  * The instrument rail.
@@ -276,7 +293,7 @@ function UsageWidget({
   session,
   onDragStart,
 }: {
-  session: Session;
+  session: Active;
   onDragStart?: (event: React.PointerEvent) => void;
 }) {
   const [usage, setUsage] = useState<TokenUsage | null>(null);
@@ -355,7 +372,7 @@ function SessionWidget({
   session,
   onDragStart,
 }: {
-  session: Session;
+  session: Active;
   onDragStart?: (event: React.PointerEvent) => void;
 }) {
   const [seconds, setSeconds] = useState(0);
@@ -461,7 +478,7 @@ function Instrument({
   host,
 }: {
   id: InstrumentId;
-  session: Session;
+  session: Active;
   host: ReturnType<typeof useHostSample>;
 }) {
   // Dragging is started by the header, not by the item — see `Widget`. Without
@@ -526,7 +543,7 @@ function Instrument({
 }
 
 /** The instruments, in the operator's own order. */
-function Instruments({ session, customising }: { session: Session; customising: boolean }) {
+function Instruments({ session, customising }: { session: Active; customising: boolean }) {
   const [order, setOrder] = useState<InstrumentId[]>(readOrder);
   const [enabled, setEnabled] = useState<Set<InstrumentId>>(readEnabled);
 
@@ -617,14 +634,16 @@ const LABELS: Record<InstrumentId, string> = {
   session: "SESSION",
 };
 
-export function WidgetRail({ session }: { session: Session | null }) {
+export function WidgetRail({ session }: { session: Active | null }) {
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem(COLLAPSE_KEY) === "1",
   );
   // Not persisted: this is a mode you are *in*, not a preference. Reopening the
   // app into a settings list rather than the instruments would be a surprise.
   const [customising, setCustomising] = useState(false);
-  const waiting = useSessions((s) => s.sessions.filter((x) => x.status === "waiting").length);
+  const waiting = useWorkspace(
+    (s) => s.sessions.filter((x) => x.kind === "claude" && s.runtime[x.id]?.status === "waiting").length,
+  );
 
   useEffect(() => {
     localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");

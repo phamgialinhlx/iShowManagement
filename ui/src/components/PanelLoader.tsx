@@ -63,7 +63,7 @@ export function PanelLoader({
             and a fake percentage would be an invented measurement. */}
         <div
           className="w-full overflow-hidden"
-          style={{ height: 2, background: "rgba(232,230,225,0.10)" }}
+          style={{ height: 2, background: "color-mix(in srgb, var(--text) 10%, transparent)" }}
           role="progressbar"
           aria-label={phase}
         >

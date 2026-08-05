@@ -7,15 +7,52 @@ import { api, isTauri } from "../lib/api";
 import { BackgroundPicker } from "./BackgroundPicker";
 import { loadUserCss, saveUserCss } from "../lib/user-css";
 import { gpuRendering, setGpuRendering } from "../lib/terminal-theme";
+import {
+  type Theme,
+  ANSI_KEYS,
+  SPECIAL_KEYS,
+  ROLE_KEYS,
+  isBuiltIn,
+} from "../lib/theme";
+import {
+  themeSnapshot,
+  subscribeTheme,
+  resolve,
+  applyTheme,
+  setActiveTheme,
+  saveTheme,
+  deleteTheme,
+  copyName,
+} from "../lib/theme-runtime";
+import {
+  UI_FONTS,
+  MONO_FONTS,
+  DEFAULT_UI_FONT,
+  DEFAULT_MONO_FONT,
+  applyFonts,
+  applyUiFont,
+  applyMonoFont,
+} from "../lib/fonts";
 
 /**
- * How much of the desktop shows through.
+ * Everything about how rmux looks, in one panel.
  *
- * The same two knobs the previous app exposed under Appearance › Glass, and for
- * the same reason: the right amount depends entirely on what is behind the
- * window. A bright wallpaper needs a heavier tint before 9px labels stay
- * legible; a dark one can carry far more transparency before anything is lost.
- * That is not a judgement this app can make on the operator's behalf.
+ * This merges what were two Settings tabs — **Palette** (the ANSI theme) and
+ * **Appearance** (backdrop, glass, scale) — behind a single Apply bar (ADR-002).
+ * Both were "how the app looks", split only by which backend stored them:
+ * `theme.toml` via Rust for colour, `localStorage` for material. The split read
+ * as arbitrary, and two `sticky` footers cannot share one scroll container.
+ *
+ * The colour half stages a theme *selection* and *colour edits* (previewed live,
+ * written to `theme.toml` on Apply). The material half stages a `draft` against
+ * `saved`. One `dirty`, one Apply, one Discard commit or revert both. Three
+ * things stay instant, under their own boundary: the theme library ops
+ * (Duplicate/Delete), the GPU toggle, and custom CSS.
+ *
+ * The material knobs are the same two the previous app exposed under Appearance ›
+ * Glass, and for the same reason: the right amount of translucency depends
+ * entirely on what is behind the window, which is not a judgement this app can
+ * make on the operator's behalf.
  *
  * Written straight onto `:root`, because the whole design system reads these
  * two variables — every panel, menu and floating window picks the change up at
@@ -77,14 +114,20 @@ type Appearance = {
    * — and it reaches the terminals, which re-fit to the new cell size.
    */
   scale: number;
-  /** Base text colour. `--text-soft` and `--text-faint` are derived from it. */
-  textColor?: string;
-  /** The one accent. Reserved for "you must act" — rule 0 survives recolouring. */
-  accent?: string;
-};
 
-const DEFAULT_TEXT = "#e8e6e1";
-const DEFAULT_ACCENT = "#e63b2e";
+  /**
+   * Typeface ids (ADR-003), resolved through `lib/fonts.ts`. Stored as stable
+   * ids rather than CSS stacks so a font's fallbacks can change without
+   * rewriting saved settings. `uiFont` drives the chrome; `monoFont` drives
+   * every monospace surface — terminal, Claude, editor and data — at once.
+   *
+   * Unlike the material knobs above, these two *preview live* (like a theme
+   * chip): picking one repaints immediately, but the choice still only persists
+   * on Apply.
+   */
+  uiFont: string;
+  monoFont: string;
+};
 
 const DEFAULTS: Appearance = {
   tint: 38,
@@ -107,6 +150,11 @@ const DEFAULTS: Appearance = {
   backgroundColor: "#0b0b0d",
   backgroundCover: 100,
   scale: 100,
+  // Today's look exactly — an absent/old setting is unchanged (SFU Futura +
+  // IBM Plex Mono), and `load()`'s spread fills these in for pre-existing
+  // stored appearances.
+  uiFont: DEFAULT_UI_FONT,
+  monoFont: DEFAULT_MONO_FONT,
 };
 
 function load(): Appearance {
@@ -132,19 +180,6 @@ const isSettingsWindow =
 /** The scale as a zoom factor, clamped to what the slider offers. */
 function zoom(scale: number): number {
   return Math.min(Math.max(scale, 60), 200) / 100;
-}
-
-/**
- * `#rrggbb` to the `r g b` triplet `--primary` is built from.
- *
- * Returns null rather than a guess for anything unparseable: a malformed value
- * must leave the shipped accent standing, not produce an invisible one.
- */
-function toTriplet(hex: string): string | null {
-  const clean = hex.trim().replace(/^#/, "");
-  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return null;
-  const n = Number.parseInt(clean, 16);
-  return `${(n >> 16) & 255} ${(n >> 8) & 255} ${n & 255}`;
 }
 
 /**
@@ -235,25 +270,18 @@ export function applyAppearance(a: Appearance = load()) {
   // on the instrument doing the configuring.
   root.style.setProperty("--ui-zoom", isSettingsWindow ? "1" : String(zoom(a.scale)));
 
-  if (a.textColor && a.textColor.toLowerCase() !== DEFAULT_TEXT) {
-    root.style.setProperty("--text", a.textColor);
-    // The flag is what lets the derived ramp exist only when it is wanted; see
-    // `[data-custom-text]` in signal-room.css.
-    root.dataset.customText = "on";
-  } else {
-    root.style.removeProperty("--text");
-    delete root.dataset.customText;
-  }
+  // The typefaces. `applyFonts` writes `--font-display`/`--font-mono` and fires
+  // the theme event so the terminals and Monaco re-read (they cache the family
+  // and do not watch CSS — same reason a colour has to be pushed into xterm).
+  // The chrome and the metric widgets read the tokens and follow with nothing
+  // further. This runs before the `isTauri()` return below so it applies in the
+  // browser check harnesses too.
+  applyFonts(a.uiFont, a.monoFont);
 
-  const rgb = a.accent && a.accent.toLowerCase() !== DEFAULT_ACCENT ? toTriplet(a.accent) : null;
-  if (rgb) {
-    // `--primary` is a bare `r g b` triplet, not a colour: every use is
-    // `rgb(var(--primary) / <alpha>)`. Writing a hex here would break every
-    // translucent accent in the app at once.
-    root.style.setProperty("--primary", rgb);
-  } else {
-    root.style.removeProperty("--primary");
-  }
+  // Text and accent are no longer set here — the ANSI theme owns every colour now
+  // (Settings › Palette, `lib/theme-runtime.ts`). Two writers of `--text` /
+  // `--primary` would fight, so this panel keeps only the *material* knobs (tint,
+  // glass, background, scale) and leaves colour to the theme.
 
   // Native glass is a *window* change, so it is applied through Rust rather than
   // CSS — see `src-tauri/src/glass.rs` for why the page cannot do this itself.
@@ -290,29 +318,173 @@ export function applyAppearance(a: Appearance = load()) {
 }
 
 export function AppearancePanel() {
-  // **Two states, deliberately.** `saved` is what the app is wearing; `draft` is
-  // what the operator is composing. Nothing crosses from one to the other
-  // without Apply.
-  //
-  // Live-applying every keystroke was the original design and it reads as the
-  // app changing under you — worst of all on a slider, where each tick of the
-  // interface scale re-laid the whole window out mid-drag. Editing a copy makes
-  // the change deliberate, makes "I have not applied this yet" visible, and
-  // makes Discard possible at all.
+  // **One panel, two backends, one Apply (ADR-002).** The material half stages a
+  // `draft` against `saved` (localStorage); the colour half stages a theme
+  // selection and colour edits (theme.toml, via Rust). A single `dirty` flag and
+  // a single Apply commit both. Nothing crosses from staged to saved without
+  // Apply — live-applying every keystroke reads as the app changing under you,
+  // worst of all on the interface-scale slider, which re-lays the whole window
+  // out mid-drag.
   const [saved, setSaved] = useState<Appearance>(load);
   const [draft, setDraft] = useState<Appearance>(saved);
   const [glassAvailable, setGlassAvailable] = useState(false);
   const [restarting, setRestarting] = useState(false);
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
+  // The colour half, lifted in from the old PalettePanel so one Apply bar
+  // governs it too. `selectedName` is the *staged* active choice — previewed via
+  // `applyTheme`, persisted only on Apply. `colourDraft` is a forked/edited
+  // theme; `origin` remembers what it forked from, for rename cleanup.
+  // Duplicate/Delete stay instant (they manage the library, not the composed
+  // look — ADR-002 §3), so they carry their own `busy`/`error`.
+  const [snap, setSnap] = useState(themeSnapshot);
+  const [selectedName, setSelectedName] = useState(snap.active);
+  const [colourDraft, setColourDraft] = useState<Theme | null>(null);
+  const [origin, setOrigin] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const commit = () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
-    applyAppearance(draft);
-    setSaved(draft);
-    // Other windows learn about this through the `storage` event, which does
-    // not fire in the document that wrote it — so this window applies it
-    // directly and every other one is told.
+  useEffect(() => subscribeTheme(() => setSnap(themeSnapshot())), []);
+
+  // Follow the active theme when it moves under us — a commit here, or a switch
+  // from another window — but not while a colour edit is mid-fork, or the
+  // preview would jump out from under the operator's hands.
+  useEffect(() => {
+    if (!colourDraft) setSelectedName(snap.active);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snap.active]);
+
+  const materialDirty = JSON.stringify(draft) !== JSON.stringify(saved);
+  const themeStaged = selectedName !== snap.active;
+  const colourEdited = colourDraft !== null;
+  const dirty = materialDirty || themeStaged || colourEdited;
+
+  // What the editor shows and what previews live on the workbench.
+  const preview = colourDraft ?? resolve(selectedName, snap.user);
+  const editingBuiltIn = isBuiltIn(preview.name);
+
+  /** Stage a theme switch: preview it live, persist nothing until Apply. */
+  const switchTo = (name: string) => {
+    setColourDraft(null);
+    setOrigin(null);
+    setSelectedName(name);
+    applyTheme(resolve(name, snap.user));
+  };
+
+  /** A colour well changed: fork a built-in on first touch, then preview live. */
+  const edit = (field: keyof Theme, value: string) => {
+    let base = colourDraft;
+    let baseOrigin = origin;
+    if (!base) {
+      const sel = resolve(selectedName, snap.user);
+      base = sel;
+      baseOrigin = sel.name;
+      if (isBuiltIn(sel.name)) base = { ...sel, name: copyName(sel.name) };
+    }
+    const next = { ...base, [field]: value } as Theme;
+    setOrigin(baseOrigin);
+    setColourDraft(next);
+    applyTheme(next);
+  };
+
+  /**
+   * Pick a font. Fonts preview live (ADR-003 §5) — colour and font are the two
+   * live axes, so this repaints the type immediately and stages the choice into
+   * `draft` (which lights the Apply bar via `materialDirty`). Each handler
+   * applies *only its own axis*, so it touches neither the other role nor a
+   * staged scale/backdrop change — and does not depend on the other role's
+   * possibly-stale draft value.
+   */
+  const pickUiFont = (id: string) => {
+    applyUiFont(id);
+    setDraft((a) => ({ ...a, uiFont: id }));
+  };
+  const pickMonoFont = (id: string) => {
+    applyMonoFont(id);
+    setDraft((a) => ({ ...a, monoFont: id }));
+  };
+
+  /** Commit everything — both backends — in one press. Throws on failure so
+   *  Apply & restart can skip the relaunch. */
+  const commit = async () => {
+    setBusy("Saving…");
+    setError(null);
+    try {
+      // Colour half first (async, can fail), then material (synchronous).
+      if (colourDraft) {
+        await saveTheme(colourDraft);
+        // A rename of a user theme leaves the old name behind; remove it. A fork
+        // of a built-in keeps the built-in (it lives in code, not the file).
+        if (origin && origin !== colourDraft.name && !isBuiltIn(origin)) {
+          await deleteTheme(origin);
+        }
+        await setActiveTheme(colourDraft.name);
+        setSelectedName(colourDraft.name);
+      } else if (themeStaged) {
+        await setActiveTheme(selectedName);
+      }
+      setColourDraft(null);
+      setOrigin(null);
+
+      // Material. Other windows learn about this through the `storage` event,
+      // which does not fire in the document that wrote it — so this window
+      // applies it directly and every other one is told.
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
+      applyAppearance(draft);
+      setSaved(draft);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      throw e;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Drop every staged change and repaint the live preview to the saved look. */
+  const discard = () => {
+    setDraft(saved);
+    setColourDraft(null);
+    setOrigin(null);
+    setSelectedName(snap.active);
+    applyTheme(resolve(snap.active, snap.user));
+    // Fonts previewed live, so repaint them back to the saved look too.
+    applyFonts(saved.uiFont, saved.monoFont);
+  };
+
+  /** Instant library op: copy the previewed theme, stage the copy as selected. */
+  const duplicate = async () => {
+    setBusy("Duplicating…");
+    setError(null);
+    try {
+      const copy = { ...resolve(selectedName, snap.user), name: copyName(selectedName) };
+      await saveTheme(copy); // writes the file now; leaves `active` alone
+      setColourDraft(null);
+      setOrigin(null);
+      setSelectedName(copy.name); // staged selection, not persisted-active
+      applyTheme(copy);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Instant library op: delete the previewed theme, revert preview to saved. */
+  const remove = async () => {
+    const target = resolve(selectedName, snap.user).name;
+    setBusy("Deleting…");
+    setError(null);
+    try {
+      await deleteTheme(target);
+      const s = themeSnapshot();
+      setColourDraft(null);
+      setOrigin(null);
+      setSelectedName(s.active);
+      applyTheme(resolve(s.active, s.user));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
   };
 
   useEffect(() => {
@@ -361,15 +533,167 @@ export function AppearancePanel() {
   );
 
   return (
-    <section className="flex max-w-[520px] flex-col gap-5">
+    <section className="flex max-w-[560px] flex-col gap-5">
       <header className="flex flex-col gap-1">
         <h2 className="kicker">APPEARANCE</h2>
         <p className="data text-[11px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
-          The window is translucent over your desktop. How much of it you see is yours to pick —
-          the right amount depends entirely on your wallpaper.
+          Everything about how rmux looks: the colours it is drawn from, the typefaces, the
+          backdrop behind the window, and the interface scale. Nothing here is written until you
+          press Apply — except the two live controls at the bottom.
         </p>
       </header>
 
+      {/* ── COLOURS ─────────────────────────────────────────────────────────
+          The ANSI theme, lifted in from the old Palette tab. Every colour in
+          rmux — chrome, terminals, editor — derives from the active theme.
+          Switching a chip previews live but stages the choice; a colour edit
+          forks a built-in and previews; both persist only on Apply. */}
+      <div className="flex flex-col gap-1">
+        <span className="micro">PALETTE</span>
+        <p className="data text-[11px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+          Pick a theme, or edit its 23 colours — the ANSI 16 plus Background, Text, Bold Text,
+          Selection and Cursor, and two roles the terminal has no slot for: Accent (&ldquo;you
+          must act&rdquo;) and Working. Built-ins are read-only; editing one forks a copy.
+        </p>
+      </div>
+
+      {/* The theme list. Selecting stages a switch and previews it. */}
+      <div className="flex flex-col gap-1">
+        <span className="micro">THEMES</span>
+        <div className="flex flex-wrap gap-2">
+          {snap.all.map((t) => (
+            <button
+              key={t.name}
+              type="button"
+              className="chip"
+              aria-pressed={t.name === selectedName}
+              disabled={busy !== null}
+              onClick={() => switchTo(t.name)}
+              title={isBuiltIn(t.name) ? "Built-in (read-only)" : "Your theme"}
+            >
+              <Dot theme={t} />
+              {t.name}
+              {isBuiltIn(t.name) ? "" : " ·"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Duplicate / delete — instant library ops (ADR-002 §3). */}
+      <div className="flex items-center gap-2">
+        <button type="button" className="chip" disabled={busy !== null} onClick={() => void duplicate()}>
+          DUPLICATE
+        </button>
+        {!editingBuiltIn && (
+          <button type="button" className="chip" disabled={busy !== null} onClick={() => void remove()}>
+            DELETE
+          </button>
+        )}
+        <span className="data text-[10px] ml-auto" style={{ color: "var(--text-faint)" }}>
+          {editingBuiltIn ? "Built-in — edits fork a copy" : "Your theme"}
+        </span>
+      </div>
+
+      {/* The colour editor. */}
+      <div className="flex flex-col gap-4" style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+        <div className="flex items-baseline justify-between">
+          <span className="micro">EDITING</span>
+          <span className="data text-[12px]" style={{ color: "var(--text)" }}>
+            {preview.name}
+          </span>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <span className="micro">ANSI · NORMAL</span>
+          <div className="flex flex-wrap gap-2">
+            {ANSI_KEYS.slice(0, 8).map((k, i) => (
+              <Well key={k} label={ANSI_LABELS[i] ?? k} value={preview[k]} onChange={(v) => edit(k, v)} />
+            ))}
+          </div>
+          <span className="micro">ANSI · BRIGHT</span>
+          <div className="flex flex-wrap gap-2">
+            {ANSI_KEYS.slice(8).map((k, i) => (
+              <Well key={k} label={ANSI_LABELS[i] ?? k} value={preview[k]} onChange={(v) => edit(k, v)} />
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <span className="micro">SPECIAL</span>
+          <div className="flex flex-wrap gap-2">
+            {SPECIAL_KEYS.map((k) => (
+              <Well key={k} label={SPECIAL_LABELS[k]} value={preview[k]} onChange={(v) => edit(k, v)} />
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <span className="micro">ROLE</span>
+          <div className="flex flex-wrap gap-2">
+            {ROLE_KEYS.map((k) => (
+              <Well key={k} label={ROLE_LABELS[k]} value={preview[k]} onChange={(v) => edit(k, v)} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── TYPE ────────────────────────────────────────────────────────────
+          The two font roles (ADR-003). Like a theme chip, picking one previews
+          live across chrome, terminal and editor and stages the choice; Apply
+          persists, Discard reverts. Each chip renders its own label in its own
+          face, so the list previews itself. Placed here, between the two
+          live-preview axes (colour above) and the apply-on-Apply material knobs
+          (below), so layout matches the preview split. */}
+      <div className="flex flex-col gap-4" style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+        <div className="flex flex-col gap-1">
+          <span className="kicker">TYPE</span>
+          <p className="data text-[11px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+            The typefaces rmux is drawn with. The UI font sets labels, headings and body; the mono
+            font sets every monospace surface at once — the terminal, the Claude pane, the code
+            editor and the data readouts. Both preview as you pick them, and persist on Apply.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <span className="micro">UI FONT</span>
+          <div className="flex flex-wrap gap-2">
+            {UI_FONTS.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                className="chip"
+                aria-pressed={draft.uiFont === f.id}
+                onClick={() => pickUiFont(f.id)}
+                style={{ fontFamily: f.stack }}
+                title={f.provider === "system" ? "Your OS's own font — not identical across machines" : undefined}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <span className="micro">MONO FONT</span>
+          <div className="flex flex-wrap gap-2">
+            {MONO_FONTS.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                className="chip"
+                aria-pressed={draft.monoFont === f.id}
+                onClick={() => pickMonoFont(f.id)}
+                style={{ fontFamily: f.stack }}
+                title={f.provider === "system" ? "Your OS's own font — not identical across machines" : undefined}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── MATERIAL ────────────────────────────────────────────────────── */}
       <BackgroundPicker
         mode={draft.background}
         color={draft.backgroundColor}
@@ -429,26 +753,6 @@ export function AppearancePanel() {
         (scale) => setDraft((a) => ({ ...a, scale })),
       )}
 
-      <div className="flex flex-col gap-3">
-        <span className="micro">COLOUR</span>
-
-        <Swatch
-          label="TEXT"
-          hint="The dimmer two levels are derived from this, so headings, prose and micro-labels keep their order."
-          value={draft.textColor ?? DEFAULT_TEXT}
-          fallback={DEFAULT_TEXT}
-          onChange={(textColor) => setDraft((a) => ({ ...a, textColor }))}
-        />
-
-        <Swatch
-          label="ACCENT"
-          hint="Used only where you must act — a waiting prompt, an error, the caret. Everything else stays monochrome."
-          value={draft.accent ?? DEFAULT_ACCENT}
-          fallback={DEFAULT_ACCENT}
-          onChange={(accent) => setDraft((a) => ({ ...a, accent }))}
-        />
-      </div>
-
       <button
         type="button"
         className="btn self-start"
@@ -457,32 +761,18 @@ export function AppearancePanel() {
           // wallpaper on disk is a file nobody will ever find again.
           if (draft.backgroundImage) void api.backgroundClear().catch(() => {});
           setDraft(DEFAULTS);
+          // Fonts preview live, so a reset repaints them to the defaults now;
+          // the material knobs it also resets still wait for Apply.
+          applyFonts(DEFAULTS.uiFont, DEFAULTS.monoFont);
         }}
       >
         Reset everything
       </button>
 
-      <ApplyBar
-        dirty={dirty}
-        restarting={restarting}
-        onApply={commit}
-        onDiscard={() => setDraft(saved)}
-        onApplyAndRestart={() => {
-          commit();
-          setRestarting(true);
-          // No catch that clears the flag: on success this process is replaced,
-          // so there is nothing left to clear. A failure leaves the label
-          // showing, which is the honest state — the restart did not happen.
-          void api.restartApp().catch(() => setRestarting(false));
-        }}
-      />
-
       {/*
-        Everything below the Apply bar takes effect as it is typed or ticked,
-        and that is on purpose rather than an oversight — a stylesheet you
-        cannot see take effect is a stylesheet you cannot debug. An invisible
-        boundary between "staged" and "live" would be the worst of both, so it
-        is labelled where it happens.
+        The two controls that follow take effect as you type — a stylesheet you
+        cannot see take effect is one you cannot debug — while everything above
+        stages into the Apply bar. The boundary is labelled rather than guessed.
       */}
       <div className="flex flex-col gap-1 pt-2">
         <span className="micro">APPLIED AS YOU TYPE</span>
@@ -496,6 +786,33 @@ export function AppearancePanel() {
 
       <UserCss />
 
+      {/*
+        The Apply bar is the **last child** deliberately: `sticky bottom-0` only
+        pins to the bottom of the scroll area if nothing follows it. It used to sit
+        above the two live controls, so scrolling down to them un-stuck it and it
+        drifted up the page. As the final element it stays pinned while the rest of
+        the panel scrolls under it.
+      */}
+      <ApplyBar
+        dirty={dirty}
+        busy={busy}
+        error={error}
+        restarting={restarting}
+        onApply={() => void commit().catch(() => {})}
+        onDiscard={discard}
+        onApplyAndRestart={async () => {
+          try {
+            await commit();
+          } catch {
+            return; // a failed commit leaves the error showing; do not relaunch
+          }
+          setRestarting(true);
+          // No catch that clears the flag: on success this process is replaced,
+          // so there is nothing left to clear. A failure leaves the label
+          // showing, which is the honest state — the restart did not happen.
+          void api.restartApp().catch(() => setRestarting(false));
+        }}
+      />
     </section>
   );
 }
@@ -523,12 +840,16 @@ export function AppearancePanel() {
  */
 function ApplyBar({
   dirty,
+  busy,
+  error,
   restarting,
   onApply,
   onDiscard,
   onApplyAndRestart,
 }: {
   dirty: boolean;
+  busy: string | null;
+  error: string | null;
   restarting: boolean;
   onApply: () => void;
   onDiscard: () => void;
@@ -536,90 +857,56 @@ function ApplyBar({
 }) {
   return (
     <div
-      className="sticky bottom-0 -mx-6 mt-1 flex flex-col gap-2 px-6 py-3"
+      className="sticky bottom-0 -mx-6 -mb-6 mt-1 flex flex-col gap-2 px-6 pb-6 pt-3"
       style={{
         borderTop: "1px solid var(--border-strong)",
-        background: "color-mix(in srgb, var(--app-panel) 88%, transparent)",
+        // Near-opaque: this is a sticky footer, so the panel content scrolls
+        // under it — at 88% the text behind bled through and read as a smudge.
+        background: "color-mix(in srgb, var(--app-panel) 97%, transparent)",
       }}
     >
       <div className="flex items-center gap-3">
-        <button type="button" className="btn" disabled={!dirty || restarting} onClick={onApply}>
+        <button
+          type="button"
+          className="btn"
+          disabled={!dirty || restarting || busy !== null}
+          onClick={onApply}
+        >
           Apply
         </button>
         <button
           type="button"
           className="btn"
-          disabled={restarting}
+          disabled={restarting || busy !== null}
           onClick={onApplyAndRestart}
           title="Applies your changes, then relaunches so the terminals re-measure cleanly."
         >
           {restarting ? "Restarting…" : "Apply & restart"}
         </button>
-        {dirty && !restarting && (
+        {dirty && !restarting && !busy && (
           <button type="button" className="chip ml-auto" onClick={onDiscard}>
             DISCARD
           </button>
         )}
       </div>
 
-      <span className="data text-[10px] leading-relaxed" style={{ color: dirty ? "rgb(var(--busy))" : "var(--text-soft)" }}>
-        {restarting
-          ? "Relaunching. Your sessions keep running on their hosts and will reattach."
-          : dirty
-            ? "Not applied yet — the app still looks the way it did."
-            : "Everything here is applied. Restart is only needed if the terminals look off after a scale change; your sessions survive it."}
-      </span>
-    </div>
-  );
-}
-
-/**
- * A colour, with the way back.
- *
- * The reset is always present rather than appearing once the value differs from
- * the default. A control that materialises only after you have already made a
- * mess is a control you do not know exists at the moment you need it — and "how
- * do I undo this" is the first question anyone asks of a colour picker.
- */
-function Swatch({
-  label,
-  hint,
-  value,
-  fallback,
-  onChange,
-}: {
-  label: string;
-  hint: string;
-  value: string;
-  fallback: string;
-  onChange: (value: string) => void;
-}) {
-  const changed = value.toLowerCase() !== fallback.toLowerCase();
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-3">
-        <input
-          type="color"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="h-7 w-12 cursor-pointer border-0 bg-transparent p-0"
-          aria-label={label.toLowerCase()}
-        />
-        <span className="micro">{label}</span>
-        <span className="data text-[11px]" style={{ color: "var(--text-soft)" }}>
-          {value.toUpperCase()}
-        </span>
-        <button
-          type="button"
-          className="chip ml-auto"
-          onClick={() => onChange(fallback)}
-          style={{ color: changed ? "var(--text)" : "var(--text-faint)" }}
-        >
-          {changed ? "RESET" : "DEFAULT"}
-        </button>
-      </div>
-      <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
-        {hint}
+      {/* Status, in priority order: an error persists until the next attempt; a
+          restart or an in-flight save reports itself; a dirty panel explains the
+          preview split (colours live, material on Apply); at rest it points at
+          the canonical file. */}
+      <span
+        className="data text-[10px] leading-relaxed"
+        style={{ color: error ? "rgb(var(--primary))" : dirty || busy ? "rgb(var(--busy))" : "var(--text-soft)" }}
+      >
+        {error
+          ? error
+          : restarting
+            ? "Relaunching. Your sessions keep running on their hosts and will reattach."
+            : busy
+              ? busy
+              : dirty
+                ? "Colours and fonts preview live; backdrop and scale apply on Apply. Nothing is written until you press it."
+                : "Saved to theme.toml and your appearance settings — you can hand-edit theme.toml and the app repaints. Restart only helps if the terminals look off after a scale change; sessions survive it."}
       </span>
     </div>
   );
@@ -803,5 +1090,82 @@ function TerminalRendering() {
         RELOADS THE WINDOW — SESSIONS REATTACH, NOTHING IS LOST
       </span>
     </section>
+  );
+}
+
+/* ────────────────────────── the colour editor ──────────────────────────
+ * Lifted from the former PalettePanel so one Apply bar governs colour too
+ * (ADR-002). Purely presentational — all state lives in AppearancePanel. */
+
+/** Short labels for the ANSI grid, in `ANSI_KEYS` order. */
+const ANSI_LABELS = ["BLK", "RED", "GRN", "YEL", "BLU", "MAG", "CYN", "WHT"];
+
+const SPECIAL_LABELS: Record<(typeof SPECIAL_KEYS)[number], string> = {
+  background: "BACKGROUND",
+  foreground: "TEXT",
+  boldText: "BOLD TEXT",
+  selection: "SELECTION",
+  cursor: "CURSOR",
+};
+
+const ROLE_LABELS: Record<(typeof ROLE_KEYS)[number], string> = {
+  accent: "ACCENT · ACT",
+  working: "WORKING",
+};
+
+/** A tiny two-colour swatch — background and accent — to tell themes apart. */
+function Dot({ theme }: { theme: Theme }) {
+  return (
+    <span
+      className="round"
+      style={{
+        width: 10,
+        height: 10,
+        display: "inline-block",
+        background: theme.background,
+        boxShadow: `inset 0 0 0 2px ${theme.accent}`,
+      }}
+    />
+  );
+}
+
+/**
+ * One colour well.
+ *
+ * The swatch is a `div` whose background *is* the value, with a transparent
+ * `<input type=color>` on top to open the picker. That is deliberate: WKWebView
+ * (the webview rmux runs in) does not paint a styled `input[type=color]` with its
+ * value the way Chrome does — it came out a black box, which read as "the wells
+ * are broken". Painting the colour ourselves shows it in every engine; the native
+ * input is only the click target and the picker.
+ */
+function Well({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="flex flex-col items-center gap-1" style={{ width: 56 }}>
+      <span
+        className="relative block h-7 w-full"
+        style={{ background: value, border: "1px solid var(--border-strong)" }}
+        title={value.toUpperCase()}
+      >
+        <input
+          type="color"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          aria-label={label.toLowerCase()}
+        />
+      </span>
+      <span className="micro" style={{ fontSize: 8, letterSpacing: "0.08em" }}>
+        {label}
+      </span>
+    </label>
   );
 }

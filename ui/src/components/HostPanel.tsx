@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api, isTauri, type Forward, type ListeningPort, type ProcessInfo, type TargetRef } from "../lib/api";
-import type { Session } from "../lib/sessions";
 
 /**
  * What the host is running, and how to reach it.
@@ -27,11 +26,11 @@ import type { Session } from "../lib/sessions";
 
 const REFRESH_MS = 4000;
 
-export function HostPanel({ session }: { session: Session }) {
+export function HostPanel({ target }: { target: TargetRef }) {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto">
-      <Processes target={session.target} />
-      <Ports target={session.target} />
+      <Processes target={target} />
+      <Ports target={target} />
     </div>
   );
 }

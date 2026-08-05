@@ -20,6 +20,29 @@
 @import "@fontsource/ibm-plex-mono/500.css";
 @import "@fontsource/ibm-plex-mono/600.css";
 
+/*
+ * The optional typefaces the operator can pick (ADR-003). Bundled through
+ * @fontsource — Vite copies these into the app, so they are offline assets like
+ * the two defaults above, never a network fetch. Weights 400/500/700 where the
+ * package has them; Cascadia has no 800 and Fira Code no 100/200, so we stay
+ * within what each ships.
+ */
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/700.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/700.css";
+@import "@fontsource/fira-code/400.css";
+@import "@fontsource/fira-code/500.css";
+@import "@fontsource/fira-code/700.css";
+@import "@fontsource/cascadia-code/400.css";
+@import "@fontsource/cascadia-code/500.css";
+@import "@fontsource/cascadia-code/700.css";
+
 @font-face {
   font-family: "SFU Futura";
   src: url("/fonts/SFUFuturaBook.ttf") format("truetype");
@@ -40,6 +63,31 @@
   font-family: "SFU Futura";
   src: url("/fonts/SFUFuturaHeavy.ttf") format("truetype");
   font-weight: 800;
+  font-style: normal;
+  font-display: block;
+}
+
+/*
+ * Lilex (ADR-003) — Zed's editor font (Zed's `.ZedMono` alias resolves to it).
+ * The one mono face not on @fontsource, so it is bundled here as raw WOFF2 like
+ * SFU Futura above, taken from the Zed source tree (`references/zed`). SIL OFL
+ * 1.1; licence and provenance in `public/fonts/LILEX-LICENSE.txt`. Subset to a
+ * Latin + punctuation + box-drawing range and converted to WOFF2 (~30KB/face).
+ * Only 400/700 ship; other weights synthesise, which is enough for an optional
+ * face. Zed's *UI* font is IBM Plex Sans (its `.ZedSans` alias), already bundled
+ * via @fontsource above — no separate face is needed for it.
+ */
+@font-face {
+  font-family: "Lilex";
+  src: url("/fonts/Lilex-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "Lilex";
+  src: url("/fonts/Lilex-Bold.woff2") format("woff2");
+  font-weight: 700;
   font-style: normal;
   font-display: block;
 }

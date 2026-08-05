@@ -76,7 +76,11 @@ export function BackgroundPicker({
 
   return (
     <div className="flex flex-col gap-3">
-      <span className="micro">BACKGROUND</span>
+      {/* "Window backdrop", not just "background" — Palette also has a Background
+          (the chrome base colour), and the two meaning different things under the
+          same word is what read as duplicated. This one is what sits behind the
+          whole window; that one is what the panels are built from. */}
+      <span className="micro">WINDOW BACKDROP</span>
 
       <div className="flex" style={{ border: "1px solid var(--border-strong)" }}>
         <Mode selected={mode === "desktop"} onClick={() => onChange({ background: "desktop" })}>

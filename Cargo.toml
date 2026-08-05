@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -52,6 +52,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # --- serialization ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The theme config is a human-facing file, so TOML rather than JSON.
+toml = "0.8"
+# Watches theme.toml so an external hand-edit repaints the running app.
+notify = "6"
 prost = "0.14"
 prost-build = "0.14"
 bytes = "1"

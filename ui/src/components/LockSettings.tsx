@@ -146,7 +146,7 @@ export function LockSettings({
       exit={{ opacity: 0 }}
       transition={{ duration: 0.12 }}
       className="fixed inset-0 z-[95] grid place-items-start justify-center pt-[14vh]"
-      style={{ background: "rgba(6,6,6,0.62)" }}
+      style={{ background: "color-mix(in srgb, var(--app-bg) 62%, transparent)" }}
       onClick={onClose}
     >
       <motion.div

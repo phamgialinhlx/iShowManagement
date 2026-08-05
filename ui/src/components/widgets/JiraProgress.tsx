@@ -63,7 +63,7 @@ export function JiraProgress({ project }: { project: string }) {
         </span>
       </div>
 
-      <div className="flex h-[8px] w-full overflow-hidden" style={{ background: "rgba(232,230,225,0.10)" }}>
+      <div className="flex h-[8px] w-full overflow-hidden" style={{ background: "color-mix(in srgb, var(--text) 10%, transparent)" }}>
         {/* Widths animate, the counts above do not — rule 2. */}
         <motion.div
           initial={false}

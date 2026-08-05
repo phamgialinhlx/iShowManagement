@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 
+import { accent, paint, tokenAlpha } from "../../lib/palette";
+
 /**
  * The host: what it is called, how long it has been up, and what it is doing.
  *
@@ -12,12 +14,6 @@ import { useEffect, useRef } from "react";
  * real ones, and every printed number comes straight from the sample. That is
  * the line the design system draws: meters may breathe, printed values may not.
  */
-
-const RED = "#e63b2e";
-const CHALK = "#e8e6e1";
-/** Axis labels. rmux's own faint token, not the old app's #5c5953 — that
- *  measured 2.77:1 and these are 11px. */
-const AXIS = "#7e7b74";
 
 export type HostSample = {
   cpuPercent: number | null;
@@ -172,18 +168,19 @@ function History({ cpu, ram }: { cpu: number[]; ram: number[] }) {
 
       [0, 50, 100].forEach((v) => {
         const y = PT + (1 - v / 100) * PH;
-        g.strokeStyle = "rgba(232,230,225,0.09)";
+        g.strokeStyle = tokenAlpha("--text", 0.09);
         g.lineWidth = 1;
         g.beginPath();
         g.moveTo(PL, y);
         g.lineTo(W - PR, y);
         g.stroke();
-        g.fillStyle = AXIS;
+        // Axis labels at rmux's faint token — 11px, so never dimmer than 4.5:1.
+        g.fillStyle = paint("--text-faint");
         g.textAlign = "right";
         g.fillText(String(v), PL - 7, y + 4);
       });
 
-      g.strokeStyle = "rgba(232,230,225,0.06)";
+      g.strokeStyle = tokenAlpha("--text", 0.06);
       [0.25, 0.5, 0.75].forEach((f) => {
         const x = PL + f * PW;
         g.beginPath();
@@ -192,7 +189,7 @@ function History({ cpu, ram }: { cpu: number[]; ram: number[] }) {
         g.stroke();
       });
 
-      g.fillStyle = AXIS;
+      g.fillStyle = paint("--text-faint");
       g.textAlign = "center";
       ([["-30S", 0.25], ["-20S", 0.5], ["-10S", 0.75]] as [string, number][]).forEach(
         ([label, f]) => g.fillText(label, PL + f * PW, H - 10),
@@ -219,7 +216,7 @@ function History({ cpu, ram }: { cpu: number[]; ram: number[] }) {
       // RAM first, so a busy CPU reads over it rather than under.
       if (sh.ram.length > 1) {
         path(sh.ram);
-        g.strokeStyle = CHALK;
+        g.strokeStyle = paint("--text");
         g.lineWidth = 1.6;
         g.stroke();
       }
@@ -228,10 +225,10 @@ function History({ cpu, ram }: { cpu: number[]; ram: number[] }) {
         g.lineTo(PL + PW, PT + PH);
         g.lineTo(PL, PT + PH);
         g.closePath();
-        g.fillStyle = "rgba(230,59,46,0.12)";
+        g.fillStyle = accent(0.12);
         g.fill();
         path(sh.cpu);
-        g.strokeStyle = RED;
+        g.strokeStyle = accent();
         g.lineWidth = 1.8;
         g.stroke();
       }
@@ -246,8 +243,8 @@ function History({ cpu, ram }: { cpu: number[]; ram: number[] }) {
     <div ref={wrap} style={{ marginTop: 12 }}>
       <canvas ref={canvas} style={{ width: "100%", height: 64, display: "block" }} />
       <div style={{ display: "flex", gap: 16, marginTop: 5 }}>
-        <Legend color={RED} label="CPU" />
-        <Legend color={CHALK} label="RAM" />
+        <Legend color="rgb(var(--primary))" label="CPU" />
+        <Legend color="var(--text)" label="RAM" />
       </div>
     </div>
   );

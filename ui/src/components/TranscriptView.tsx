@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { api, isTauri, type Transcript, type TranscriptEntry } from "../lib/api";
-import type { Session } from "../lib/sessions";
+import { api, isTauri, type TargetRef, type Transcript, type TranscriptEntry } from "../lib/api";
 import { MARKDOWN_COMPONENTS } from "../lib/markdown-code";
 
 /**
@@ -137,7 +136,15 @@ function sameTranscript(a: Transcript | null, b: Transcript): boolean {
   return last?.text === next?.text && last?.timestamp === next?.timestamp;
 }
 
-export function TranscriptView({ session }: { session: Session }) {
+export function TranscriptView({
+  target,
+  folder,
+  resume,
+}: {
+  target: TargetRef;
+  folder: string;
+  resume?: string;
+}) {
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -161,7 +168,7 @@ export function TranscriptView({ session }: { session: Session }) {
     }
     setLoading(true);
     try {
-      const next = await api.claudeTranscript(session.target, session.folder, session.resume, tail);
+      const next = await api.claudeTranscript(target, folder, resume, tail);
       // Only swap state when something actually changed. A poll that returns
       // the same bytes used to replace the array anyway, re-rendering every
       // turn — which is invisible when nothing is selected and destroys the
@@ -173,7 +180,7 @@ export function TranscriptView({ session }: { session: Session }) {
     } finally {
       setLoading(false);
     }
-  }, [session.target, session.folder, session.resume, tail]);
+  }, [target, folder, resume, tail]);
 
   useEffect(() => {
     void load();
@@ -316,7 +323,7 @@ export function TranscriptView({ session }: { session: Session }) {
               </div>
               <span className="micro">reading the last {humanBytes(tail)} of the transcript</span>
               <span className="micro" style={{ color: "var(--text-faint)" }}>
-                over {session.target.host ?? "this machine"}
+                over {target.host ?? "this machine"}
               </span>
             </div>
           )}

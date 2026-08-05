@@ -5,7 +5,6 @@
  * moves; input stays soft, since two reds would mean neither.
  */
 
-const RED = "#e63b2e";
 
 /** 63.59M / 56.7k / 812 — two decimals at millions, one at thousands. */
 export function formatTokens(n: number): string {
@@ -65,7 +64,7 @@ export function TokenSpend({
         <Metric label="Total" value={formatTokens(total)} />
         {/* Output is the billed half and the one that moves, so it carries the
             one accent. Input stays soft — two reds would mean neither. */}
-        <Metric label="Output" value={formatTokens(output)} color={RED} />
+        <Metric label="Output" value={formatTokens(output)} color="rgb(var(--primary))" />
         <Metric label="Input" value={formatTokens(input)} color="var(--text-soft)" />
       </div>
 
