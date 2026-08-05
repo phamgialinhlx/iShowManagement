@@ -230,16 +230,60 @@ daemon.
   in an earlier crate, so four errors sat there invisibly until a *different* fix let the build
   get far enough to reach the consumer. Change `server.rs`'s public surface and change the stub
   in the same commit — and check it with the Windows target below, because nothing else will.
-- **A Unix-socket feature gets a stub on Windows, never a half-port.** Two of them now:
-  `rmux-control::server` and `rmux-ssh::askpass::server`. The pattern is `#[cfg(unix)] pub mod
-  server;` beside a `#[path = "server_stub.rs"]` twin whose `start` bails with a reason.
-  The askpass one is the sharper case — two of its three guards *are* filesystem permissions, and
-  `restrict_to_owner` on Windows is already a no-op, so a naive port would keep the shape of the
-  security model with only the token left behind it. That is fail-open, on the socket that
-  dispenses credentials. Neither stub costs a workbench feature: key-based hosts are untouched,
-  and with no helper registered `env_for_gui_prompts` tells `ssh` not to wait for a terminal, so
-  password and 2FA hosts fail fast with a reason instead of hanging. `askpass::start` failing is
-  already the caller's expected path, so no call site changed.
+- **A Unix-socket feature gets a stub on Windows, never a half-port.** `rmux-control::server`
+  still is one: `#[cfg(unix)] pub mod server;` beside a `#[path = "server_stub.rs"]` twin whose
+  `start` bails with a reason. Nothing in the workbench depends on it.
+- **`rmux-ssh::askpass::server` was that stub too, and the stub's premise was false.** It rested
+  on "password and 2FA hosts fail fast with a reason instead of hanging". Measured against a real
+  password host from a real Windows machine, what actually happens is:
+
+  ```text
+  $ ssh -T root@host uname -s      # stdin a pipe, SSH_ASKPASS_REQUIRE=never
+  Permission denied, please try again.
+  Permission denied, please try again.
+  root@host: Permission denied (publickey,password).
+  ```
+
+  `ssh` takes a password from a terminal or from an askpass helper, and a command rmux runs has
+  neither — so it burns its retries against nothing, on **every** command. And because Windows
+  OpenSSH has no `ControlMaster`, every file listing, metrics sample and status poll is its own
+  connection and its own authentication: rmux generated failed logins at roughly one every two
+  seconds. That is not a degraded host, it is an unusable one — and it is enough to get the
+  machine banned by `fail2ban`, which reads afterwards as "the server is down".
+
+  It is now a **named pipe** (`askpass/server_windows.rs`), same wire protocol, same token.
+  The stub's real objection is answered rather than ignored: `CreateNamedPipe` with a NULL
+  `lpSecurityAttributes` grants, per Microsoft, "read access to members of the Everyone group and
+  the anonymous account" — exactly the fail-open a naive port would have shipped. Every instance
+  is created with an explicit `D:P(A;;GA;;;<current user SID>)`, and a test asserts the SID is a
+  real user rather than Everyone or Administrators. `reject_remote_clients` matters too: a named
+  pipe is reachable over SMB by default, and a credential dialog anyone on the LAN can summon is
+  not a bridge, it is a hole.
+- **On Windows a credential is remembered for the run; everywhere else it is not.** This is the
+  same guarantee `ControlMaster` already gives — authenticate once per host per run — implemented
+  where there is no `ControlMaster`. Without it, bridging prompts to the UI would only replace "a
+  password host cannot connect" with "a password dialog every second", which is not an
+  improvement. `src-tauri/src/askpass.rs`'s `Memory` also **coalesces** identical prompts, because
+  opening a session connects a terminal, the file tree and metrics at once and three identical
+  dialogs reads as a broken app. A repeat inside one second is treated as `ssh` refusing the
+  remembered answer — refused passwords are re-prompted immediately, while the fastest poller in
+  the app is 1.5s — so a typo costs one more dialog rather than failing every command until
+  restart.
+- **Every child process is spawned with `CREATE_NO_WINDOW`** (`rmux_transport::NoConsoleWindow`,
+  enforced over the source by `src-tauri/tests/no_console_window.rs`). rmux is a GUI process and
+  therefore has no console, so Windows gives each console-subsystem child — `ssh.exe` above all —
+  a brand new *visible* one. With no multiplexing that is a `cmd` window flashing over the
+  operator's work every couple of seconds, forever. The rule is enforced syntactically because it
+  is invisible to everyone who could catch it: it does not exist on macOS or Linux, it is not a
+  compile error, and no test that runs a command can see it. Terminals are exempt and must stay
+  exempt — they go through ConPTY, where the child attaches to a headless pseudoconsole and there
+  is no flag to set.
+- **`userpath::adopt_login_path` returns early on Windows.** It exists for launchd stripping a
+  Finder-launched `.app`'s environment, which has no Windows equivalent, and every assumption in
+  it is POSIX: `$SHELL`, `-l -c`, and a `:` separator. Git for Windows users routinely have
+  `SHELL` set, so it would run `bash -l -c` , get MSYS paths back, and join them to the real
+  `Path` with colons — writing a `Path` no Windows process can parse, after which `ssh` itself is
+  unfindable. That reads as "rmux cannot connect to anything", not as a corrupted `Path`.
 - **Compile the Windows target on this Mac before spending a CI cycle on it.**
 
   ```sh

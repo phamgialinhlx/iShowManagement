@@ -13,7 +13,7 @@
 //! path, not a prerequisite for it.
 
 use async_trait::async_trait;
-use rmux_transport::{CommandSpec, Target, Tty};
+use rmux_transport::{CommandSpec, NoConsoleWindow, Target, Tty};
 use serde::{Deserialize, Serialize};
 
 pub mod protocol;
@@ -477,6 +477,7 @@ impl FileSystem for LocalFs {
     /// process, and it is worth it for exactly that reason.
     async fn search(&self, root: &str, query: &SearchQuery) -> anyhow::Result<Vec<SearchHit>> {
         let out = tokio::process::Command::new("sh")
+            .no_console_window()
             .arg("-c")
             .arg(search::script(root, query))
             .output()

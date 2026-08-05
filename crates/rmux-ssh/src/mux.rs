@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use parking_lot::Mutex;
-use rmux_transport::SshHostId;
+use rmux_transport::{NoConsoleWindow, SshHostId};
 use tokio::process::{Child, Command};
 
 /// Where the master stands.
@@ -113,6 +113,7 @@ impl ControlMaster {
         }
 
         let mut cmd = Command::new("ssh");
+        cmd.no_console_window();
         cmd.arg("-N") // no remote command; this process only holds the transport
             .arg("-o")
             .arg(format!("ControlPath={}", self.socket.display()))
@@ -192,6 +193,7 @@ impl ControlMaster {
             return false;
         }
         Command::new("ssh")
+            .no_console_window()
             .arg("-O")
             .arg("check")
             .arg("-o")
@@ -232,6 +234,7 @@ impl ControlMaster {
     pub async fn stop(&self) {
         if Self::is_supported() && self.socket.exists() {
             let _ = Command::new("ssh")
+                .no_console_window()
                 .arg("-O")
                 .arg("exit")
                 .arg("-o")

@@ -46,6 +46,8 @@
 
 use std::process::Command;
 
+use rmux_transport::NoConsoleWindow;
+
 /// Read the login shell's `PATH`.
 ///
 /// `-l` for a login shell, because that is what reads `.zprofile` /
@@ -56,6 +58,7 @@ fn login_shell_path() -> Option<String> {
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
 
     let out = Command::new(&shell)
+        .no_console_window()
         .arg("-l")
         .arg("-c")
         // `printf` rather than `echo`, so nothing appends a newline that then has
@@ -104,6 +107,23 @@ pub fn merge(login: &str, inherited: &str) -> String {
 /// app works, and only hosts needing a `ProxyCommand` helper outside the default
 /// PATH are affected — so it is reported and stepped over rather than raised.
 pub fn adopt_login_path() -> Option<String> {
+    // **Windows has neither half of the problem, and running this there caused a
+    // worse one.** There is no launchd stripping the environment — a process
+    // started from Explorer gets the machine and user `Path` from the registry,
+    // which is the same one `ssh` resolves under in a terminal. Meanwhile every
+    // assumption below is POSIX: `$SHELL`, `-l -c`, and a `:` separator.
+    //
+    // The hazard is not theoretical. Git for Windows users routinely have
+    // `SHELL` set, so this would run `bash -l -c 'printf %s "$PATH"'`, get MSYS
+    // paths back (`/usr/bin:/c/Windows/system32`), and join them to the real
+    // `Path` with colons — writing a `Path` no Windows process can parse. The
+    // app would then fail to find `ssh` at all, which reads as "rmux cannot
+    // connect to anything" rather than as a PATH that was corrupted at startup.
+    // It also spawned a console window before `no_console_window` existed.
+    if cfg!(windows) {
+        return None;
+    }
+
     let inherited = std::env::var("PATH").unwrap_or_default();
     let login = login_shell_path()?;
 

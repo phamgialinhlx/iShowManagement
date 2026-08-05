@@ -21,8 +21,8 @@
 
 use async_trait::async_trait;
 use rmux_transport::{
-    CommandSpec, Output, Platform, ResolvedCommand, SshHostId, Target, TargetId, Tty,
-    spec_to_shell_line,
+    CommandSpec, NoConsoleWindow, Output, Platform, ResolvedCommand, SshHostId, Target, TargetId,
+    Tty, spec_to_shell_line,
 };
 
 pub mod askpass;
@@ -186,6 +186,7 @@ impl SshTarget {
         args.push(winshell::probe_script());
 
         let out = tokio::process::Command::new("ssh")
+            .no_console_window()
             .args(&args)
             .envs(askpass::env_for_gui_prompts())
             .output()
@@ -256,6 +257,7 @@ impl Target for SshTarget {
         let resolved = self.build_command(&spec.clone().tty(Tty::None))?;
 
         let mut cmd = tokio::process::Command::new(&resolved.program);
+        cmd.no_console_window();
         cmd.args(&resolved.args);
         for (k, v) in &resolved.env {
             cmd.env(k, v);
@@ -279,6 +281,7 @@ impl Target for SshTarget {
         let resolved = self.build_command(&spec.clone().tty(Tty::None))?;
 
         let mut cmd = tokio::process::Command::new(&resolved.program);
+        cmd.no_console_window();
         cmd.args(&resolved.args);
         for (k, v) in &resolved.env {
             cmd.env(k, v);

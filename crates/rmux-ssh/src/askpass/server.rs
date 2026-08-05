@@ -26,6 +26,9 @@ use super::{Prompt, classify};
 struct HelperRequest {
     token: String,
     prompt: String,
+    /// Absent from an older helper; see [`Prompt::attempt`].
+    #[serde(default)]
+    attempt: Option<String>,
 }
 
 /// Answers a prompt, or `None` if the user dismissed it.
@@ -117,6 +120,7 @@ async fn serve(stream: UnixStream, token: &str, answerer: Answerer) -> anyhow::R
         id: short_id(),
         kind: classify(&request.prompt),
         message: request.prompt,
+        attempt: request.attempt,
     };
 
     let response = match answerer(prompt).await {
