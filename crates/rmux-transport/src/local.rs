@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 
-use crate::{CommandSpec, Output, Platform, ResolvedCommand, Target, TargetId, Tty};
+use crate::{
+    CommandSpec, NoConsoleWindow, Output, Platform, ResolvedCommand, Target, TargetId, Tty,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LocalTarget;
@@ -70,6 +72,7 @@ impl Target for LocalTarget {
         let resolved = self.build_command(&spec.clone().tty(Tty::None))?;
 
         let mut cmd = tokio::process::Command::new(&resolved.program);
+        cmd.no_console_window();
         cmd.args(&resolved.args);
         for (k, v) in &resolved.env {
             cmd.env(k, v);
@@ -96,6 +99,7 @@ impl Target for LocalTarget {
         let resolved = self.build_command(&spec.clone().tty(Tty::None))?;
 
         let mut cmd = tokio::process::Command::new(&resolved.program);
+        cmd.no_console_window();
         cmd.args(&resolved.args);
         for (k, v) in &resolved.env {
             cmd.env(k, v);
@@ -144,10 +148,25 @@ pub fn terminal_env() -> BTreeMap<String, String> {
 mod tests {
     use super::*;
 
+    /// Run a one-liner through whatever shell this machine actually has.
+    ///
+    /// These used to spawn `echo` and `sh` directly, which are not programs on
+    /// Windows — `echo` is a `cmd` builtin and `sh` is not on `PATH` — so both
+    /// tests failed there with "program not found" long before anything in this
+    /// file was touched. The *behaviour* being asserted is not platform
+    /// specific, so only the way the shell is invoked is.
+    fn shell(script: &str) -> CommandSpec {
+        if cfg!(windows) {
+            CommandSpec::new("cmd").arg("/c").arg(script)
+        } else {
+            CommandSpec::new("sh").arg("-c").arg(script)
+        }
+    }
+
     #[tokio::test]
     async fn exec_captures_stdout() {
         let target = LocalTarget::new();
-        let out = target.exec(&CommandSpec::new("echo").arg("hi")).await.unwrap();
+        let out = target.exec(&shell("echo hi")).await.unwrap();
         assert!(out.ok());
         assert_eq!(out.stdout.trim(), "hi");
     }
@@ -155,10 +174,15 @@ mod tests {
     #[tokio::test]
     async fn exec_reports_failure_with_stderr() {
         let target = LocalTarget::new();
-        let out = target
-            .exec(&CommandSpec::new("sh").arg("-c").arg("echo boom >&2; exit 3"))
-            .await
-            .unwrap();
+        // `cmd` needs the redirect written as `1>&2`, and separates statements
+        // with `&` rather than `;`.
+        let script = if cfg!(windows) {
+            "echo boom 1>&2 & exit 3"
+        } else {
+            "echo boom >&2; exit 3"
+        };
+
+        let out = target.exec(&shell(script)).await.unwrap();
         assert_eq!(out.status, 3);
         assert!(out.stdout_or_err().is_err());
         assert!(out.stderr.contains("boom"));
