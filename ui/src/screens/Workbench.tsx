@@ -50,7 +50,6 @@ export function Workbench({
   const servers = useWorkspace((s) => s.servers);
   const sessions = useWorkspace((s) => s.sessions);
   const activeId = useWorkspace((s) => s.activeSession);
-  const runtime = useWorkspace((s) => s.runtime);
   const activate = useWorkspace((s) => s.activate);
   const grid = useWorkspace((s) => s.grid);
   const setGrid = useWorkspace((s) => s.setGrid);
@@ -67,13 +66,18 @@ export function Workbench({
   const activeTarget = active ? targetOf(active.id) : undefined;
   const activeHost = active ? serverOf(active.id)?.target.host : undefined;
 
-  const waitingIds = useMemo(
-    () =>
-      sessions
-        .filter((s) => s.kind === "claude" && runtime[s.id]?.status === "waiting")
-        .map((s) => s.id),
-    [sessions, runtime],
+  // Subscribed as a joined *string*, not the runtime map: the map gets a new
+  // identity on every status poll (400ms per visible pane, 1.5s per live
+  // session), and subscribing to it re-rendered this whole screen — rail, deck
+  // and instruments — on every tick. A primitive only changes when the waiting
+  // set actually changes, which is the thing this screen cares about.
+  const waitingKey = useWorkspace((s) =>
+    s.sessions
+      .filter((x) => x.kind === "claude" && s.runtime[x.id]?.status === "waiting")
+      .map((x) => x.id)
+      .join("\n"),
   );
+  const waitingIds = useMemo(() => (waitingKey ? waitingKey.split("\n") : []), [waitingKey]);
 
   // The flattened context the instruments read (v3 splits target/folder off the
   // session — see `Active`).

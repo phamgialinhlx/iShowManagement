@@ -14,15 +14,26 @@
  *
  * ## Why the local fit is not debounced with it
  *
- * xterm still refits immediately, so the visible grid tracks the window and the
+ * xterm still refits promptly, so the visible grid tracks the window and the
  * drag feels attached to the pointer. Only the *message to the far side* waits.
  * Debouncing both would make the terminal lag behind its own frame, which trades
  * one visible problem for another.
+ *
+ * The local fit **is throttled**, though. A `fit()` reflows the whole cell
+ * grid, and an animated layout change — the rail collapsing under a spring —
+ * fires the observer every frame for every mounted pane: in a 4×4 grid that
+ * was 16 reflows per frame for the length of the animation. The first callback
+ * fits immediately (a single-step resize feels instant); a continuous stream
+ * fits at most every `FIT_MS`; and the settle always ends with a final fit, so
+ * the grid lands exactly right no matter what was skipped in between.
  *
  * The delay is short enough to feel instant when you let go of the mouse and
  * long enough to cover the gap between two `ResizeObserver` callbacks mid-drag.
  */
 const SETTLE_MS = 120;
+
+/** Minimum spacing between local refits during a continuous resize. */
+const FIT_MS = 80;
 
 export type Settle = {
   /** Fit now; tell the far side once the size stops changing. */
@@ -38,6 +49,7 @@ export type Settle = {
  */
 export function settleResize(fit: () => void, notify: () => void): Settle {
   let timer: number | null = null;
+  let lastFit = 0;
 
   const clear = () => {
     if (timer !== null) window.clearTimeout(timer);
@@ -46,10 +58,18 @@ export function settleResize(fit: () => void, notify: () => void): Settle {
 
   return {
     observe() {
-      fit();
+      const now = performance.now();
+      if (now - lastFit >= FIT_MS) {
+        lastFit = now;
+        fit();
+      }
       clear();
       timer = window.setTimeout(() => {
         timer = null;
+        // The trailing fit makes the throttle safe: whatever callbacks were
+        // skipped, the grid ends at the true final size before the far side
+        // hears about it.
+        fit();
         notify();
       }, SETTLE_MS);
     },
