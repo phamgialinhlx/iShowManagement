@@ -501,40 +501,80 @@ export type RunningSession = {
 
 - [ ] **Step 2: Add the store action `adoptServerSession`**
 
-In `ui/src/lib/workspace.ts`, add near `addSession`:
+First, add an optional `hostName` field to `SessionV3` in `ui/src/lib/workspace-model.ts` (used only by adopted sessions; `undefined` for normal ones so nothing else changes):
+
+```ts
+// In the SessionV3 type:
+/** The host session name this row attaches to verbatim (adopted sessions only). */
+hostName?: string;
+```
+
+Then in `ui/src/lib/workspace.ts`, add near `addSession`:
 
 ```ts
 /**
  * Adopt a session already running on a host (found via `agent list`) into the
- * rail. The id is derived from the host name so re-attaching hits the running
+ * rail. The local id mirrors the host name so re-attaching hits the running
  * process rather than spawning a duplicate — the daemon is multi-attacher.
+ *
+ * Identity: a terminal's host name IS its id (`term-…`), so the local id is the
+ * name verbatim and `reattachName` returns it unchanged. A claude host name is
+ * `claude-<id>` while the local id must be bare (the prefix is added at
+ * reattach), so the local id strips the `claude-` prefix and `hostName` carries
+ * the full name for the attach path to use verbatim.
  */
 adoptServerSession: (serverId, name, kind) => {
-  // A claude-<id> name has its id *inside* the name; keep a local id that maps
-  // to the host name via reattachName. Reuse the existing session-mint shape but
-  // pin the host name: store the discovered name on the session so the attach
-  // uses it verbatim.
-  const id = name.startsWith("claude-") ? `adopted-${name}` : name;
+  const id = kind === "claude" ? name.replace(/^claude-/, "") : name;
   const s = get();
-  const existing = s.sessions.find((x) => x.id === id);
-  if (existing) {
+  if (s.sessions.some((x) => x.id === id)) {
     get().openSession(id);
     return;
   }
-  const projectId = // the server's default project, or a "running" bucket:
-    //   serverId + "\0running"
-  set(addSession(coreOf(get()), {
-    id,
-    projectId,
-    kind,
-    name: name.replace(/^claude-/, ""),
+  // Hang adopted sessions under a synthetic "running" project for the server:
+  // there is no real folder for a session another PC started, and forcing it
+  // under an unrelated project would be a guess. `addRunningBucket` idempotently
+  // creates/returns that project.
+  const projectId = addRunningBucket(serverId);
+  const newId = addSession(projectId, kind, {
+    name: kind === "claude" ? name.replace(/^claude-/, "") : name,
     renamed: true, // never let adoptClaudeTitle overwrite the discovered name
-  }));
-  get().openSession(id);
+    hostName: name, // the attach path uses this verbatim (see Task 6 Step 2)
+  });
+  get().openSession(newId);
 },
 ```
 
-**Note on identity:** the existing `mintSessionId` is per-PC and non-deterministic. For adopted sessions we deliberately use the **host name** as the local id so the same host session on two PCs collapses to the same row. Confirm `reattachName` round-trips: for a terminal, `reattachName` returns the id verbatim (the name `term-…`); for a claude `adopted-claude-…`, `reattachName` returns `claude-adopted-claude-…` — **wrong**. If so, store the discovered host name on the session (e.g. `session.hostName = name`) and have the attach path use `hostName ?? reattachName(session)`. See Task 6.
+**Note — `addRunningBucket` (in `ui/src/lib/workspace.ts`):**
+
+```ts
+/**
+ * The synthetic project adopted "running" sessions hang under — a grouping key,
+ * not a real folder. Created idempotently; returns the project id.
+ */
+const addRunningBucket = (serverId: string): string => {
+  const runningFolder = `${serverId}\0running`;
+  const existing = get().projects.find((p) => p.folder === runningFolder);
+  if (existing) return existing.id;
+  const { id } = rAddProject(coreOf(get()), serverId, runningFolder, "running");
+  set(/* the addProject result */);
+  schedulePersist(get);
+  return id;
+};
+```
+
+`rAddProject` returns `{ ws, id }` (see `workspace-reducers.ts:48-57`); the store
+action applies `ws` like `createProject` does at `workspace.ts:286-291`. The
+folder string `<serverId>\0running` is synthetic — it is a grouping key only, so
+it must never be shell_quote'd into a remote path (adopted sessions reuse the
+host name for the attach, never the project folder).
+
+**Note — the attach path must use `hostName`.** After `adoptServerSession` sets
+`hostName`, update the attach call sites to prefer it: `WorkspaceDeck.tsx:45`,
+`ClaudePanel.tsx:349`, and `workspace.ts`'s `removeSession` (`:313`). For a
+claude adopted session, `reattachName` alone would yield `claude-<bare-id>`,
+which (because the bare id is the `claude-`-stripped name) is actually correct —
+`hostName` is belt-and-braces. For terminals `hostName` == id, so it is always
+correct. The concrete changes land in Task 6 Step 2.
 
 - [ ] **Step 3: Wire the server right-click menu**
 
