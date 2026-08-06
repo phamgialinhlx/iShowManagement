@@ -9,11 +9,13 @@ import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
 import { contextLimit, sniffWindow } from "../lib/context-window";
 import { settleResize } from "../lib/terminal-resize";
 import { useWorkspace } from "../lib/workspace";
+import { basename } from "../lib/workspace-model";
 import { claudeTheme, gpuRendering } from "../lib/terminal-theme";
 import { readMonoStack } from "../lib/fonts";
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { ContextMeter } from "./ContextMeter";
 import { BrowserReports } from "./BrowserReports";
+import { record } from "../lib/activity";
 import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
 import { MouseModeTracker } from "../lib/mouse-modes";
@@ -151,6 +153,30 @@ export function ClaudePanel({
   // The window Claude itself printed. Read from the pane's own output rather
   // than inferred, which is the only way anyone actually knows it: the
   // transcript records `claude-opus-5` whether that is a 200k or a 1M window.
+  /**
+   * The session's own name, shown in its header.
+   *
+   * In a grid every pane says "CLAUDE" and nothing else, so telling four
+   * conversations apart meant looking away to the rail and counting positions —
+   * which is exactly the question the pane itself should answer. It replaces the
+   * static "CLAUDE" label rather than sitting beside it: the tab strip above
+   * already says which surface this is, so the word carried no information while
+   * occupying the most valuable space in the header.
+   */
+  const sessionName = useWorkspace((s) => s.sessions.find((x) => x.id === sessionId)?.name);
+
+  /**
+   * The header is titled by the **folder**, not the session's name.
+   *
+   * A session name is now frequently a resumed conversation's title — long,
+   * about the *topic*, and identical-looking across machines. The folder is the
+   * one thing that says which body of work this pane is, it is stable across
+   * every session started in it, and it is what an operator scanning a grid is
+   * actually matching against. The session name is not lost: it follows as the
+   * secondary label, and it is what the rail is sorted by.
+   */
+  const paneTitle = cwd ? basename(cwd) : (sessionName ?? "claude");
+
   const contextWindow = useWorkspace((s) =>
     s.sessions.find((x) => x.id === sessionId)?.contextWindow,
   );
@@ -165,6 +191,8 @@ export function ClaudePanel({
   const runningRef = useRef(runningId);
   runningRef.current = runningId;
   const hostRef = useRef<HTMLDivElement>(null);
+  /** Typed since the last Enter, for the prompt tally. */
+  const pendingPrompt = useRef("");
   // Held so the pane's own handlers (focus restore, select mode, drops) can reach
   // the live terminal.
   const xtermRef = useRef<Xterm | null>(null);
@@ -408,6 +436,19 @@ export function ClaudePanel({
       //
       // Normalising costs nothing for ASCII (`normalize` returns the same
       // string) and is the form a terminal should receive in any case.
+      // **A prompt is Enter on a line with something on it**, counted the same
+      // way the terminal counts commands — Claude's own transcript is the real
+      // record of what was asked, but it lags by a turn and cannot see a prompt
+      // that is still being typed. Both are needed: this one is live, the
+      // transcript is history.
+      if (data === "\r" || data === "\n") {
+        if (pendingPrompt.current.trim()) record(sessionId, "prompts");
+        pendingPrompt.current = "";
+      } else if (data === "\x7f") {
+        pendingPrompt.current = pendingPrompt.current.slice(0, -1);
+      } else if (!data.startsWith("\x1b")) {
+        pendingPrompt.current += data;
+      }
       if (id) void invoke("claude_write", { id, data: data.normalize("NFC") });
     });
 
@@ -671,7 +712,30 @@ export function ClaudePanel({
         className="flex shrink-0 items-center gap-3 border-b px-3 py-1"
         style={{ borderColor: "var(--border)" }}
       >
-        <span className="micro">CLAUDE</span>
+        {/* Truncated, never wrapped: a long name must not push the status strip
+            onto a second line — the header's height is what `fit()` measures, so
+            a wrapped header silently costs the terminal a row. */}
+        <span
+          className="micro truncate"
+          style={{ color: "var(--text)", maxWidth: "34%", flex: "0 1 auto" }}
+          title={cwd ? `${cwd}${sessionName ? `\n${sessionName}` : ""}` : (sessionName ?? "Claude")}
+        >
+          {paneTitle.toUpperCase()}
+        </span>
+
+        {/* The session's own name, second and dimmer — several sessions share a
+            folder, so the title alone cannot tell them apart. Dropped first when
+            the header runs out of room, because the status strip beside it is
+            live data and this is a label. */}
+        {sessionName && sessionName !== paneTitle && (
+          <span
+            className="micro truncate"
+            style={{ color: "var(--text-faint)", maxWidth: "30%", flex: "0 1 auto" }}
+            title={sessionName}
+          >
+            {sessionName}
+          </span>
+        )}
 
         <ClaudeStatusStrip status={claudeStatus} window={contextWindow} />
 

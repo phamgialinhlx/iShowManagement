@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import { isTauri, type TargetRef } from "../lib/api";
 import { settleResize } from "../lib/terminal-resize";
+import { record } from "../lib/activity";
 import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
 import { gpuRendering, terminalTheme } from "../lib/terminal-theme";
@@ -36,12 +37,15 @@ export function TerminalView({
   target,
   cwd,
   session,
+  sessionId,
   ptyId,
   onOpened,
   onExit,
 }: {
   target: TargetRef;
   cwd?: string;
+  /** The rmux session this shell belongs to, for the activity tally only. */
+  sessionId?: string;
   /**
    * Stable name for the shell on the target.
    *
@@ -58,6 +62,8 @@ export function TerminalView({
   onExit?: (code: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  /** What has been typed since the last Enter — see the submit counter below. */
+  const pending = useRef("");
   /** Kept so a click anywhere in the pane can hand the keyboard back. */
   const termRef = useRef<Xterm | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -230,6 +236,19 @@ export function TerminalView({
       // separate combining marks miscounts every column. See ClaudePanel.
       // Same IME gate as the Claude pane — see `Ime.shouldSend`.
       if (!ime.shouldSend(data)) return;
+      // **A command is Enter on a line with something on it.** Counting every
+      // keystroke would measure typing, and counting every Enter would count
+      // the blank ones people use to clear the screen's clutter. `pending`
+      // tracks what has been typed since the last submit, which is the closest
+      // thing to "a command" available without reading the far side's history.
+      if (data === "\r" || data === "\n") {
+        if (sessionId && pending.current.trim()) record(sessionId, "commands");
+        pending.current = "";
+      } else if (data === "\x7f") {
+        pending.current = pending.current.slice(0, -1);
+      } else if (!data.startsWith("\x1b")) {
+        pending.current += data;
+      }
       if (terminalId) void invoke("terminal_write", { id: terminalId, data: data.normalize("NFC") });
     });
 

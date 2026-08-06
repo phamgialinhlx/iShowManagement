@@ -164,6 +164,33 @@ textarea,
   user-select: text;
 }
 
+/*
+ * Prose opts back in.
+ *
+ * The shell is `user-select: none` because it is an application, not a
+ * document. But a rendered markdown file, an office document or a transcript
+ * *is* a document, and text nobody can select is text nobody can quote, paste
+ * into a prompt, or copy out to a colleague — which for a file preview is most
+ * of what it is for. Reported as "markdown preview in files is not selectable
+ * nor copiable", and it was inherited from `body` rather than set anywhere near
+ * the preview, which is why it looked like a missing feature.
+ *
+ * The `*` is load-bearing: `user-select: none` inherits, so opting the
+ * container in leaves every heading, paragraph and list item inside it still
+ * refusing. `-webkit-` is spelled out because WebKit needs the prefixed
+ * property to override an inherited `none` (the same thing `TranscriptView`
+ * discovered and set inline).
+ */
+.selectable,
+.selectable * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.selectable {
+  cursor: text;
+}
+
 ::selection {
   background: rgb(var(--primary) / 0.3);
   color: var(--text);
@@ -1087,4 +1114,112 @@ body[data-hidden="true"] * {
   .done-swell {
     animation: none;
   }
+}
+
+/* ------------------------------------------------------------- note widget */
+
+/*
+ * A note renders its own markdown, in a widget a few centimetres wide.
+ *
+ * The transcript's `.markdown` spacing is tuned for a reading column and is far
+ * too airy here — a three-item list would not fit without scrolling. These
+ * override only the vertical rhythm, so headings, code and links keep the one
+ * definition they have everywhere else.
+ */
+.note-block > :first-child {
+  margin-top: 0;
+}
+.note-block > :last-child {
+  margin-bottom: 0;
+}
+.note-block p,
+.note-block ul,
+.note-block ol {
+  margin: 0 0 2px;
+}
+.note-block li {
+  margin: 0;
+}
+.note-block ul {
+  /* Task lists carry their own box; the bullet beside it is noise. */
+  list-style: none;
+  padding-left: 0;
+}
+.note-block ul ul {
+  padding-left: 12px;
+}
+/* An ordinary (non-task) bullet still needs a marker to read as a list. */
+.note-block li:not(:has(> .note-check))::before {
+  content: "· ";
+  color: var(--text-faint);
+}
+
+/*
+ * The checkbox is drawn rather than native.
+ *
+ * A native `<input type=checkbox>` on macOS is a rounded, blue, glossy control
+ * — three separate breaks with the design system (rule 1 forbids radius, and
+ * blue is not in the palette at all), and `accent-color` cannot fix the shape.
+ * `appearance: none` plus a square is the only way it reads as part of rmux.
+ */
+.note-check {
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin: 0 6px 0 0;
+  vertical-align: -1px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.note-check:hover {
+  border-color: var(--text-soft);
+}
+.note-check:checked {
+  /* Amber, not red: a finished task is progress, and rule 0 keeps red for
+     "the operator must act". The tick is drawn with a gradient rather than a
+     glyph so it stays square-capped and needs no font. */
+  background:
+    linear-gradient(45deg, transparent 44%, rgb(var(--busy)) 44%, rgb(var(--busy)) 56%, transparent 56%),
+    linear-gradient(-45deg, transparent 44%, rgb(var(--busy)) 44%, rgb(var(--busy)) 56%, transparent 56%);
+  border-color: rgb(var(--busy) / 0.6);
+}
+/* Done text steps back but stays legible — struck-through *and* faint would put
+   it under the 4.5:1 the design system requires of anything still on screen. */
+.note-block li:has(> .note-check:checked) {
+  color: var(--text-soft);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+}
+
+/* The editing textarea must not jump when it replaces a rendered block. */
+.note-surface textarea {
+  font: inherit;
+  padding: 0;
+}
+
+/* --------------------------------------------------------- progress page */
+
+/*
+ * The Progress page is a *surface*, not a panel over content.
+ *
+ * `.panel` sits at `--panel-tint` (38% by default) and that is right for the
+ * deck: a terminal paints its own dark content, so the desktop showing through
+ * the gaps reads as depth. This page is the opposite — hairline charts, 9px
+ * axis labels and a table of small numbers, with nothing behind them but
+ * wallpaper. Measured against a bright photograph it was unreadable: the bars
+ * competed with clouds.
+ *
+ * So it takes the same treatment as `.window` and `.menu`, for the same stated
+ * reason — a surface that *stacks over* other content is opaque enough to read,
+ * because the alternative is a translucent dialog over a photograph, which is
+ * worse than a plain one. Progress replaces the entire workbench body while it
+ * is open, which makes it a window in every sense but the frame.
+ *
+ * It still tracks `--glass-pct`, so the operator's own material setting moves
+ * it; it is not a hard-coded opaque slab.
+ */
+.progress-page {
+  background: color-mix(in srgb, var(--app-panel) var(--glass-pct), transparent);
 }

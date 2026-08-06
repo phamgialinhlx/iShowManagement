@@ -1,12 +1,13 @@
 import { useMemo } from "react";
 
 import { useWorkspace } from "../lib/workspace";
-import { layoutPanes } from "../lib/grid";
-import { reattachName, type PaneRef, type SessionV3 } from "../lib/workspace-model";
+import { isFocusDeck, layoutPanes } from "../lib/grid";
+import { basename, reattachName, type PaneRef, type SessionV3 } from "../lib/workspace-model";
 import { ClaudeSessionPane } from "./ClaudeSessionPane";
 import { TerminalView } from "./Terminal";
 import { HostPanel } from "./HostPanel";
 import { FilesPane } from "./FilesPane";
+import { PaneHeader } from "./PaneHeader";
 
 /**
  * The workbench main area, v3 — a **pane manager** (ADR-002).
@@ -38,15 +39,29 @@ function SessionPane({ session }: { session: SessionV3 }) {
     return <ClaudeSessionPane session={session} />;
   }
 
+  // A shell says nothing about which session or machine it is — the prompt is
+  // the *host's* idea of that, and in a grid of four they all look alike. The
+  // header is the only thing that answers it.
   return (
-    <TerminalView
-      target={target}
-      cwd={project?.folder}
-      session={reattachName(session)}
-      ptyId={live}
-      onOpened={(id) => setLive(session.id, id)}
-      onExit={() => clearLive(session.id)}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Folder first, session name second — the same order as the Claude pane's
+          header, so a grid of mixed panes reads as one thing. */}
+      <PaneHeader
+        label={project ? basename(project.folder) : session.name}
+        detail={project ? session.name : undefined}
+      />
+      <div className="min-h-0 flex-1">
+        <TerminalView
+          target={target}
+          cwd={project?.folder}
+          session={reattachName(session)}
+          sessionId={session.id}
+          ptyId={live}
+          onOpened={(id) => setLive(session.id, id)}
+          onExit={() => clearLive(session.id)}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -54,7 +69,27 @@ function SessionPane({ session }: { session: SessionV3 }) {
 function HostPane({ serverId }: { serverId: string }) {
   const server = useWorkspace((s) => s.servers.find((sv) => sv.id === serverId));
   if (!server) return <PaneMissing what="server" />;
-  return <HostPanel target={server.target} />;
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <PaneHeader label={serverId} detail="host" />
+      <div className="min-h-0 flex-1">
+        <HostPanel target={server.target} />
+      </div>
+    </div>
+  );
+}
+
+/** A project's files. The tab strip names *files*; this names the project. */
+function FilesPaneTile({ projectId }: { projectId: string }) {
+  const project = useWorkspace((s) => s.projects.find((p) => p.id === projectId));
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <PaneHeader label={project?.label ?? "files"} detail={project?.folder} />
+      <div className="min-h-0 flex-1">
+        <FilesPane projectId={projectId} />
+      </div>
+    </div>
+  );
 }
 
 function PaneMissing({ what }: { what: string }) {
@@ -75,29 +110,35 @@ function Pane({ pane }: { pane: PaneRef }) {
     return session ? <SessionPane session={session} /> : <PaneMissing what="session" />;
   }
   if (pane.kind === "host") return <HostPane serverId={pane.serverId} />;
-  return <FilesPane projectId={pane.projectId} />;
+  return <FilesPaneTile projectId={pane.projectId} />;
 }
 
 export function WorkspaceDeck() {
   const sessions = useWorkspace((s) => s.sessions);
   const panes = useWorkspace((s) => s.panes);
   const active = useWorkspace((s) => s.activeSession);
-  const grid = useWorkspace((s) => s.grid);
+  const deck = useWorkspace((s) => s.deck);
   const focusedCell = useWorkspace((s) => s.focusedCell);
   const focusCell = useWorkspace((s) => s.focusCell);
   const activate = useWorkspace((s) => s.activate);
 
   const cells = useMemo(
-    () => layoutPanes(panes, sessions, active, grid),
-    [panes, sessions, active, grid],
+    () => layoutPanes(panes, sessions, active, deck),
+    [panes, sessions, active, deck],
   );
 
-  if (grid >= 2) {
+  if (!isFocusDeck(deck)) {
     return (
       <div
         className="grid min-h-0 flex-1 gap-[1px]"
         style={{
-          gridTemplateColumns: `repeat(${grid}, minmax(0, 1fr))`,
+          // Rows are stated explicitly rather than left to `gridAutoRows`.
+          // A wide deck (1x2, 1x4) is one row of full-height panes, and letting
+          // the browser infer rows from the child count would give a second row
+          // the moment a cell wrapped — which is precisely the tall, short
+          // terminal the wide decks exist to avoid.
+          gridTemplateColumns: `repeat(${deck.cols}, minmax(0, 1fr))`,
+          gridTemplateRows: `repeat(${deck.rows}, minmax(0, 1fr))`,
           gridAutoRows: "minmax(0, 1fr)",
         }}
       >
