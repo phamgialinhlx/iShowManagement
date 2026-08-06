@@ -13,15 +13,19 @@ use crate::terminal::{TargetRef, TerminalStore};
 pub async fn server_disconnect(
     terminal: State<'_, TerminalStore>,
     claude: State<'_, ClaudeStore>,
+    files: State<'_, crate::files::FsStore>,
+    metrics: State<'_, crate::metrics::MetricsStore>,
     agent: State<'_, AgentStore>,
     target: TargetRef,
 ) -> Result<(), String> {
     let id = target.id();
     // Forget the provisioning cache so a later use re-probes rather than
-    // trusting a stale install, then drop the SSH targets from both stores.
+    // trusting a stale install, then drop the SSH targets from all stores.
     agent.forget(&id);
     terminal.evict_target(&id);
     claude.evict_target(&id);
+    files.evict_target(&id);
+    metrics.evict_target(&id).await;
     Ok(())
 }
 

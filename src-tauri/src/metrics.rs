@@ -27,6 +27,17 @@ pub struct MetricsStore {
 }
 
 impl MetricsStore {
+    /// Drop the monitored target for a host so its SSH connection can close.
+    pub async fn evict_target(&self, id: &TargetId) -> bool {
+        self.monitored.lock().await.remove(id).is_some()
+    }
+
+    /// Test seam: insert a monitored target without going through `metrics_sample`.
+    pub async fn insert_for_test(&self, id: TargetId, target: Arc<dyn rmux_transport::Target>) {
+        let mut m = self.monitored.lock().await;
+        m.insert(id, Monitored { target, collector: rmux_metrics::Collector::new() });
+    }
+
     /// Resolve a target once and keep it, so the CPU baseline survives.
     async fn ensure(&self, target: &TargetRef) -> Result<TargetId, String> {
         let id = target.id();

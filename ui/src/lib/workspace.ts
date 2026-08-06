@@ -100,6 +100,7 @@ type State = Core & {
   // ── structure ──────────────────────────────────────────────────────────────
   connectServer: (target: TargetRef) => ServerId;
   createProject: (server: ServerId, folder: string, label?: string) => ProjectId;
+  addRunningProject: (serverId: ServerId) => ProjectId;
   addSession: (
     projectId: ProjectId,
     kind: SessionKind,
@@ -227,22 +228,6 @@ const mintSessionId = (kind: SessionKind): string =>
 
 const restored = load();
 
-const RUNNING_LABEL = "running";
-
-/**
- * The synthetic project adopted "running" sessions hang under — a grouping key,
- * not a real folder. Created idempotently; returns the project id.
- *
- * The folder string `<serverId>\0running` is synthetic — it is a grouping key only,
- * so it must never be shell_quote'd into a remote path (adopted sessions reuse the
- * host name for the attach, never the project folder).
- */
-const makeRunningBucket = (state: State, serverId: ServerId): { ws: Core; id: string } => {
-  const runningFolder = `${serverId}\0${RUNNING_LABEL}`;
-  const existing = state.projects.find((p) => p.folder === runningFolder);
-  if (existing) return { ws: coreOf(state), id: existing.id };
-  return rAddProject(coreOf(state), serverId, runningFolder, RUNNING_LABEL);
-};
 
 /** Just the reducer core, for handing to a reducer and merging its result back. */
 const coreOf = (s: State): Core => ({
@@ -312,6 +297,23 @@ export const useWorkspace = create<State>((set, get) => ({
     return id;
   },
 
+  /** The synthetic "running" project adopted sessions hang under, created
+   *  idempotently. The folder is the readable home string `~` — a valid terminal
+   *  cwd — not a NUL-laden sentinel that would break execve. */
+  addRunningProject: (serverId) => {
+    const folder = "~";
+    const existing = get().projects.find(
+      (p) => p.running && p.serverId === serverId,
+    );
+    if (existing) return existing.id;
+    const { ws, id } = rAddProject(coreOf(get()), serverId, folder, "running");
+    set({ ...ws, projects: ws.projects.map((p) =>
+      p.id === id ? { ...p, running: true } : p,
+    )});
+    schedulePersist(get);
+    return id;
+  },
+
   addSession: (projectId, kind, opts) => {
     const id = mintSessionId(kind);
     const project = get().projects.find((p) => p.id === projectId);
@@ -325,16 +327,23 @@ export const useWorkspace = create<State>((set, get) => ({
   },
 
   adoptServerSession: (serverId, name, kind) => {
-    const id = kind === "claude" ? name.replace(/^claude-/, "") : name;
-    if (get().sessions.some((x) => x.id === id)) {
-      get().openSession(id);
+    const base = kind === "claude" ? name.replace(/^claude-/, "") : name;
+    const existing = get().sessions.find((x) => x.id === base);
+    if (existing && existing.hostName === name) {
+      get().openSession(base);
       return;
     }
-    const { ws: bucketWs, id: projectId } = makeRunningBucket(get(), serverId);
-    set(bucketWs);
-    schedulePersist(get);
+    // A locally-created session already holds this id — do not hijack it. Mint a
+    // distinct id so the adopted row still attaches to the running process.
+    let id = base;
+    let n = 2;
+    while (get().sessions.some((x) => x.id === id)) {
+      id = `${base}-${n}`;
+      n += 1;
+    }
+    const projectId = get().addRunningProject(serverId);
     const newId = get().addSession(projectId, kind, {
-      name: kind === "claude" ? name.replace(/^claude-/, "") : name,
+      name: kind === "claude" ? id : name,
       renamed: true,
       hostName: name,
     });

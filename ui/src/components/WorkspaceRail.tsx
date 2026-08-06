@@ -567,9 +567,9 @@ function ProjectNode({
           <button
             type="button"
             className="data min-w-0 flex-1 truncate text-left text-[10px]"
-            style={{ color: "var(--text-soft)", fontWeight: 600, letterSpacing: "0.09em", textTransform: "uppercase" }}
+            style={{ color: project.running ? "var(--text-faint)" : "var(--text-soft)", fontWeight: 600, letterSpacing: "0.09em", textTransform: "uppercase" }}
             onClick={() => openFiles(project.id)}
-            title={`${project.folder}\nOpen files\nRight-click for project actions`}
+            title={project.running ? "Adopted running sessions on this host" : `${project.folder}\nOpen files\nRight-click for project actions`}
           >
             {project.label}
           </button>
@@ -578,7 +578,7 @@ function ProjectNode({
           type="button"
           onClick={() => openFiles(project.id)}
           aria-label={`Open files in ${project.label}`}
-          title="Open files"
+          title={project.running ? "Adopted running sessions on this host" : "Open files"}
           className="shrink-0 px-1 opacity-70 hover:opacity-100"
           style={{ color: "var(--text-soft)" }}
         >
@@ -748,14 +748,15 @@ function ServerNode({
   const [attaching, setAttaching] = useState(false);
   const [sessions, setSessions] = useState<RunningSession[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const adoptServerSession = useWorkspace((s) => s.adoptServerSession);
 
   useEffect(() => {
     if (!attaching) return;
     setLoading(true);
     api.serverSessions(server.target)
-      .then(setSessions)
-      .catch(() => setSessions([]))
+      .then((s) => { setSessions(s); setError(null); })
+      .catch(() => setError("couldn't reach host"))
       .finally(() => setLoading(false));
   }, [attaching, server.target]);
 
@@ -863,9 +864,13 @@ function ServerNode({
               close
             </button>
           </div>
-          {sessions.length === 0 && !loading ? (
+          {sessions.length === 0 && !loading && !error ? (
             <p className="micro px-1" style={{ color: "var(--text-faint)" }}>
               none running
+            </p>
+          ) : error ? (
+            <p className="micro px-1" style={{ color: "var(--text-faint)" }}>
+              {error}
             </p>
           ) : (
             <ul className="flex flex-col gap-px">
