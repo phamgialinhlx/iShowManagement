@@ -19,6 +19,20 @@ use rmux_term::{TermSize, Terminal, TerminalEvent};
 use rmux_transport::{
     CommandSpec, LocalTarget, SshHostId, Target, TargetId, local::terminal_env,
 };
+
+impl TerminalStore {
+    /// Drop the cached target for `id`, if any. Returns whether an entry was
+    /// removed. Dropping the last `Arc<SshTarget>` tears down the ControlMaster,
+    /// closing the multiplexed SSH connection — sessions keep running on the host.
+    pub fn evict_target(&self, id: &TargetId) -> bool {
+        self.targets.lock().remove(id).is_some()
+    }
+
+    /// Test seam: put a target into the cache so a test can assert eviction removes it.
+    pub fn insert_for_test(&self, id: TargetId, target: Arc<dyn Target>) {
+        self.targets.lock().insert(id, target);
+    }
+}
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
