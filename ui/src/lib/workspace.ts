@@ -353,7 +353,7 @@ export const useWorkspace = create<State>((set, get) => ({
       // otherwise leak on the host. Reattach name and target are resolved the
       // same way an attach does, so the right session on the right host dies.
       const target = state.targetOf(id);
-      const name = reattachName(session);
+      const name = session.hostName ?? reattachName(session);
       if (session.kind === "claude") {
         void api.claudeEndSession(target, name).catch(() => {});
       } else {

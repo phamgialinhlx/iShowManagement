@@ -53,8 +53,8 @@ function SessionPane({ session }: { session: SessionV3 }) {
       <div className="min-h-0 flex-1">
         <TerminalView
           target={target}
-          cwd={project?.folder}
-          session={reattachName(session)}
+          cwd={session.hostName ? undefined : project?.folder}
+          session={session.hostName ?? reattachName(session)}
           sessionId={session.id}
           ptyId={live}
           onOpened={(id) => setLive(session.id, id)}
