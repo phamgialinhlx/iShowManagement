@@ -14,6 +14,7 @@ import { readMonoStack } from "../lib/fonts";
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { ContextMeter } from "./ContextMeter";
 import { BrowserReports } from "./BrowserReports";
+import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
 import { MouseModeTracker } from "../lib/mouse-modes";
 import { PanelLoader } from "./PanelLoader";
@@ -261,6 +262,7 @@ export function ClaudePanel({
     xterm.loadAddon(fit);
     xterm.open(host);
 
+
     // The GPU renderer, same as the terminal tab. Without it this pane falls back
     // to the DOM renderer, and scrolling or dragging a selection across Claude's
     // constantly-redrawing TUI is visibly slow — which is exactly what it was.
@@ -280,6 +282,16 @@ export function ClaudePanel({
     // turns on mouse reporting, so a plain drag goes to Claude rather than
     // selecting — hold Option to select, then ⌘C.
     attachClipboard(xterm);
+
+    // Vietnamese and every other IME that rewrites what it already typed.
+    // macOS Telex fires no composition events at all — it inserts the plain
+    // letter and then replaces it via `insertReplacementText`, which xterm
+    // drops. Measured in this app; see `lib/ime-replace.ts`.
+    const ime = attachImeReplace(host.querySelector("textarea")!, (data) => {
+      if (id) void invoke("claude_write", { id, data: data.normalize("NFC") });
+    });
+
+
 
     const output = new Channel<ArrayBuffer>();
     output.onmessage = (chunk) => {
@@ -402,6 +414,7 @@ export function ClaudePanel({
     // Fit locally on every callback so the grid tracks the window, but tell
     // Claude only once the drag stops — see `settleResize` for what forty
     // redraws during one drag does to an inline TUI.
+
     const settle = settleResize(
       () => fit.fit(),
       () => {
@@ -463,6 +476,7 @@ export function ClaudePanel({
     return () => {
       disposed = true;
       observer.disconnect();
+      ime.dispose();
       settle.dispose();
       window.removeEventListener("storage", onAppearance);
       window.removeEventListener("resize", refit);
@@ -661,6 +675,22 @@ export function ClaudePanel({
 
         <ClaudeStatusStrip status={claudeStatus} window={contextWindow} />
 
+        {/*
+          **No copy buttons, and no rendering toggle.**
+
+          The copy pair existed because Claude's fullscreen TUI captured the
+          mouse: a drag went *to Claude* rather than making a selection, so
+          Cmd-C had nothing to copy and the buttons were the only way out. rmux
+          now runs Claude **inline** with `CLAUDE_CODE_DISABLE_MOUSE=1`, so
+          dragging selects and Cmd-C works as it does anywhere else. Keeping
+          them would leave two chips in the busiest header in the app
+          duplicating a gesture the operator already has.
+
+          The fullscreen toggle lives in Session Settings. It restarts the
+          conversation to take effect -- not a thing to sit one stray click from
+          INTERRUPT, and a per-session property decided once rather than a
+          control reached mid-run.
+        */}
         {/* Select mode is meaningful only in Claude's fullscreen TUI, which
             captures the mouse; turning capture off locally lets a drag select
             again. It stays hidden in the default inline rendering. */}
@@ -773,8 +803,46 @@ export function ClaudePanel({
         </div>
       )}
 
-      <div className="relative min-h-0 flex-1">
-        <div ref={hostRef} className="h-full w-full p-2" />
+      <div className="claude-pane-area relative min-h-0 flex-1">
+        {/*
+          **The padding is on a wrapper, never on the element `fit()` measures.**
+          This was the black bar along the bottom of the pane, and it is a layout
+          fault rather than the transparency one it looks like.
+
+          `FitAddon` reads `getComputedStyle(host).height` — and under
+          `box-sizing: border-box`, which Tailwind sets globally, the resolved
+          `height` is the *padding* box. It compensates by subtracting padding,
+          but it reads that padding from `.xterm`, which has none: the addon
+          assumes any padding is on the terminal element itself. With `p-2` here,
+          16px of padding was counted as terminal space and never taken back, so
+          `fit()` asked for one row more than the pane could hold — measured at
+          25 rows x 19.5px = 487.5px into 476px, hanging 4px past the pane edge.
+          The overhanging viewport is what painted the bar, and it carried the
+          scrollbar thumb that was visible inside it.
+
+          Two rounds of `background: transparent` could not have worked: it was
+          real content in the wrong place, not an unpainted gap.
+
+          The wrapper also cannot be the `relative` element — the overlays below
+          position against it, and padding it would inset them by 8px.
+
+          `ui/blackbar-check.ts` measures this against a real xterm and fails on
+          the old structure.
+        */}
+        {/*
+          **No padding along the bottom.** `fit()` floors to whole rows, so a
+          remainder of up to one cell is always left below the last row and no
+          arithmetic removes it. Eight more pixels of padding under it made that
+          bare region half again as tall for no gain — the rows are already clear
+          of the pane edge by the remainder itself. Under native glass with a low
+          overlay the panel paints nothing there, so bare is *visible*: measured
+          in the running app, `.panel` resolves to `rgba(0, 0, 0, 0)` from the top
+          of the pane to the bottom, which makes any region the terminal does not
+          cover read as a hole rather than as part of the app.
+        */}
+        <div className="claude-pane-host h-full w-full px-2 pt-2">
+          <div ref={hostRef} className="h-full w-full" />
+        </div>
 
         {/* Until Claude's first byte, the pane is a black rectangle — which reads
             as a crash, not as work in progress. */}

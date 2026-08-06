@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import { isTauri, type TargetRef } from "../lib/api";
 import { settleResize } from "../lib/terminal-resize";
+import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
 import { gpuRendering, terminalTheme } from "../lib/terminal-theme";
 import { readMonoStack } from "../lib/fonts";
@@ -123,6 +124,15 @@ export function TerminalView({
 
     attachClipboard(xterm);
 
+    // Same IME path as the Claude pane — see `lib/ime-replace.ts`. A shell
+    // prompt has the same problem: the letter is already on the wire, so a
+    // replacement has to be expressed as erase-then-retype.
+    const ime = attachImeReplace(host.querySelector("textarea")!, (data) => {
+      // No `shouldSend` gate here — this *is* the committed text the gate exists
+      // to wait for. Gating it would drop the very thing being sent.
+      if (terminalId) void invoke("terminal_write", { id: terminalId, data: data.normalize("NFC") });
+    });
+
     const output = new Channel<ArrayBuffer>();
     output.onmessage = (chunk) => {
       // Raw bytes, not JSON — see the note in src-tauri/src/terminal.rs.
@@ -218,6 +228,8 @@ export function TerminalView({
       // NFC for the same reason as the Claude pane: macOS hands over
       // decomposed Vietnamese, and a shell receiving a letter followed by
       // separate combining marks miscounts every column. See ClaudePanel.
+      // Same IME gate as the Claude pane — see `Ime.shouldSend`.
+      if (!ime.shouldSend(data)) return;
       if (terminalId) void invoke("terminal_write", { id: terminalId, data: data.normalize("NFC") });
     });
 
@@ -294,6 +306,7 @@ export function TerminalView({
     return () => {
       disposed = true;
       observer.disconnect();
+      ime.dispose();
       settle.dispose();
       window.removeEventListener("storage", onAppearance);
       window.removeEventListener("resize", refit);
