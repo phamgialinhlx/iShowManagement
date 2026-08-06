@@ -221,7 +221,10 @@ mod tests {
         // The wrapper's own arguments are quoted too (`set "TERM=dumb"` and the
         // `-lc` argument). What matters is no *script* text reaches the command
         // line and every quote is balanced.
-        assert!(line.matches('"').count() >= 2 && line.matches('"').count() % 2 == 0, "{line}");
+        assert!(
+            line.matches('"').count() >= 2 && line.matches('"').count().is_multiple_of(2),
+            "{line}"
+        );
         // And a `%` from a script must never survive: `cmd` expands it.
         assert!(!line.contains('%'), "{line}");
     }

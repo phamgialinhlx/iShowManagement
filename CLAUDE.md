@@ -472,6 +472,101 @@ to say "this is a string".
 - The header counts **both** kinds of "needs you". Counting only `waiting` left a rail full of
   accent dots above a header claiming everything was fine.
 
+## Progress — counting the day without inventing it
+
+`ui/src/lib/activity.ts` is the only place rmux keeps a tally of its own, and everything on
+the Progress page is derived from it or from notes. The rule it exists to serve is that a
+number nobody measured must be **absent, not estimated** — a dashboard that fills a gap with
+something plausible cannot be told apart from one that measured it.
+
+- **Only two things are stored, because only two have no other record.** Terminal commands
+  (a shell's history belongs to the shell, and reading it back over SSH per refresh is a poll
+  of someone else's file) and attention time (nothing else knows which pane you were looking
+  at). Prompts, tokens and timings come from Claude's own transcripts, which go back further
+  than any counter we could start.
+- **Task completions are recorded as they happen.** A note stores only the *current* state of
+  its checkboxes, so "tasks finished on Tuesday" is unknowable from the notes alone and any
+  chart over time had to either invent it or not exist. Un-ticking decrements, so the count
+  stays a description of the board and not a score that only goes up.
+- **The hour bucket is written at the moment time is banked, never derived later.** Deriving
+  it on read gives whatever hour the dashboard happened to be opened in, which piles the whole
+  day into one column — a chart that is confidently, silently wrong. Five seconds of
+  misattribution once an hour is the accepted cost of not splitting every tick.
+- **Both dimensions are pruned on every write.** `days` was bounded and `hours` was not, at
+  first; a store bounded in one dimension reads as bounded right up until the `localStorage`
+  quota it shares with the session list runs out. `ui/activity-hours-check.ts` pins this and
+  was verified red before the prune existed.
+- **Peak hour is `undefined` when nothing is recorded, never `0`.** Hour zero is a real
+  answer, so a falsy default tells someone who works late that their busiest hour is the one
+  they never worked.
+- **Empty hours and empty days are drawn, not skipped.** Closing the gaps turns a week off
+  into a continuous run and puts lunch next to midnight.
+- **A goal of zero means "not tracking this"**, rather than a second switch beside every
+  field. Nobody holds a target of zero tasks, so the value carries its own off state.
+
+## Jira — what rmux may say about someone else's system
+
+`ui/src/lib/jira-focus.ts` stores **selections only** — issue keys. Status, summary and
+category are read back from the board every time, never cached, because they are edited by
+other people in another system all day; a cached status is a claim rmux is not in a position
+to make.
+
+- **Done is Jira's `statusCategory`, never a status name.** "Shipped", "Closed" and "Ready
+  for QA" are all real done-column names, and a status *called* "Done" in an unfinished
+  category is a real configuration too. Names are per-project and renameable, so a bar built
+  on them is right on the board it was written against and quietly wrong everywhere else.
+  Both directions are pinned in `ui/jira-focus-check.ts`.
+- **Two stores, because they are two different facts.** Which ticket a *session* is on has no
+  date and must survive the night — it is a property of the work, like the model profile.
+  What you meant to finish *today* must expire, or Tuesday's list shown on Friday makes the
+  progress bar meaningless. Folding them together gets one of the two wrong whichever way you
+  fold.
+- **Transitions are asked for, never assumed.** The buttons are literally what
+  `/transitions` returned for that issue at that moment. A hard-coded To Do → In Progress →
+  Done produces controls that fail on any board with a customised workflow, which is most of
+  them.
+- **Finishing a ticket prompts in place, not in a modal.** A dialog appearing over the
+  workbench takes the keystrokes of whoever is typing in a terminal. The panel opens inside
+  the widget, where the change happened, and waits. It fires on the *observed* transition to
+  done — so a ticket somebody else closed in Jira prompts here too, which is the case the
+  operator is least likely to notice unaided — and never merely because the app opened on a
+  session already pointed at a finished ticket.
+- **rmux cannot create an issue, and does not pretend to.** The server exposes
+  `POST /agency/missions/:key/transitions` and `/comment` and nothing that creates; adding one
+  means a new route in `server/` *and* a deploy. So the picker offers Jira's own create screen
+  in the real browser instead of a button that would fail — never show a control that cannot
+  work.
+
+## Keyboard shortcuts, in an app made of terminals
+
+`ui/src/lib/shortcuts.ts`. The governing constraint is that rmux is mostly two full-screen
+programs reading raw keystrokes, so **anything a shortcut swallows is a key the shell never
+sees, and nothing anywhere says why**.
+
+- **A binding without a modifier is refused at the point of binding**, with the reason shown.
+  Shift does not count — `Shift+a` is `A`, and taking capitals is the same bug wearing a hat.
+- **`keydown` bubbles; it does not capture.** Capture would beat xterm to *every* key, because
+  deciding whether a chord is bound means running the match first. Bubbling means xterm acts
+  and rmux only intervenes on chords it does not use. `preventDefault` fires only on a match.
+- **xterm's textarea is deliberately not a "typing target".** It holds focus the entire time a
+  terminal is on screen, so exempting it — the obvious reading of "don't fire while typing" —
+  would disable every shortcut in the app's main view. Ordinary `input`/`textarea` outside
+  `.xterm` do suppress.
+- **Chords are normalised before comparison** (`Mod`, `Ctrl`, `Alt`, `Shift`, key). Without it
+  `Alt+Mod+K` and `Mod+Alt+K` are two bindings that fire on one keystroke and the conflict
+  detector reports all-clear.
+- **`Mod` is ⌘ on macOS and Ctrl elsewhere**, and on macOS Ctrl stays a *separate* modifier —
+  counted twice off macOS, no `Mod` binding would ever match.
+- **Grid movement clamps, never wraps.** Wrapping "left" at the left edge of a 4×4 lands six
+  tiles away, and nothing on screen suggests those are adjacent.
+- **Conflicts are marked, not prevented.** Mid-rebind, two actions sharing a chord is a state
+  you pass through.
+- **Defaults avoid ⌘W/⌘Q/⌘N/⌘M** (macOS binds them in the app menu) and use `Mod+Alt+Arrow`
+  rather than `Mod+Arrow`, which is line-start/line-end in every macOS text field.
+- **A pane's sub-view stays local to the pane**; the shortcut is a `rmux:set-view` event
+  addressed by session id. Putting it in the persisted workspace would restore someone into a
+  transcript they closed days ago, and an unaddressed one would switch all sixteen tiles.
+
 ## Searching a project
 
 **`grep` runs on the machine that owns the disk** (`crates/rmux-fs/src/search.rs`). Listing
