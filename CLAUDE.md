@@ -966,7 +966,7 @@ app, never in front of it, so an unreachable server delays a footer label and no
      every accent was dropped (`ee ee ee` → `e e e`). The next recording used compositions
      throughout. Handle both or half of Vietnamese is broken.
   2. **xterm parks a NBSP in its textarea and never clears it** — measured, the value grew to
-     `"jt mẹ mày…đang gõ "` across one sentence. `compositionstart` records
+     `"…xin chào tôi đang gõ "` across one sentence. `compositionstart` records
      `start = value.length`, counting that NBSP, but the IME inserts *before* it, so the
      finalising slice begins one character late and **every word loses its first letter**
      (`Tiếng Việt` → `iếng iệt`). Clearing the textarea at `compositionstart` fixes it;

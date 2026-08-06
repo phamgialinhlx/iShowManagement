@@ -143,7 +143,8 @@ export function attachImeReplace(textarea: HTMLTextAreaElement, send: (data: str
    *
    * **This is the first-letter bug.** xterm keeps a non-breaking space parked in
    * its textarea, and it never clears the buffer between words — measured, the
-   * value grew to `"jt mẹ màycon chó này ncyuwaxxin chào tôi đang gõ\u00a0"`
+   * value grew across a whole sentence without ever being cleared,
+   * ending `"...xin chào tôi đang gõ\u00a0"` — note the trailing NBSP
    * across one sentence. At `compositionstart` xterm records
    * `start = value.length`, which *counts that trailing NBSP*, but the IME
    * inserts its marked text **before** it. So the finalising slice begins one
