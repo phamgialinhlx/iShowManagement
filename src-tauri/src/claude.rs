@@ -15,12 +15,14 @@ use serde::Serialize;
 use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
 
-use crate::terminal::TargetRef;
+use crate::terminal::{Flow, TargetRef};
 
 #[derive(Default)]
 pub struct ClaudeStore {
     sessions: Mutex<HashMap<String, Arc<ClaudeSession>>>,
     targets: Mutex<HashMap<TargetId, Arc<dyn Target>>>,
+    /// One credit counter per streaming view — same design as the terminal's.
+    flows: Mutex<HashMap<String, Arc<Flow>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -235,34 +237,58 @@ pub async fn claude_start<R: tauri::Runtime>(
     let id = session.terminal().id().to_owned();
     store.inner().sessions.lock().insert(id.clone(), Arc::clone(&session));
 
-    stream_claude(Arc::clone(&session), output);
+    let flow = Flow::register(&store.inner().flows, &id);
+    stream_claude(Arc::clone(&session), output, flow);
     Ok(StartedSession { id })
 }
 
 /// Pump a Claude session's screen into the webview.
 ///
 /// The raw screen always goes to an xterm view, so the operator sees exactly
-/// what Claude is showing rather than only our interpretation of it.
-fn stream_claude(session: Arc<ClaudeSession>, output: Channel<Response>) {
+/// what Claude is showing rather than only our interpretation of it. Same
+/// credit gate and coalescing as the terminal — Claude's TUI redraws are the
+/// closest thing the app has to a steady firehose.
+fn stream_claude(session: Arc<ClaudeSession>, output: Channel<Response>, flow: Arc<Flow>) {
     let (backlog, mut receiver) = session.terminal().attach();
     if !backlog.is_empty() {
+        flow.sent(backlog.len());
         let _ = output.send(Response::new(InvokeResponseBody::Raw(backlog.to_vec())));
     }
     tauri::async_runtime::spawn(async move {
         loop {
-            match receiver.recv().await {
-                Ok(TerminalEvent::Output(chunk)) => {
-                    if output.send(Response::new(InvokeResponseBody::Raw(chunk.to_vec()))).is_err()
-                    {
+            flow.ready().await;
+            let Some(event) = receiver.recv().await else { break };
+            match event {
+                TerminalEvent::Output(first) => {
+                    let mut batch: Vec<u8> = Vec::from(first);
+                    while batch.len() < 64 * 1024 {
+                        match receiver.try_recv() {
+                            Ok(TerminalEvent::Output(more)) => batch.extend_from_slice(&more),
+                            _ => break,
+                        }
+                    }
+                    flow.sent(batch.len());
+                    if output.send(Response::new(InvokeResponseBody::Raw(batch))).is_err() {
                         break;
                     }
                 }
-                Ok(TerminalEvent::Exited { .. }) => break,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Err(_) => {}
+                TerminalEvent::Exited { .. } => break,
             }
         }
     });
+}
+
+/// The view has written `bytes` of Claude output into xterm — release credit.
+#[tauri::command]
+pub async fn claude_ack(
+    store: State<'_, ClaudeStore>,
+    id: String,
+    bytes: usize,
+) -> Result<(), String> {
+    if let Some(flow) = store.inner().flows.lock().get(&id) {
+        flow.consumed(bytes);
+    }
+    Ok(())
 }
 
 /// Re-stream an already-running Claude session.
@@ -277,7 +303,8 @@ pub async fn claude_attach(
     output: Channel<Response>,
 ) -> Result<(), String> {
     let session = session(store.inner(), &id)?;
-    stream_claude(session, output);
+    let flow = Flow::register(&store.inner().flows, &id);
+    stream_claude(session, output, flow);
     Ok(())
 }
 
@@ -364,6 +391,7 @@ pub async fn claude_write(
 
 #[tauri::command]
 pub async fn claude_stop(store: State<'_, ClaudeStore>, id: String) -> Result<(), String> {
+    store.inner().flows.lock().remove(&id);
     if let Some(session) = store.inner().sessions.lock().remove(&id) {
         let _ = session.terminal().kill();
     }

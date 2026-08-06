@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 use rmux_ssh::SshTarget;
@@ -31,6 +32,69 @@ pub struct TerminalStore {
     /// Dropping it would tear down the multiplexed connection and make the next
     /// terminal on that host re-authenticate.
     targets: Mutex<HashMap<TargetId, Arc<dyn Target>>>,
+    /// One credit counter per streaming view — see [`Flow`].
+    pub(crate) flows: Mutex<HashMap<String, Arc<Flow>>>,
+}
+
+/// Credit-based flow control between a forwarding task and the webview.
+///
+/// A Tauri channel has no backpressure of its own: `send` queues and returns,
+/// so a firehose would pile up in the webview faster than xterm can parse it.
+/// The view therefore *acks* what it has actually written (`terminal_ack`),
+/// and the forwarding task stops pulling from its queue while more than
+/// [`FLOW_HIGH`] bytes are unacknowledged. The queue then fills, the PTY
+/// reader parks, and the producer blocks — the same end-to-end stall the
+/// bounded queues provide, extended across the IPC boundary.
+pub(crate) struct Flow {
+    unacked: AtomicUsize,
+    acked: tokio::sync::Notify,
+}
+
+/// Unacked bytes beyond which the forwarding task waits for the view.
+const FLOW_HIGH: usize = 384 * 1024;
+
+/// How long to wait for an ack before assuming the view lost them.
+///
+/// Acks can vanish legitimately — a reload tears the JS side down while the
+/// channel object briefly keeps accepting sends. Failing open floods at worst;
+/// failing closed would freeze a healthy terminal forever, which is worse.
+const ACK_STALL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Coalesce queued chunks up to this size into one channel message. Under a
+/// firehose this turns ~one IPC message per 8 KiB PTY read into one per 64 KiB
+/// — each message costs a webview `eval` plus a fetch round trip — while an
+/// interactive echo, which never has a second chunk queued, is sent untouched.
+const COALESCE_BYTES: usize = 64 * 1024;
+
+impl Flow {
+    pub(crate) fn register(flows: &Mutex<HashMap<String, Arc<Flow>>>, id: &str) -> Arc<Flow> {
+        let flow = Arc::new(Flow { unacked: AtomicUsize::new(0), acked: tokio::sync::Notify::new() });
+        // A reattach replaces the previous view's counter; the orphaned task
+        // stalls, fails open, and exits on its dead channel.
+        flows.lock().insert(id.to_owned(), Arc::clone(&flow));
+        flow
+    }
+
+    pub(crate) fn sent(&self, bytes: usize) {
+        self.unacked.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub(crate) fn consumed(&self, bytes: usize) {
+        // Saturating: an ack racing a reattach must not wrap the counter.
+        let _ = self.unacked.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(bytes))
+        });
+        self.acked.notify_waiters();
+    }
+
+    pub(crate) async fn ready(&self) {
+        while self.unacked.load(Ordering::Relaxed) >= FLOW_HIGH {
+            if tokio::time::timeout(ACK_STALL, self.acked.notified()).await.is_err() {
+                tracing::warn!("no ack from the view in {ACK_STALL:?}; resetting credit");
+                self.unacked.store(0, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// Which machine to open a terminal on.
@@ -60,15 +124,14 @@ impl TargetRef {
 }
 
 /// Terminal lifecycle, sent as JSON on a separate channel from the byte stream.
+///
+/// There is no "lagged" variant any more: the fan-out is lossless — a slow
+/// view stalls the producer instead of dropping output — so there is nothing
+/// to warn about.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum Lifecycle {
     Exited { code: i32 },
-    /// The view fell too far behind and output was dropped. Surfaced rather than
-    /// hidden: the terminal contents are now missing bytes, so the display is
-    /// unreliable and the user should be told instead of quietly shown a
-    /// corrupted screen.
-    Lagged { chunks: u64 },
 }
 
 #[derive(Debug, Serialize)]
@@ -181,7 +244,8 @@ pub async fn terminal_open<R: tauri::Runtime>(
     let id = terminal.id().to_owned();
 
     store.inner().terminals.lock().insert(id.clone(), Arc::clone(&terminal));
-    stream_to_channel(Arc::clone(&terminal), output, lifecycle);
+    let flow = Flow::register(&store.inner().flows, &id);
+    stream_to_channel(Arc::clone(&terminal), output, lifecycle, flow);
 
     Ok(OpenedTerminal { id, cols, rows })
 }
@@ -202,7 +266,22 @@ pub async fn terminal_attach(
         .cloned()
         .ok_or_else(|| format!("no such terminal: {id}"))?;
 
-    stream_to_channel(terminal, output, lifecycle);
+    let flow = Flow::register(&store.inner().flows, &id);
+    stream_to_channel(terminal, output, lifecycle, flow);
+    Ok(())
+}
+
+/// The view has written `bytes` of output into xterm — release that credit.
+#[tauri::command]
+pub async fn terminal_ack(
+    store: State<'_, TerminalStore>,
+    id: String,
+    bytes: usize,
+) -> Result<(), String> {
+    // A stale id is not an error: acks legitimately race a close or reattach.
+    if let Some(flow) = store.inner().flows.lock().get(&id) {
+        flow.consumed(bytes);
+    }
     Ok(())
 }
 
@@ -253,6 +332,7 @@ pub async fn terminal_close<R: tauri::Runtime>(
     session: Option<String>,
 ) -> Result<(), String> {
     let terminal = store.inner().terminals.lock().remove(&id);
+    store.inner().flows.lock().remove(&id);
     if let Some(terminal) = terminal {
         // A child that has already exited cannot be killed; that is success here,
         // not an error to report.
@@ -288,36 +368,63 @@ fn stream_to_channel(
     terminal: Arc<Terminal>,
     output: Channel<Response>,
     lifecycle: Channel<Lifecycle>,
+    flow: Arc<Flow>,
 ) {
     // Catch up and subscribe atomically, so the handover neither drops nor
     // duplicates a chunk. See `Terminal::attach`.
     let (backlog, mut receiver) = terminal.attach();
 
     if !backlog.is_empty() {
+        // The backlog counts against credit like anything else: the view acks
+        // every byte it writes, so the ledger only balances if every byte sent
+        // was recorded. It is capped well under FLOW_HIGH, so it never stalls
+        // on its own.
+        flow.sent(backlog.len());
         let _ = output.send(raw(backlog.to_vec()));
     }
 
     tauri::async_runtime::spawn(async move {
         loop {
-            match receiver.recv().await {
-                Ok(TerminalEvent::Output(chunk)) => {
+            // Wait for the view to work through what it already has. While this
+            // waits, the bounded queue behind `receiver` fills and the PTY
+            // reader parks — backpressure all the way to the producer.
+            flow.ready().await;
+
+            let Some(event) = receiver.recv().await else { break };
+            match event {
+                TerminalEvent::Output(first) => {
+                    let mut batch: Vec<u8> = Vec::from(first);
+
+                    // Coalesce whatever else is already queued, without waiting
+                    // for anything that is not. An interactive echo has an empty
+                    // queue and ships alone; a firehose ships in 64 KiB slabs.
+                    let exited = loop {
+                        if batch.len() >= COALESCE_BYTES {
+                            break None;
+                        }
+                        match receiver.try_recv() {
+                            Ok(TerminalEvent::Output(more)) => batch.extend_from_slice(&more),
+                            Ok(TerminalEvent::Exited { code }) => break Some(code),
+                            Err(_) => break None,
+                        }
+                    };
+
+                    flow.sent(batch.len());
                     // A send failure means the webview went away (reload, window
                     // closed). Stop forwarding, but leave the PTY running — the
                     // session outlives its view by design.
-                    if output.send(raw(chunk.to_vec())).is_err() {
+                    if output.send(raw(batch)).is_err() {
+                        break;
+                    }
+                    if let Some(code) = exited {
+                        let _ = lifecycle.send(Lifecycle::Exited { code });
                         break;
                     }
                 }
-                Ok(TerminalEvent::Exited { code }) => {
+                TerminalEvent::Exited { code } => {
                     let _ = lifecycle.send(Lifecycle::Exited { code });
                     break;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(chunks)) => {
-                    // Report rather than swallow: the screen is now missing bytes.
-                    tracing::warn!(chunks, "terminal view fell behind; output dropped");
-                    let _ = lifecycle.send(Lifecycle::Lagged { chunks });
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });

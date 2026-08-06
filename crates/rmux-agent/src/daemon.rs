@@ -210,22 +210,22 @@ where
         // takes, so allocating per chunk would be the app's busiest allocation.
         let mut frame = Vec::with_capacity(16 * 1024);
 
+        // The queue is bounded: when this writer cannot push frames into the
+        // socket fast enough, the PTY reader parks instead of dropping — the
+        // client's TCP window is the flow control, end to end.
         loop {
             match events.recv().await {
-                Ok(TerminalEvent::Output(chunk)) => {
+                Some(TerminalEvent::Output(chunk)) => {
                     encode_data_into(&mut frame, &chunk);
                     if writer.write_all(&frame).await.is_err() {
                         break;
                     }
                 }
-                Ok(TerminalEvent::Exited { code }) => {
+                Some(TerminalEvent::Exited { code }) => {
                     let _ = writer.write_all(&Frame::Exited { code }.encode()).await;
                     break;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(chunks = n, "client fell behind; output dropped");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                None => break,
             }
         }
     });

@@ -9,7 +9,8 @@ import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
 import { contextLimit, sniffWindow } from "../lib/context-window";
 import { settleResize } from "../lib/terminal-resize";
 import { useWorkspace } from "../lib/workspace";
-import { claudeTheme, gpuRendering } from "../lib/terminal-theme";
+import { ackBatcher } from "../lib/terminal-ack";
+import { claudeTheme, gpuRendering, termFontSize } from "../lib/terminal-theme";
 import { readMonoStack } from "../lib/fonts";
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { ContextMeter } from "./ContextMeter";
@@ -110,6 +111,27 @@ function ClaudeStatusStrip({
 type Choice = { key: string; label: string; selected: boolean };
 type Prompt = { question: string; choices: Choice[]; fingerprint: string };
 type ClaudeState = { prompt: Prompt | null; working: boolean };
+
+/**
+ * Whether two polled states describe the same screen.
+ *
+ * The 400ms poll always returns a fresh object, so without this every tick
+ * re-rendered the whole pane — header, meter, status strip — 2.5 times a
+ * second per pane whether anything changed or not. Same guard TranscriptView
+ * uses (`sameTranscript`), for the same reason. The selected flags are
+ * compared as well as the fingerprint: arrowing through a decision card's
+ * options changes selection, not the prompt.
+ */
+function sameState(a: ClaudeState, b: ClaudeState): boolean {
+  if (a.working !== b.working) return false;
+  if (a.prompt === b.prompt) return true;
+  if (!a.prompt || !b.prompt) return false;
+  return (
+    a.prompt.fingerprint === b.prompt.fingerprint &&
+    a.prompt.choices.length === b.prompt.choices.length &&
+    a.prompt.choices.every((c, i) => b.prompt!.choices[i]?.selected === c.selected)
+  );
+}
 
 export function ClaudePanel({
   sessionId,
@@ -250,7 +272,8 @@ export function ClaudePanel({
       // The operator's chosen mono font (ADR-003) — same live-token read and
       // event-driven push as the terminal tab.
       fontFamily: readMonoStack(),
-      fontSize: 12,
+      // Compensated for the host's counter-zoom — see `.term-device-px`.
+      fontSize: termFontSize(12),
       lineHeight: 1.3,
       cursorBlink: true,
       scrollback: 5000,
@@ -281,6 +304,16 @@ export function ClaudePanel({
     // selecting — hold Option to select, then ⌘C.
     attachClipboard(xterm);
 
+    // Credit released only for bytes xterm has actually parsed — the Rust side
+    // stalls the stream (and, transitively, Claude's PTY) while too much is
+    // unacknowledged. See `ackBatcher`.
+    const ack = ackBatcher((bytes) => {
+      if (!id) return false;
+      void invoke("claude_ack", { id, bytes });
+      return true;
+    });
+
+    let sawOutput = false;
     const output = new Channel<ArrayBuffer>();
     output.onmessage = (chunk) => {
       const bytes = new Uint8Array(chunk);
@@ -305,8 +338,13 @@ export function ClaudePanel({
           configure(sessionId, { contextWindow: sniffed });
         }
       }
-      xterm.write(bytes);
-      setReady(true);
+      xterm.write(bytes, () => ack.add(bytes.byteLength));
+      // A per-chunk dispatch is free after the first (React bails on the same
+      // value) but still a dispatch; once is enough.
+      if (!sawOutput) {
+        sawOutput = true;
+        setReady(true);
+      }
       // Bytes are arriving, so whatever broke is fixed. Cleared here rather than
       // when the attach call returns: the call can succeed against a connection
       // that dies a moment later, and the operator would be told it recovered
@@ -441,9 +479,11 @@ export function ClaudePanel({
       // in Settings has to be pushed into xterm — it does not re-read CSS on
       // its own. Without this the terminals keep the colours they were born
       // with, which is the whole complaint being fixed. Same for the mono font
-      // (ADR-003): the token changed, but xterm cached the family.
+      // (ADR-003): the token changed, but xterm cached the family. The font
+      // *size* follows the interface scale for the same reason.
       xterm.options.theme = claudeTheme();
       xterm.options.fontFamily = readMonoStack();
+      xterm.options.fontSize = termFontSize(12);
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     // The ANSI theme *or the font* changed in this document — push both in, like
@@ -451,6 +491,7 @@ export function ClaudePanel({
     const onTheme = () => {
       xterm.options.theme = claudeTheme();
       xterm.options.fontFamily = readMonoStack();
+      xterm.options.fontSize = termFontSize(12);
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     window.addEventListener("storage", onAppearance);
@@ -462,6 +503,7 @@ export function ClaudePanel({
 
     return () => {
       disposed = true;
+      ack.dispose();
       observer.disconnect();
       settle.dispose();
       window.removeEventListener("storage", onAppearance);
@@ -527,7 +569,7 @@ export function ClaudePanel({
           return;
         }
 
-        setState(next);
+        setState((prev) => (sameState(prev, next) ? prev : next));
         // Publish to the rail. This is what makes "which session needs me?"
         // answerable at a glance without opening each one.
         setStatus(sessionId, next.prompt ? "waiting" : next.working ? "working" : "idle");
@@ -774,7 +816,7 @@ export function ClaudePanel({
       )}
 
       <div className="relative min-h-0 flex-1">
-        <div ref={hostRef} className="h-full w-full p-2" />
+        <div ref={hostRef} className="term-device-px h-full w-full p-2" />
 
         {/* Until Claude's first byte, the pane is a black rectangle — which reads
             as a crash, not as work in progress. */}

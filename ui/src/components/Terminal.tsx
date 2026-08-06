@@ -6,9 +6,10 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import "@xterm/xterm/css/xterm.css";
 
 import { isTauri, type TargetRef } from "../lib/api";
+import { ackBatcher } from "../lib/terminal-ack";
 import { settleResize } from "../lib/terminal-resize";
 import { attachClipboard } from "../lib/terminal-clipboard";
-import { gpuRendering, terminalTheme } from "../lib/terminal-theme";
+import { gpuRendering, terminalTheme, termFontSize } from "../lib/terminal-theme";
 import { readMonoStack } from "../lib/fonts";
 import { PanelLoader } from "./PanelLoader";
 
@@ -29,7 +30,9 @@ import { PanelLoader } from "./PanelLoader";
 // One palette for every terminal — see `lib/terminal-theme.ts` for why the
 // dark slots are translucent now that the panes are glass.
 
-type Lifecycle = { type: "exited"; code: number } | { type: "lagged"; chunks: number };
+// No "lagged" variant any more: the Rust side stalls the producer instead of
+// dropping output, so a slow view can never miss bytes.
+type Lifecycle = { type: "exited"; code: number };
 
 export function TerminalView({
   target,
@@ -93,7 +96,8 @@ export function TerminalView({
       // it reflects a preview as well as a committed value. Pushed in on the
       // appearance/theme events below, because xterm caches this at construction.
       fontFamily: readMonoStack(),
-      fontSize: 13,
+      // Compensated for the host's counter-zoom — see `.term-device-px`.
+      fontSize: termFontSize(13),
       lineHeight: 1.25,
       // Rule 2: the cursor is the one thing in this design allowed to blink.
       cursorBlink: true,
@@ -123,42 +127,52 @@ export function TerminalView({
 
     attachClipboard(xterm);
 
+    // Acked from xterm's own completion callback, so credit is released only
+    // for bytes actually parsed — see `ackBatcher` for the whole story.
+    const ack = ackBatcher((bytes) => {
+      if (!terminalId) return false;
+      void invoke("terminal_ack", { id: terminalId, bytes });
+      return true;
+    });
+
+    let sawOutput = false;
     const output = new Channel<ArrayBuffer>();
     output.onmessage = (chunk) => {
       // Raw bytes, not JSON — see the note in src-tauri/src/terminal.rs.
-      xterm.write(new Uint8Array(chunk));
-      setReady(true);
+      const bytes = new Uint8Array(chunk);
+      xterm.write(bytes, () => ack.add(bytes.byteLength));
+      // A per-chunk dispatch is free after the first (React bails on the same
+      // value) but still a dispatch; once is enough.
+      if (!sawOutput) {
+        sawOutput = true;
+        setReady(true);
+      }
     };
 
     const lifecycle = new Channel<Lifecycle>();
     lifecycle.onmessage = (event) => {
-      if (event.type === "exited") {
-        onExitRef.current?.(event.code);
+      onExitRef.current?.(event.code);
 
-        // A non-zero exit is an accident — ssh reports a broken connection as
-        // 255 — and the shell behind it is still alive under the agent on the
-        // target. So reattach rather than leaving a pane that looks like a
-        // quiet terminal and silently swallows every keystroke.
-        //
-        // xterm is deliberately *not* torn down: the agent replays the session
-        // backlog on reattach, and disposing here would throw away what the
-        // operator is reading in order to get the same text back.
-        if (event.code !== 0 && !disposed) {
-          terminalId = null;
-          binding = false;
-          // Clearing the handle matters. It names an attachment inside the
-          // connection that just died; reattaching to it fails forever.
-          ptyRef.current = undefined;
-          setNotice("Connection lost — reattaching…");
-          // A beat first: a machine waking from sleep has an interface that is
-          // up but not yet routable, so an immediate retry just burns itself.
-          window.setTimeout(() => {
-            if (!disposed) bind();
-          }, 1200);
-        }
-      } else {
-        // Say so rather than silently showing a terminal missing bytes.
-        setNotice(`Output dropped (${event.chunks} chunks) — display may be incomplete.`);
+      // A non-zero exit is an accident — ssh reports a broken connection as
+      // 255 — and the shell behind it is still alive under the agent on the
+      // target. So reattach rather than leaving a pane that looks like a
+      // quiet terminal and silently swallows every keystroke.
+      //
+      // xterm is deliberately *not* torn down: the agent replays the session
+      // backlog on reattach, and disposing here would throw away what the
+      // operator is reading in order to get the same text back.
+      if (event.code !== 0 && !disposed) {
+        terminalId = null;
+        binding = false;
+        // Clearing the handle matters. It names an attachment inside the
+        // connection that just died; reattaching to it fails forever.
+        ptyRef.current = undefined;
+        setNotice("Connection lost — reattaching…");
+        // A beat first: a machine waking from sleep has an interface that is
+        // up but not yet routable, so an immediate retry just burns itself.
+        window.setTimeout(() => {
+          if (!disposed) bind();
+        }, 1200);
       }
     };
 
@@ -269,9 +283,11 @@ export function TerminalView({
       // in Settings has to be pushed into xterm — it does not re-read CSS on
       // its own. Without this the terminals keep the colours they were born
       // with, which is the whole complaint being fixed. Same story for the mono
-      // font (ADR-003): the token changed, but xterm cached the family.
+      // font (ADR-003): the token changed, but xterm cached the family. The
+      // font *size* follows the interface scale for the same reason.
       xterm.options.theme = terminalTheme();
       xterm.options.fontFamily = readMonoStack();
+      xterm.options.fontSize = termFontSize(13);
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     // Switching the ANSI theme *or the font* fires this in *this* document (a
@@ -281,6 +297,7 @@ export function TerminalView({
     const onTheme = () => {
       xterm.options.theme = terminalTheme();
       xterm.options.fontFamily = readMonoStack();
+      xterm.options.fontSize = termFontSize(13);
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     window.addEventListener("storage", onAppearance);
@@ -293,6 +310,7 @@ export function TerminalView({
 
     return () => {
       disposed = true;
+      ack.dispose();
       observer.disconnect();
       settle.dispose();
       window.removeEventListener("storage", onAppearance);
@@ -319,7 +337,7 @@ export function TerminalView({
         termRef.current?.focus();
       }}
     >
-      <div ref={hostRef} className="h-full w-full" />
+      <div ref={hostRef} className="term-device-px h-full w-full" />
 
       {!ready && !error && (
         <div

@@ -187,18 +187,12 @@ impl ClaudeSession {
 
         let mirror = Arc::clone(&screen);
         tokio::spawn(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(TerminalEvent::Output(chunk)) => mirror.lock().feed(&chunk),
-                    Ok(TerminalEvent::Exited { .. }) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        // Dropped output means the emulated screen no longer
-                        // matches the real one, and a stale screen is exactly
-                        // what produces a ghost prompt. Say so rather than
-                        // quietly parsing a screen we know is wrong.
-                        tracing::warn!(chunks = n, "claude screen fell behind; state may be stale");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            // The queue is bounded and lossless — a chunk either arrives or the
+            // reader waits — so the emulated screen can lag but never diverge.
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    TerminalEvent::Output(chunk) => mirror.lock().feed(&chunk),
+                    TerminalEvent::Exited { .. } => break,
                 }
             }
         });
@@ -431,7 +425,7 @@ mod tests {
         screen.lock().feed(&backlog);
         let mirror = Arc::clone(&screen);
         tokio::spawn(async move {
-            while let Ok(event) = receiver.recv().await {
+            while let Some(event) = receiver.recv().await {
                 match event {
                     TerminalEvent::Output(chunk) => mirror.lock().feed(&chunk),
                     TerminalEvent::Exited { .. } => break,

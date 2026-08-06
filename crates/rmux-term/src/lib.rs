@@ -15,10 +15,22 @@
 //! that whole class of problem: keystroke latency becomes exactly `ssh`'s
 //! latency, and local and remote terminals share one code path.
 //!
-//! Output fans out over a broadcast channel, and a bounded scrollback buffer lets
-//! a reattaching view replay what it missed — so switching tabs or reloading the
-//! window does not lose the session.
+//! Output fans out over bounded per-subscriber queues, and a bounded scrollback
+//! buffer lets a reattaching view replay what it missed — so switching tabs or
+//! reloading the window does not lose the session.
+//!
+//! ## Flow control, not drops
+//!
+//! The queues are bounded and the reader thread **blocks** when one is full,
+//! which is the whole design: a consumer that cannot keep up stops the PTY from
+//! being read, the PTY buffer fills, and the producer — a local program, or
+//! `sshd` relaying a remote one through TCP's window — blocks on write exactly
+//! as it would in any real terminal. Output is never dropped; the firehose is
+//! made to wait instead. The previous broadcast-based fan-out dropped chunks
+//! when a view fell behind and told the operator the screen was now unreliable,
+//! which was honest but still a corrupted screen.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -28,7 +40,7 @@ use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use rmux_transport::ResolvedCommand;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 /// How much output to retain for replay on reattach.
 ///
@@ -42,8 +54,12 @@ const SCROLLBACK_BYTES: usize = 256 * 1024;
 /// buffer.
 const READ_CHUNK: usize = 8 * 1024;
 
-/// How many output chunks may queue for a slow subscriber before it is dropped.
-const BROADCAST_CAPACITY: usize = 512;
+/// How many chunks may sit unconsumed in one subscriber's queue before the
+/// reader thread stops reading the PTY. At `READ_CHUNK` each this is ~512 KiB
+/// of slack — deep enough that an interactive session never touches the limit,
+/// shallow enough that a `cat` of a gigabyte is throttled to what the view can
+/// actually render rather than buffered without bound.
+const SUBSCRIBER_QUEUE: usize = 64;
 
 pub type TerminalId = String;
 
@@ -82,29 +98,58 @@ pub enum TerminalEvent {
 }
 
 /// A bounded ring of recent output.
+///
+/// Stored as the chunks the reader produced rather than one contiguous buffer:
+/// a full contiguous `Vec` had to memmove ~248 KiB to the front for every
+/// 8 KiB appended — ~31× write amplification on the hottest path in the app,
+/// paid again on the daemon side of an agent session. Evicting whole chunks is
+/// O(1), and the one place that needs contiguity — replay on attach — pays the
+/// concatenation exactly once per reattach instead.
 #[derive(Debug, Default)]
 struct Scrollback {
-    buf: Vec<u8>,
+    chunks: VecDeque<Bytes>,
+    bytes: usize,
 }
 
 impl Scrollback {
-    fn push(&mut self, chunk: &[u8]) {
-        self.buf.extend_from_slice(chunk);
+    fn push(&mut self, chunk: Bytes) {
+        self.bytes += chunk.len();
+        self.chunks.push_back(chunk);
 
-        if self.buf.len() > SCROLLBACK_BYTES {
-            // Drop from the front. This can cut an escape sequence in half, which
-            // would leave a replaying view briefly mis-styled — acceptable, and
-            // far cheaper than parsing the stream to find a safe boundary. The
-            // alternative (retaining everything) is an unbounded leak on a
-            // terminal that has been streaming logs for hours.
-            let excess = self.buf.len() - SCROLLBACK_BYTES;
-            self.buf.drain(..excess);
+        // Evict from the front, whole chunks at a time. This can cut an escape
+        // sequence at the boundary, which would leave a replaying view briefly
+        // mis-styled — acceptable, and far cheaper than parsing the stream for
+        // a safe split. The newest chunk is never evicted, so a single oversized
+        // push cannot empty its own scrollback.
+        while self.bytes > SCROLLBACK_BYTES && self.chunks.len() > 1 {
+            let front = self.chunks.pop_front().expect("len > 1");
+            self.bytes -= front.len();
         }
     }
 
     fn snapshot(&self) -> Bytes {
-        Bytes::copy_from_slice(&self.buf)
+        let mut out = Vec::with_capacity(self.bytes);
+        for chunk in &self.chunks {
+            out.extend_from_slice(chunk);
+        }
+        out.into()
     }
+}
+
+/// Everything `attach` must see atomically, behind one lock.
+///
+/// The reader thread appends to the scrollback and delivers to every
+/// subscriber while holding this lock; `attach` snapshots and subscribes under
+/// the same lock. That single invariant is what makes the replay-then-stream
+/// handover exact — see the note on [`Terminal::attach`].
+#[derive(Default)]
+struct Shared {
+    scrollback: Scrollback,
+    subscribers: Vec<mpsc::Sender<TerminalEvent>>,
+    /// Set once the child has exited and every subscriber has been told. A
+    /// subscription after that point gets the replay and a receiver that ends
+    /// immediately, rather than one that waits forever on a dead terminal.
+    finished: bool,
 }
 
 /// A running terminal.
@@ -116,8 +161,7 @@ pub struct Terminal {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
-    scrollback: Arc<Mutex<Scrollback>>,
-    events: broadcast::Sender<TerminalEvent>,
+    shared: Arc<Mutex<Shared>>,
     size: Mutex<TermSize>,
 }
 
@@ -155,8 +199,7 @@ impl Terminal {
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
-        let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
-        let scrollback = Arc::new(Mutex::new(Scrollback::default()));
+        let shared = Arc::new(Mutex::new(Shared::default()));
         let child = Arc::new(Mutex::new(child));
 
         let terminal = Self {
@@ -164,12 +207,11 @@ impl Terminal {
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
             child: Arc::clone(&child),
-            scrollback: Arc::clone(&scrollback),
-            events: events.clone(),
+            shared: Arc::clone(&shared),
             size: Mutex::new(size),
         };
 
-        spawn_reader(reader, events, scrollback, child, terminal.id.clone());
+        spawn_reader(reader, shared, child, terminal.id.clone());
 
         Ok(terminal)
     }
@@ -183,13 +225,16 @@ impl Terminal {
     }
 
     /// Subscribe to output without catching up. Prefer [`Terminal::attach`].
-    pub fn subscribe(&self) -> broadcast::Receiver<TerminalEvent> {
-        self.events.subscribe()
+    ///
+    /// The receiver ends (`recv()` returns `None`) once the child has exited
+    /// and its `Exited` event has been consumed.
+    pub fn subscribe(&self) -> mpsc::Receiver<TerminalEvent> {
+        self.attach().1
     }
 
     /// Recent output, for a view that is attaching or reattaching.
     pub fn replay(&self) -> Bytes {
-        self.scrollback.lock().snapshot()
+        self.shared.lock().scrollback.snapshot()
     }
 
     /// Catch up and subscribe **atomically**.
@@ -200,13 +245,22 @@ impl Terminal {
     /// output, and because the window is microseconds wide it reproduces roughly
     /// never in development and constantly under load.
     ///
-    /// Taking the scrollback lock is what makes this atomic: the reader thread
+    /// Taking the shared lock is what makes this atomic: the reader thread
     /// holds that same lock across *both* appending to the scrollback and
-    /// broadcasting, so it can never be halfway between the two here.
-    pub fn attach(&self) -> (Bytes, broadcast::Receiver<TerminalEvent>) {
-        let scrollback = self.scrollback.lock();
-        let receiver = self.events.subscribe();
-        (scrollback.snapshot(), receiver)
+    /// delivering to subscribers, so it can never be halfway between the two
+    /// here. The flip side is that this call can wait — during a firehose with
+    /// a stalled consumer the reader parks *holding the lock*, which is the
+    /// flow control working as designed, not a hang.
+    pub fn attach(&self) -> (Bytes, mpsc::Receiver<TerminalEvent>) {
+        let mut shared = self.shared.lock();
+        let (tx, rx) = mpsc::channel(SUBSCRIBER_QUEUE);
+        if !shared.finished {
+            shared.subscribers.push(tx);
+        }
+        // When `finished`, the sender is dropped here and `rx` ends immediately
+        // after the replay — a view attaching to a dead terminal sees the last
+        // screen and a stream that is over, not one that never speaks.
+        (shared.scrollback.snapshot(), rx)
     }
 
     /// Send input to the child.
@@ -258,15 +312,15 @@ impl Terminal {
     }
 }
 
-/// Pump the PTY into the broadcast channel.
+/// Pump the PTY into the subscriber queues.
 ///
 /// The read is blocking, so this is a dedicated OS thread rather than a tokio
 /// task — parking a runtime worker on a blocking read would starve unrelated
-/// futures.
+/// futures. Being an OS thread is also what lets `blocking_send` below park
+/// legally when a subscriber's queue is full.
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
-    events: broadcast::Sender<TerminalEvent>,
-    scrollback: Arc<Mutex<Scrollback>>,
+    shared: Arc<Mutex<Shared>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     id: TerminalId,
 ) {
@@ -280,20 +334,27 @@ fn spawn_reader(
                     // EOF: the child closed the PTY.
                     Ok(0) => break,
                     Ok(n) => {
-                        let chunk = &buf[..n];
+                        // One allocation per chunk, shared by the scrollback and
+                        // every subscriber — `Bytes` clones are reference counts.
+                        let chunk = Bytes::copy_from_slice(&buf[..n]);
 
-                        // The scrollback lock is held across BOTH the append and
-                        // the broadcast. That is what lets `Terminal::attach`
-                        // catch up and subscribe atomically — released early, a
+                        // The shared lock is held across BOTH the append and the
+                        // delivery. That is what lets `Terminal::attach` catch up
+                        // and subscribe atomically — released early, a
                         // reattaching view could see this chunk twice or not at
                         // all. See the note on `attach`.
-                        let mut scrollback = scrollback.lock();
-                        scrollback.push(chunk);
-                        // A send error only means nobody is currently watching.
-                        // The terminal keeps running — that is the entire point
-                        // of a session surviving a closed view.
-                        let _ = events.send(TerminalEvent::Output(Bytes::copy_from_slice(chunk)));
-                        drop(scrollback);
+                        //
+                        // `blocking_send` parks this thread when a queue is full.
+                        // That stall *is* the flow control: the PTY stops being
+                        // read, its buffer fills, and the producer blocks — for a
+                        // remote program, through sshd and TCP's window — until
+                        // the slow consumer catches up. Nothing is dropped. A
+                        // subscriber whose receiver is gone is removed instead.
+                        let mut shared = shared.lock();
+                        shared.scrollback.push(chunk.clone());
+                        shared.subscribers.retain(|tx| {
+                            tx.blocking_send(TerminalEvent::Output(chunk.clone())).is_ok()
+                        });
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) => {
@@ -311,7 +372,13 @@ fn spawn_reader(
                 .map(|status| if status.success() { 0 } else { 1 })
                 .unwrap_or(-1);
 
-            let _ = events.send(TerminalEvent::Exited { code });
+            // Tell everyone, then drop the senders: a drained receiver ends
+            // rather than waiting forever on a terminal that will never speak.
+            let mut shared = shared.lock();
+            shared.finished = true;
+            for tx in shared.subscribers.drain(..) {
+                let _ = tx.blocking_send(TerminalEvent::Exited { code });
+            }
         })
         .expect("failed to spawn pty reader thread");
 }
@@ -452,7 +519,7 @@ mod tests {
 
         let caught_up = String::from_utf8_lossy(&replayed).into_owned();
         let mut streamed = String::new();
-        while let Ok(Ok(TerminalEvent::Output(chunk))) =
+        while let Ok(Some(TerminalEvent::Output(chunk))) =
             tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await
         {
             streamed.push_str(&String::from_utf8_lossy(&chunk));
@@ -492,10 +559,63 @@ mod tests {
     fn scrollback_is_bounded() {
         let mut sb = Scrollback::default();
         for _ in 0..64 {
-            sb.push(&vec![b'x'; 16 * 1024]);
+            sb.push(Bytes::from(vec![b'x'; 16 * 1024]));
         }
         // A terminal streaming logs for hours must not grow without limit.
         assert!(sb.snapshot().len() <= SCROLLBACK_BYTES, "scrollback grew past its cap");
+    }
+
+    #[test]
+    fn a_slow_subscriber_stalls_the_reader_instead_of_losing_output() {
+        // Emit far more than one subscriber queue (64 chunks) can hold, while
+        // the subscriber deliberately reads nothing. Under the old broadcast
+        // fan-out this dropped chunks; now the reader must park and every byte
+        // must still arrive once the subscriber starts draining.
+        const LINES: usize = 2000;
+
+        let term = Terminal::spawn(
+            &local("sh", &["-c", &format!("i=1; while [ $i -le {LINES} ]; do echo LINE-$i; i=$((i+1)); done")]),
+            None,
+            TermSize::default(),
+        )
+        .unwrap();
+
+        let (replayed, mut rx) = term.attach();
+
+        // Let the child race ahead into a full queue before draining anything.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let mut seen = String::from_utf8_lossy(&replayed).into_owned();
+        while let Some(event) = rx.blocking_recv() {
+            match event {
+                TerminalEvent::Output(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
+                TerminalEvent::Exited { .. } => break,
+            }
+        }
+
+        for i in [1, LINES / 2, LINES] {
+            let needle = format!("LINE-{i}\r\n");
+            assert!(seen.contains(&needle), "missing {needle:?} — output was dropped");
+        }
+    }
+
+    #[test]
+    fn attaching_after_exit_ends_the_stream_rather_than_hanging() {
+        let term =
+            Terminal::spawn(&local("sh", &["-c", "echo done"]), None, TermSize::default()).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while term.exit_code().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // Give the reader thread a beat to observe EOF and finish the registry.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let (replayed, mut rx) = term.attach();
+        assert!(String::from_utf8_lossy(&replayed).contains("done"));
+        // The receiver must end, not park a caller forever on a dead terminal.
+        assert!(rx.blocking_recv().is_none());
     }
 
     #[test]
