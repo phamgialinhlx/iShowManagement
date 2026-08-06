@@ -1,3 +1,5 @@
+import type { PaneRef, SessionV3 } from "./workspace-model";
+
 /**
  * Which session belongs in which cell, for an NxN grid.
  *
@@ -87,6 +89,45 @@ export function warmSessions<S extends { id: string }>(
     if (!session) continue;
     out.push(session);
     if (out.length >= keep) break;
+  }
+  return out;
+}
+
+/**
+ * Which **pane** belongs in which cell — the pane-manager generalisation of
+ * `gridLayout` (a pane is a session, a host panel, or a project's files).
+ *
+ * The rules match `gridLayout`: explicit panes win, empty cells auto-fill from
+ * sessions not already shown, **in stable rail order**, and no session shows
+ * twice.
+ *
+ * The rail-order part is load-bearing and was once wrong. A grid must not
+ * reshuffle when you merely click a pane to focus it — clicking calls
+ * `activate()`, which changes `activeSession`, and an earlier version ordered
+ * the auto-fill *active-first*. So every click yanked the clicked pane to the
+ * top-left and displaced the one that was there, and a restart re-derived
+ * positions from `activeSession` rather than from anything the operator saw.
+ * Only **focus mode** (`grid === 1`) is active-first, because its single cell
+ * must *be* the active session; a grid is stable regardless of what is active.
+ */
+export function layoutPanes(
+  panes: readonly (PaneRef | null)[],
+  sessions: readonly Pick<SessionV3, "id">[],
+  activeId: string | null,
+  grid: number,
+): (PaneRef | null)[] {
+  const cells = Math.max(0, grid * grid);
+  const out: (PaneRef | null)[] = Array.from({ length: cells }, (_, i) => panes[i] ?? null);
+
+  const shown = new Set(out.flatMap((p) => (p && p.kind === "session" ? [p.id] : [])));
+  const order =
+    grid === 1 && activeId
+      ? [activeId, ...sessions.map((s) => s.id).filter((id) => id !== activeId)]
+      : sessions.map((s) => s.id);
+  const spare = order.filter((id) => !shown.has(id) && sessions.some((s) => s.id === id));
+
+  for (let i = 0; i < cells && spare.length; i += 1) {
+    if (!out[i]) out[i] = { kind: "session", id: spare.shift()! };
   }
   return out;
 }

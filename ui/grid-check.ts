@@ -1,4 +1,5 @@
-import { gridLayout } from "./src/lib/grid";
+import { gridLayout, layoutPanes } from "./src/lib/grid";
+import type { PaneRef } from "./src/lib/workspace-model";
 
 /**
  * Checks for the grid's cell assignment.
@@ -89,5 +90,45 @@ check(
 // ---- degenerate inputs
 check("no sessions gives empty cells", ids(gridLayout([], ["a"], 2)).every((x) => x === null));
 check("a 1x1 grid has one cell", gridLayout(eight, [], 1).length === 1);
+
+// ---- layoutPanes: focusing a pane must never reshuffle a grid (the bug where
+//      clicking the bottom-right cell swapped panes and restarts jumped around)
+const pcell = (cells: (PaneRef | null)[]) =>
+  cells.map((c) => (c ? (c.kind === "session" ? c.id : c.kind) : null));
+
+check(
+  "a 2x2 pane layout is independent of the active session",
+  JSON.stringify(pcell(layoutPanes([], eight, "a", 2))) ===
+    JSON.stringify(pcell(layoutPanes([], eight, "d", 2))),
+);
+check(
+  "clicking (activating) the bottom-right pane does not move it",
+  (() => {
+    const before = layoutPanes([], eight, "a", 2);
+    const clicked = before[3];
+    const active = clicked && clicked.kind === "session" ? clicked.id : null;
+    return JSON.stringify(pcell(before)) === JSON.stringify(pcell(layoutPanes([], eight, active, 2)));
+  })(),
+);
+check(
+  "focus mode (1x1) shows the active session in its one cell",
+  (() => {
+    const c = layoutPanes([], eight, "c", 1)[0];
+    return !!c && c.kind === "session" && c.id === "c";
+  })(),
+);
+check(
+  "an explicit host pane holds its cell; the rest auto-fill in rail order",
+  JSON.stringify(pcell(layoutPanes([{ kind: "host", serverId: "s1" }], eight, "d", 2))) ===
+    JSON.stringify(["host", "a", "b", "c"]),
+);
+check(
+  "layoutPanes never shows a session twice",
+  (() => {
+    const cells = layoutPanes([{ kind: "session", id: "h" }], eight, null, 2);
+    const sids = cells.flatMap((c) => (c && c.kind === "session" ? [c.id] : []));
+    return new Set(sids).size === sids.length && sids.includes("h");
+  })(),
+);
 
 console.log(failures === 0 ? "\nall grid checks passed" : `\n${failures} grid check(s) FAILED`);

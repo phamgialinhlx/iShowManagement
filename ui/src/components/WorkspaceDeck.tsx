@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 
 import { useWorkspace } from "../lib/workspace";
+import { layoutPanes } from "../lib/grid";
 import { reattachName, type PaneRef, type SessionV3 } from "../lib/workspace-model";
 import { ClaudeSessionPane } from "./ClaudeSessionPane";
 import { TerminalView } from "./Terminal";
@@ -17,35 +18,6 @@ import { FilesPane } from "./FilesPane";
  * Focus mode (1×1) shows a single tile; 2×2 / 3×3 / 4×4 tile several. Clicking a
  * tile focuses it, so the rail's "open into the focused tile" verb has a target.
  */
-
-/**
- * Resolve the grid cells from the explicit pane layout, auto-filling empties.
- *
- * Explicit panes win (the operator placed them). Empty cells then auto-fill with
- * sessions not already shown — active first — so a fresh grid is useful with no
- * arranging, and `openSession` into cell 0 in focus mode Just Works. Mirrors
- * `gridLayout`'s rules, generalised from sessions to panes.
- */
-function layoutPanes(
-  panes: readonly (PaneRef | null)[],
-  sessions: readonly SessionV3[],
-  activeId: string | null,
-  grid: number,
-): (PaneRef | null)[] {
-  const cells = Math.max(0, grid * grid);
-  const out: (PaneRef | null)[] = Array.from({ length: cells }, (_, i) => panes[i] ?? null);
-
-  const shown = new Set(out.flatMap((p) => (p && p.kind === "session" ? [p.id] : [])));
-  const order = activeId
-    ? [activeId, ...sessions.map((s) => s.id).filter((id) => id !== activeId)]
-    : sessions.map((s) => s.id);
-  const spare = order.filter((id) => !shown.has(id) && sessions.some((s) => s.id === id));
-
-  for (let i = 0; i < cells && spare.length; i += 1) {
-    if (!out[i]) out[i] = { kind: "session", id: spare.shift()! };
-  }
-  return out;
-}
 
 function paneKey(ref: PaneRef | null, index: number): string {
   if (!ref) return `empty-${index}`;
