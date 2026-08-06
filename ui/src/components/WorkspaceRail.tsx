@@ -195,6 +195,16 @@ function PlusIcon() {
   );
 }
 
+/** Folder glyph — the explicit "open this project's files" affordance, because
+ *  the uppercase label reads as a section header, not a button. Rule 3. */
+function FolderIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
+      <path d="M3 6v13h18V8h-9l-2-2H3z" />
+    </svg>
+  );
+}
+
 function SessionRow({
   session,
   active,
@@ -341,9 +351,8 @@ function ProjectNode({
 
   return (
     <div>
-      {/* Group header — the "▾ TMUX 5" band: caret, an uppercase faint label, the
-          session count, and the create verbs on hover (where the reference shows
-          its refresh — but +/✦ are the actions that actually belong here). */}
+      {/* Group header — the "▾ TMUX" band: caret, an uppercase label, then the
+          verbs: open files (folder), new terminal (+), new Claude (✦). */}
       <div className="group/prj flex items-center gap-1.5 py-[5px] pl-4 pr-2">
         <button type="button" className="shrink-0" onClick={onToggle} aria-expanded={!folded} title={project.folder}>
           <Chevron folded={folded} />
@@ -357,9 +366,16 @@ function ProjectNode({
         >
           {project.label}
         </button>
-        <span className="data shrink-0 text-[11px] tabular-nums" style={{ color: "var(--text-faint)" }}>
-          {mine.length}
-        </span>
+        <button
+          type="button"
+          onClick={() => openFiles(project.id)}
+          aria-label={`Open files in ${project.label}`}
+          title="Open files"
+          className="shrink-0 px-1 opacity-70 hover:opacity-100"
+          style={{ color: "var(--text-soft)" }}
+        >
+          <FolderIcon />
+        </button>
         <button
           type="button"
           onClick={() => add("terminal")}
@@ -453,8 +469,7 @@ function ServerNode({
 
   return (
     <div className="mb-1">
-      {/* Server card — accent bar, status dot, bold name, session count; the
-          HOST / + verbs surface on hover (the reference keeps the card clean). */}
+      {/* Server card — accent bar, status dot, bold name; the HOST / + verbs. */}
       <div
         className="group/srv relative mx-1.5 mt-1.5 flex items-center gap-2 py-[7px] pl-2.5 pr-2"
         style={{
@@ -475,9 +490,6 @@ function ServerNode({
         >
           {serverLabel(server)}
         </button>
-        <span className="data shrink-0 text-[11px] tabular-nums" style={{ color: "var(--text-faint)" }}>
-          {mine.length}
-        </span>
         <button
           type="button"
           className="chip shrink-0"
