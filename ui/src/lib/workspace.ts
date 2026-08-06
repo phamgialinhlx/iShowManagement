@@ -36,6 +36,7 @@ import {
   removeProjectCore as rRemoveProjectCore,
   removeServerCore as rRemoveServerCore,
   removeSession as rRemoveSession,
+  detachSessionCore as rDetachSessionCore,
   type Core,
 } from "./workspace-reducers.ts";
 
@@ -118,6 +119,7 @@ type State = Core & {
     >,
   ) => string;
   removeSession: (id: string) => void;
+  detachSession: (id: string) => void;
   removeProject: (id: ProjectId) => void;
   removeServer: (id: ServerId) => void;
 
@@ -329,6 +331,19 @@ export const useWorkspace = create<State>((set, get) => ({
     const { [id]: _r, ...runtime } = state.runtime;
     const { [id]: _l, ...live } = state.live;
     set({ ...ws, runtime, live });
+    schedulePersist(get);
+  },
+
+  detachSession: (id) => {
+    const state = get();
+    const session = state.sessions.find((s) => s.id === id);
+    if (!session) return;
+    // Detach = close the view, leave the process running under the agent. No kill.
+    set((s) => {
+      const ws = rDetachSessionCore(coreOf(s), id);
+      const { [id]: _l, ...live } = s.live;
+      return { ...ws, live };
+    });
     schedulePersist(get);
   },
 
