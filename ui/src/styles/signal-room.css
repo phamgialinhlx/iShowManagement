@@ -144,6 +144,20 @@ body,
   zoom: var(--ui-zoom, 1);
 }
 
+/*
+ * Terminal canvases opt back out of the interface scale.
+ *
+ * `zoom` scales a canvas as a *bitmap*: xterm rasterises glyphs at the host's
+ * pre-zoom size and the compositor stretches the result, so at any scale but
+ * 100% every terminal was blurry. The hosts undo the scale here — the product
+ * with `#root` is exactly 1, so canvas pixels map 1:1 to device pixels — and
+ * the font size is multiplied back up instead (`termFontSize` in
+ * lib/terminal-theme.ts), which is the half xterm can do sharply.
+ */
+.term-device-px {
+  zoom: var(--ui-zoom-inv, 1);
+}
+
 body {
   background: transparent; /* the native window is translucent; see atmosphere */
   color: var(--text);

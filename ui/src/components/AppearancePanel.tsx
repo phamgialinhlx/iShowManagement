@@ -268,7 +268,14 @@ export function applyAppearance(a: Appearance = load()) {
   // becomes hard to put back. The workbench is visible while Settings is open,
   // so the effect is watched there, on the thing being configured, rather than
   // on the instrument doing the configuring.
-  root.style.setProperty("--ui-zoom", isSettingsWindow ? "1" : String(zoom(a.scale)));
+  const scale = isSettingsWindow ? 1 : zoom(a.scale);
+  root.style.setProperty("--ui-zoom", String(scale));
+  // The inverse, pre-computed. The terminal hosts re-zoom by this so their
+  // canvases rasterise at device resolution (see `.term-device-px` in
+  // signal-room.css) — written from here rather than derived in CSS because
+  // `calc()` division by a custom property is not something every engine this
+  // app ships on resolves for `zoom`.
+  root.style.setProperty("--ui-zoom-inv", String(1 / scale));
 
   // The typefaces. `applyFonts` writes `--font-display`/`--font-mono` and fires
   // the theme event so the terminals and Monaco re-read (they cache the family

@@ -101,3 +101,24 @@ export function gpuRendering(): boolean {
 export function setGpuRendering(on: boolean): void {
   localStorage.setItem(GPU_KEY, on ? "1" : "0");
 }
+
+/**
+ * The interface scale in force — what AppearancePanel wrote to `--ui-zoom`.
+ *
+ * The terminal hosts counter-zoom themselves (`.term-device-px` in
+ * signal-room.css) so the xterm canvas rasterises at device resolution instead
+ * of being scaled up as a bitmap, which blurred every glyph at any scale but
+ * 100%. The font size must then be multiplied back, or raising the interface
+ * scale would visibly *shrink* every terminal.
+ */
+export function uiZoom(): number {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-zoom");
+  const z = Number.parseFloat(raw);
+  return Number.isFinite(z) && z > 0 ? z : 1;
+}
+
+/** A terminal font size compensated for the counter-zoom, in whole pixels —
+ *  a fractional size defeats the point by landing glyphs between pixels. */
+export function termFontSize(base: number): number {
+  return Math.max(8, Math.round(base * uiZoom()));
+}
