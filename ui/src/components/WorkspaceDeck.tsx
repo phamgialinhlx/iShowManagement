@@ -132,7 +132,7 @@ export function WorkspaceDeck() {
         {cells.map((pane, index) => (
           <div
             key={paneKey(pane, index)}
-            className="relative flex min-h-0 flex-col overflow-hidden"
+            className="panel relative flex min-h-0 flex-col overflow-hidden"
             onMouseDownCapture={() => {
               focusCell(index);
               if (pane?.kind === "session") activate(pane.id);
