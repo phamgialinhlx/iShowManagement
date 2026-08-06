@@ -7,14 +7,17 @@ use rmux_transport::local::LocalTarget;
 use tokio::sync::OnceCell;
 
 // This is an integration test in its own crate, so the store comes from the
-// `rmux_lib` library crate. The `TerminalStore` / `ClaudeStore` / `AgentStore`
-// types are `pub`; the accessors must be `pub` too for the test to reach them.
+// `rmux_lib` library crate. The store types are `pub`; the accessors must be
+// `pub` too for the test to reach them.
 use rmux_lib::agent::AgentStore;
 use rmux_lib::claude::ClaudeStore;
+use rmux_lib::files::FsStore;
+use rmux_lib::metrics::MetricsStore;
 use rmux_lib::terminal::TerminalStore;
 
-// LocalTarget is a cheap real target that needs no network to construct, and
-// evicting it proves the map entry is gone without an SSH round trip.
+// LocalTarget / LocalFs are cheap real targets that need no network to
+// construct, and evicting them proves the map entry is gone without an SSH
+// round trip.
 
 #[test]
 fn terminal_evict_target_removes_entry() {
@@ -49,4 +52,26 @@ fn agent_forget_removes_entry() {
     store.insert_for_test(TargetId::Local, Arc::new(OnceCell::new()));
     assert!(store.forget(&id));
     assert!(!store.forget(&id));
+}
+
+#[test]
+fn fs_evict_target_removes_entry() {
+    let store = FsStore::default();
+    let id = TargetId::Local;
+    assert!(!store.evict_target(&id));
+
+    store.insert_for_test(TargetId::Local, Arc::new(rmux_fs::LocalFs::new()));
+    assert!(store.evict_target(&id));
+    assert!(!store.evict_target(&id));
+}
+
+#[tokio::test]
+async fn metrics_evict_target_removes_entry() {
+    let store = MetricsStore::default();
+    let id = TargetId::Local;
+    assert!(!store.evict_target(&id).await);
+
+    store.insert_for_test(id.clone(), Arc::new(LocalTarget::new())).await;
+    assert!(store.evict_target(&id).await);
+    assert!(!store.evict_target(&id).await);
 }

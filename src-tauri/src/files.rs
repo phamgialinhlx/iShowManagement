@@ -23,6 +23,18 @@ pub struct FsStore {
     filesystems: Mutex<HashMap<TargetId, Arc<dyn FileSystem>>>,
 }
 
+impl FsStore {
+    /// Drop the cached filesystem for a target so its SSH connection can close.
+    pub fn evict_target(&self, id: &TargetId) -> bool {
+        self.filesystems.lock().remove(id).is_some()
+    }
+
+    /// Test seam: insert a filesystem without going through `fs_list`.
+    pub fn insert_for_test(&self, id: TargetId, fs: Arc<dyn rmux_fs::FileSystem>) {
+        self.filesystems.lock().insert(id, fs);
+    }
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }

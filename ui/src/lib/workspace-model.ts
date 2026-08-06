@@ -45,6 +45,8 @@ export type Project = {
   label: string;
   /** Latches once the operator renames it, so `label` stops tracking basename. */
   renamed?: boolean;
+  /** Synthetic grouping for adopted running sessions — not a real folder. */
+  running?: boolean;
 };
 
 export type SessionKind = "terminal" | "claude";
@@ -331,4 +333,12 @@ export function makeServer(target: TargetRef): Server {
  *  same folder returns an equal id and dedups rather than double-creating. */
 export function makeProject(server: ServerId, folder: string, label?: string): Project {
   return { id: projectId(server, folder), serverId: server, folder, label: label ?? basename(folder) };
+}
+
+/** The synthetic "running" project adopted sessions hang under — a grouping
+ *  key, not a real folder. Its folder is the readable home string `~`, which
+ *  is a valid cwd for a terminal and the FS root FileTree already resolves
+ *  (FileTree falls back to home when the root is empty/unresolvable). */
+export function runningProjectId(server: ServerId): ProjectId {
+  return projectId(server, "~");
 }
