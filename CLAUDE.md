@@ -610,6 +610,35 @@ sees, and nothing anywhere says why**.
 - **A pane's sub-view stays local to the pane**; the shortcut is a `rmux:set-view` event
   addressed by session id. Putting it in the persisted workspace would restore someone into a
   transcript they closed days ago, and an unaddressed one would switch all sixteen tiles.
+- **The defaults are per-platform, because `Mod` unifies the modifier and not its
+  consequence.** This was assumed to follow from `Mod` and does not, and it is what made the
+  bubble-phase rule above correct on macOS and wrong everywhere else. ⌘ is free in a terminal —
+  xterm encodes nothing for it — so "the terminal acts first, we take only what it does not
+  use" costs nothing there. Off macOS `Mod` is **Ctrl**, which is exactly what a terminal
+  claims, and `preventDefault` on the bubble is far too late: xterm wrote to the pty from its
+  own handler frames earlier. A colliding default does not lose, it fires **both**.
+  Measured against a real xterm, **eight of the ten macOS defaults** put bytes on the wire when
+  `Mod` is Ctrl: `Mod+3` → `\e` (cancels Claude's prompt), `Mod+4` → `\x1c` (the quit
+  character), `Mod+T` → `\x14`, `Mod+P` → `\x10` (previous command in every shell), and the
+  four `Mod+Alt+Arrow` → `\e[1;7A..D`. Off macOS they are `Mod+Shift+…`, the Windows/Linux
+  terminal convention, measured free.
+- **Off macOS the grid moves on `H/J/K/L`, because no arrow chord is free.** xterm encodes
+  *every* modifier combination of an arrow — `\e[1;3D`, `\e[1;4D`, `\e[1;6D`, `\e[1;7D` were
+  all measured taken — so there is nothing to pick. Letters are the only free directional set.
+- **`reachesTerminal` marks a rebind that collides (REACHES SHELL); it is a model of xterm's
+  encoder and is pinned against the real one.** A model can drift on an xterm upgrade, silently
+  and in the direction that matters — a false all-clear costs a key in every terminal forever,
+  while a false warning costs one chord. So it is deliberately conservative, and
+  `shortcut-terminal-check.ts` asserts it never says "free" about a chord a real xterm takes,
+  across 114 bindable chords. Two gaps surfaced exactly that way: **`Ctrl+Shift+Enter` still
+  sends `\r` and `Ctrl+Shift+Tab` still sends `\e[Z`**, so Shift is not a blanket escape hatch —
+  it lifts a *letter* out of the control-code table and does nothing for a key that has its own
+  encoding.
+- **The marker is shown off macOS only.** The one chord it would flag there is `Mod+Alt+Arrow`,
+  four shipped defaults, whose behaviour turns on xterm's `macOptionIsMeta` and has **not** been
+  measured. An unverified warning over defaults that platform ships and tests teaches the
+  operator to ignore the marker, which costs more than the marker is worth. Worth measuring on
+  a Mac; if it collides there too, the macOS defaults need the same treatment.
 
 ## Searching a project
 
