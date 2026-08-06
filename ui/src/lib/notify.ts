@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { isTauri } from "./api";
+import { raiseAlert } from "./alerts";
 import { useWorkspace } from "./workspace";
 import type { SessionStatus } from "./workspace-model";
 
@@ -49,6 +50,72 @@ export function quietWhenWatching(): boolean {
 
 export function setQuietWhenWatching(quiet: boolean): void {
   localStorage.setItem(QUIET_KEY, quiet ? "1" : "0");
+}
+
+
+const ALERT_KEY = "rmux.notify.alert";
+const SOUND_KEY = "rmux.notify.sound";
+
+/**
+ * Whether an unwatched session gets an **alert** rather than only a
+ * notification.
+ *
+ * A macOS notification is a banner that slides away on its own. That is right
+ * for "this finished"; it is not enough for the case rmux exists to serve —
+ * several sessions running at once, and one of them stopping to ask a question
+ * that blocks everything behind it. A banner missed while looking at another
+ * pane leaves that work stalled with nothing on screen saying so.
+ *
+ * **On by default**, and only ever for a session you are *not* looking at. For
+ * the one on screen there is nothing to alert about: you can see it.
+ */
+export function alertWhenUnwatched(): boolean {
+  return localStorage.getItem(ALERT_KEY) !== "0";
+}
+
+export function setAlertWhenUnwatched(on: boolean): void {
+  try {
+    localStorage.setItem(ALERT_KEY, on ? "1" : "0");
+  } catch {
+    // Losing the preference falls back to on, which is the safe direction:
+    // an alert too many is noticed, an alert too few is missed work.
+  }
+}
+
+/** Whether the alert is accompanied by a sound. On by default. */
+export function alertSound(): boolean {
+  return localStorage.getItem(SOUND_KEY) !== "0";
+}
+
+export function setAlertSound(on: boolean): void {
+  try {
+    localStorage.setItem(SOUND_KEY, on ? "1" : "0");
+  } catch {
+    /* see above */
+  }
+}
+
+/**
+ * Play the alert tone.
+ *
+ * **One `Audio` per call, not one reused.** Two sessions can stop within the
+ * same tick, and restarting a shared element cuts the first tone off — so the
+ * second alert makes the first one *quieter*, which is backwards.
+ *
+ * Every failure is swallowed. A browser may refuse playback until the page has
+ * been interacted with, the file may be missing from a bundle, the machine may
+ * have no output device. None of those are worth an error in front of someone
+ * who is being told something else needs them.
+ */
+export function playAlertSound(): void {
+  if (!alertSound()) return;
+  try {
+    const audio = new Audio("/sounds/edex-granted.wav");
+    audio.volume = 0.5;
+    void audio.play().catch(() => {});
+  } catch {
+    /* not worth surfacing */
+  }
 }
 
 /** What each session was doing last time we looked. */
@@ -115,6 +182,20 @@ export function startNotifications(): void {
       const where = state.serverOf(session.id)?.target.host ?? "this machine";
       const message = describe(session.name, where, status);
       if (!message) continue;
+
+      // "Unwatched" is both halves: the window is not frontmost, or it is but
+      // this session is not the one on screen. Either way the operator is not
+      // looking at the thing that needs them.
+      const unwatched = !watching || session.id !== active;
+      if (unwatched && alertWhenUnwatched()) {
+        raiseAlert({
+          sessionId: session.id,
+          title: message.title,
+          body: message.body,
+          asking,
+        });
+        playAlertSound();
+      }
 
       void invoke("notify", {
         session: session.id,
