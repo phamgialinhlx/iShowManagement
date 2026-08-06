@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { api } from "../lib/api";
 import { useWorkspace } from "../lib/workspace";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
+import type { RunningSession } from "../lib/api";
 
 /**
  * The session rail, v3 — a **Server → Project → Session** tree.
@@ -745,6 +746,18 @@ function ServerNode({
   const [menu, setMenu] = useState<RailMenuTarget | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [attaching, setAttaching] = useState(false);
+  const [sessions, setSessions] = useState<RunningSession[]>([]);
+  const [loading, setLoading] = useState(false);
+  const adoptServerSession = useWorkspace((s) => s.adoptServerSession);
+
+  useEffect(() => {
+    if (!attaching) return;
+    setLoading(true);
+    api.serverSessions(server.target)
+      .then(setSessions)
+      .catch(() => setSessions([]))
+      .finally(() => setLoading(false));
+  }, [attaching, server.target]);
 
   return (
     <div className="mb-1">
@@ -843,10 +856,38 @@ function ServerNode({
 
       {/* Task 6: the attach-to-running picker consumes `attaching`. */}
       {attaching && (
-        <div className="fixed inset-0 z-[70]" onClick={() => setAttaching(false)}>
-          <div className="micro absolute left-2 top-2 rounded p-2" style={{ background: "var(--panel)" }}>
-            Attach picker (Task 6)
+        <div className="mx-1.5 mb-1 rounded-none border p-2" style={{ borderColor: "var(--border)" }}>
+          <div className="flex items-center justify-between px-1 pb-1">
+            <span className="micro">RUNNING SESSIONS ON HOST</span>
+            <button type="button" className="chip" onClick={() => setAttaching(false)}>
+              close
+            </button>
           </div>
+          {sessions.length === 0 && !loading ? (
+            <p className="micro px-1" style={{ color: "var(--text-faint)" }}>
+              none running
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-px">
+              {sessions.map((s) => (
+                <li key={s.name}>
+                  <button
+                    type="button"
+                    className="data w-full px-1 py-[4px] text-left text-[11px]"
+                    onClick={() => {
+                      adoptServerSession(server.id, s.name, s.name.startsWith("claude-") ? "claude" : "terminal");
+                      setAttaching(false);
+                    }}
+                  >
+                    <span className="truncate">{s.name}</span>
+                    <span className="micro" style={{ color: "var(--text-faint)" }}>
+                      {s.attached ? " · attached" : " · idle"} · {s.ageSeconds}s
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

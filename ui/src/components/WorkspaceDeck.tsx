@@ -42,7 +42,7 @@ function SessionPane({ session }: { session: SessionV3 }) {
     <TerminalView
       target={target}
       cwd={project?.folder}
-      session={reattachName(session)}
+      session={session.hostName ?? reattachName(session)}
       ptyId={live}
       onOpened={(id) => setLive(session.id, id)}
       onExit={() => clearLive(session.id)}
