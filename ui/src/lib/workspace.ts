@@ -229,6 +229,10 @@ const coreOf = (s: State): Core => ({
   activeSession: s.activeSession,
 });
 
+/** The cell a rail "open" should fill: cell 0 in focus mode (the only visible
+ *  one), else the focused cell, else cell 0. */
+const openCell = (s: State): number => (s.grid === 1 ? 0 : (s.focusedCell ?? 0));
+
 export const useWorkspace = create<State>((set, get) => ({
   servers: restored.servers,
   projects: restored.projects,
@@ -459,12 +463,15 @@ export const useWorkspace = create<State>((set, get) => ({
     set(rClosePane(coreOf(get()), index));
     schedulePersist(get);
   },
+  // Focus mode (grid 1) only ever *shows* cell 0, so opening must target it —
+  // a stale `focusedCell` left from a grid interaction would otherwise send the
+  // pane to a hidden cell and the view would appear not to change.
   openSession: (id) => {
     get().activate(id);
-    get().assignPane(get().focusedCell ?? 0, { kind: "session", id });
+    get().assignPane(openCell(get()), { kind: "session", id });
   },
-  openHost: (serverId) => get().assignPane(get().focusedCell ?? 0, { kind: "host", serverId }),
-  openFiles: (projectId) => get().assignPane(get().focusedCell ?? 0, { kind: "files", projectId }),
+  openHost: (serverId) => get().assignPane(openCell(get()), { kind: "host", serverId }),
+  openFiles: (projectId) => get().assignPane(openCell(get()), { kind: "files", projectId }),
 
   // ── runtime handles ──────────────────────────────────────────────────────
   setLive: (id, handle) => set((s) => ({ live: { ...s.live, [id]: handle } })),

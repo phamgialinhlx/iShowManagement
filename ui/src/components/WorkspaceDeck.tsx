@@ -135,14 +135,23 @@ export function WorkspaceDeck() {
     );
   }
 
-  // Focus mode: the single effective pane for cell 0. Remounting on switch
-  // reattaches (scrollback replayed), so nothing is lost. TODO: a warm set (as
-  // the old deck kept) to make focus-mode switches instant rather than a reattach.
+  // Focus mode: the single effective pane for cell 0. The `key` forces a
+  // remount when the pane changes — without it, switching between two Claude
+  // sessions updates in place and the xterm stays bound to the first one (the
+  // pane looked "stuck"). Remounting reattaches (scrollback replayed), so
+  // nothing is lost. The wrapper carries `flex-1` because this parent is a flex
+  // *row*: without it the pane sizes to its content width, not the deck.
+  // TODO: a warm set (as the old deck kept) to make switches instant.
   const only = cells[0] ?? null;
   return (
     <div className="flex min-h-0 flex-1">
       {only ? (
-        <Pane pane={only} />
+        <div
+          key={paneKey(only, 0)}
+          className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        >
+          <Pane pane={only} />
+        </div>
       ) : (
         <div className="grid h-full flex-1 place-items-center">
           <span className="micro" style={{ color: "var(--text-faint)" }}>
