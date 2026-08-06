@@ -310,11 +310,3 @@ export function makeServer(target: TargetRef): Server {
 export function makeProject(server: ServerId, folder: string, label?: string): Project {
   return { id: projectId(server, folder), serverId: server, folder, label: label ?? basename(folder) };
 }
-
-/** The synthetic "running" project adopted sessions hang under — a grouping
- *  key, not a real folder. Its folder is the readable home string `~`, which
- *  is a valid cwd for a terminal and the FS root FileTree already resolves
- *  (FileTree falls back to home when the root is empty/unresolvable). */
-export function runningProjectId(server: ServerId): ProjectId {
-  return projectId(server, "~");
-}

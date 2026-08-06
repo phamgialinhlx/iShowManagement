@@ -343,9 +343,9 @@ export const useWorkspace = create<State>((set, get) => ({
     }
     const projectId = get().addRunningProject(serverId);
     const newId = get().addSession(projectId, kind, {
-      name: kind === "claude" ? id : name,
+      name: id,            // the display/bare id; reattach -> claude-<id>
       renamed: true,
-      hostName: name,
+      hostName: name,      // the exact daemon-held name, used verbatim at attach/kill
     });
     get().openSession(newId);
   },
