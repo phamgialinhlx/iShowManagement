@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
 import { api } from "../lib/api";
+import { chosenBrowser, detectBrowsers } from "../lib/browsers";
 import { useWorkspace } from "../lib/workspace";
 import { onScreenSessions } from "../lib/grid";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
@@ -477,31 +478,57 @@ function ServerNode({
   const allSessions = useWorkspace((s) => s.sessions);
   const runtime = useWorkspace((s) => s.runtime);
   const openHost = useWorkspace((s) => s.openHost);
+  const focusHostSection = useWorkspace((s) => s.focusHostSection);
+  const openFiles = useWorkspace((s) => s.openFiles);
   const createProject = useWorkspace((s) => s.createProject);
   const addSession = useWorkspace((s) => s.addSession);
   const openSession = useWorkspace((s) => s.openSession);
 
-  // meowork's "+ shell": a terminal/Claude straight off the server row, no
-  // folder picker. First use creates (or reuses — project ids derive from the
-  // folder) a "home" project at the operator's home directory. The home is
-  // resolved over the connection (`fs_home`), never spelled "~"/"$HOME" — a
-  // quoted "~" becomes a literal directory (CLAUDE.md).
-  const [quick, setQuick] = useState<"terminal" | "claude" | null>(null);
+  // meowork's verb row: everything a server offers, spelled out under its name.
+  // The quick verbs (`+ sh`, `+ claude`, `files`) need no folder picker — first
+  // use creates (or reuses — project ids derive from the folder) a "home"
+  // project at the operator's home directory. The home is resolved over the
+  // connection (`fs_home`), never spelled "~"/"$HOME" — a quoted "~" becomes a
+  // literal directory (CLAUDE.md).
+  type Quick = "terminal" | "claude" | "files" | "www";
+  const [quick, setQuick] = useState<Quick | null>(null);
   const [quickError, setQuickError] = useState<string | null>(null);
-  const quickAdd = async (kind: "terminal" | "claude") => {
+  const run = async (kind: Quick, work: () => Promise<void>) => {
     if (quick) return;
     setQuick(kind);
     setQuickError(null);
     try {
-      const home = await api.fsHome(server.target);
-      const projectId = createProject(server.id, home, "home");
-      openSession(addSession(projectId, kind));
+      await work();
     } catch (e) {
       setQuickError(e instanceof Error ? e.message : String(e));
     } finally {
       setQuick(null);
     }
   };
+  const homeProject = async () => {
+    const home = await api.fsHome(server.target);
+    return createProject(server.id, home, "home");
+  };
+  const quickAdd = (kind: "terminal" | "claude") =>
+    run(kind, async () => openSession(addSession(await homeProject(), kind)));
+  const quickFiles = () => run("files", async () => openFiles(await homeProject()));
+  // The proxied browser: one click starts (or reuses) the SOCKS proxy and opens
+  // the remembered Chromium through it. The chip only exists when a browser
+  // does — absent, not disabled (CLAUDE.md).
+  const quickWww = () =>
+    run("www", async () => {
+      const pick = chosenBrowser(await detectBrowsers());
+      if (!pick) throw new Error("no Chromium-family browser found on this machine");
+      await api.browserOpen(server.target, pick.bin);
+    });
+  const [hasBrowser, setHasBrowser] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void detectBrowsers().then((list) => !cancelled && setHasBrowser(list.length > 0));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const projectIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
   const mine = useMemo(
@@ -546,25 +573,6 @@ function ServerNode({
         </button>
         <button
           type="button"
-          className="chip shrink-0"
-          onClick={() => void quickAdd("terminal")}
-          disabled={quick !== null}
-          title="New shell in your home folder"
-        >
-          {quick === "terminal" ? "…" : "+ sh"}
-        </button>
-        <button
-          type="button"
-          onClick={() => void quickAdd("claude")}
-          disabled={quick !== null}
-          aria-label={`New Claude session in your home folder on ${serverLabel(server)}`}
-          title="New Claude session in your home folder"
-          className="shrink-0 px-1 opacity-70 hover:opacity-100"
-        >
-          {quick === "claude" ? <span className="micro">…</span> : <ClaudeMark />}
-        </button>
-        <button
-          type="button"
           onClick={() => onNewProject(server.id)}
           aria-label={`New project on ${serverLabel(server)}`}
           title="Add a project (folder) on this server"
@@ -574,6 +582,67 @@ function ServerNode({
           <PlusIcon />
         </button>
       </div>
+
+      {/* The verb row — meowork's "what can I do with this server", spelled
+          out. Folding the server folds its verbs with it. */}
+      {!folded && (
+        <div className="mx-1.5 flex flex-wrap items-center gap-1 px-2.5 py-1">
+          <button
+            type="button"
+            className="chip"
+            onClick={() => void quickAdd("terminal")}
+            disabled={quick !== null}
+            title="New shell in your home folder"
+          >
+            {quick === "terminal" ? "…" : "+ sh"}
+          </button>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => void quickAdd("claude")}
+            disabled={quick !== null}
+            title="New Claude session in your home folder"
+          >
+            {quick === "claude" ? "…" : "+ claude"}
+          </button>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => void quickFiles()}
+            disabled={quick !== null}
+            title="Browse this server's files, starting at your home folder"
+          >
+            {quick === "files" ? "…" : "files"}
+          </button>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => focusHostSection(server.id, "procs")}
+            title="Processes on this server — inspect, TERM, KILL"
+          >
+            procs
+          </button>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => focusHostSection(server.id, "ports")}
+            title="Listening ports — forward them, or open the SOCKS proxy"
+          >
+            ports
+          </button>
+          {hasBrowser && server.target.host && (
+            <button
+              type="button"
+              className="chip"
+              onClick={() => void quickWww()}
+              disabled={quick !== null}
+              title="Open your browser through this server — its network, its DNS, even its 127.0.0.1"
+            >
+              {quick === "www" ? "…" : "www"}
+            </button>
+          )}
+        </div>
+      )}
 
       {quickError && (
         <p className="data mx-1.5 px-2.5 py-1 text-[10px]" style={{ color: "rgb(var(--primary))" }}>

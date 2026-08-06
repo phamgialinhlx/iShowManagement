@@ -10,6 +10,7 @@ use serde::Serialize;
 
 mod askpass;
 mod background;
+mod browsers;
 mod control;
 mod notify;
 mod paste;
@@ -194,6 +195,8 @@ pub fn run() {
             tunnels::port_unforward,
             tunnels::ports_forwarded,
             tunnels::port_proxy,
+            browsers::browsers_detect,
+            browsers::browser_open,
             control::control_sync,
             control::control_open_url,
             control::control_info,

@@ -95,6 +95,11 @@ type State = Core & {
   /** Session ids in most-recently-activated order. Runtime only — it feeds the
    *  focus-mode warm set (`warmSessions`), not anything worth persisting. */
   recentSessions: string[];
+  /** A one-shot "scroll the Host pane to this section" request from the rail's
+   *  procs/ports verbs. Runtime only; the nonce makes re-clicking the same verb
+   *  observable. `HostPanel` clears it after scrolling, so a later remount of
+   *  the pane does not replay an old request. */
+  hostFocus: { serverId: ServerId; section: "procs" | "ports"; nonce: number } | null;
 
   // ── selectors (cheap derivations consumers reach for) ──────────────────────
   serverOf: (sessionOrProjectId: string) => Server | undefined;
@@ -151,6 +156,8 @@ type State = Core & {
   /** The rail's "open into the focused tile" verb, for each openable node. */
   openSession: (id: string) => void;
   openHost: (serverId: ServerId) => void;
+  /** `openHost` plus a scroll request to one of its sections. */
+  focusHostSection: (serverId: ServerId, section: "procs" | "ports") => void;
   openFiles: (projectId: ProjectId) => void;
   /** Activate a session *and* make sure it is on screen — the "go to it" verb. */
   revealSession: (id: string) => void;
@@ -283,6 +290,7 @@ export const useWorkspace = create<State>((set, get) => ({
   focusedCell: null,
   railCollapsed: false,
   recentSessions: [],
+  hostFocus: null,
 
   // ── selectors ──────────────────────────────────────────────────────────────
   projectOf: (sessionId) => {
@@ -508,6 +516,12 @@ export const useWorkspace = create<State>((set, get) => ({
     get().assignPane(openCell(get()), { kind: "session", id });
   },
   openHost: (serverId) => get().assignPane(openCell(get()), { kind: "host", serverId }),
+  // Reveal (not open): a Host pane already on screen gets focused and scrolled,
+  // not duplicated into a second cell.
+  focusHostSection: (serverId, section) => {
+    get().revealTab({ kind: "host", serverId });
+    set((s) => ({ hostFocus: { serverId, section, nonce: (s.hostFocus?.nonce ?? 0) + 1 } }));
+  },
   openFiles: (projectId) => get().assignPane(openCell(get()), { kind: "files", projectId }),
 
   // "Go to this session." Bare `activate` only moves highlights: in focus mode

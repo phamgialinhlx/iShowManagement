@@ -471,6 +471,15 @@ to say "this is a string".
   every launch with a rail full of marks that have already been seen.
 - The header counts **both** kinds of "needs you". Counting only `waiting` left a rail full of
   accent dots above a header claiming everything was fine.
+- **Every server verb is spelled out in a row under its name** (meowork's shape): `+ sh ·
+  + claude · files · procs · ports · www`. The operator reported the two-chip version as "no
+  display to control the other parts" — a verb that exists only as a name-click is a verb
+  nobody finds. `+ sh`/`+ claude`/`files` create-or-reuse the "home" project (home resolved
+  over the connection via `fs_home`, never a quoted `~`); `procs`/`ports` reveal the Host pane
+  and scroll to the section through the one-shot `hostFocus` request (runtime-only, cleared by
+  `HostPanel` after applying so a remount does not replay it — and it *reveals*, so a Host
+  pane already on screen is focused, not duplicated); `www` opens the proxied browser and is
+  absent without a detected Chromium or on a local server.
 
 ## Searching a project
 
@@ -671,6 +680,20 @@ resolves on the server. That is the arrangement that actually delivers "no port 
   not write, so a selection's note is *typed into Claude's composer* (`claude_write`) and
   left for the operator to send — never submitted. Anything else is a prompt-injection path
   straight from any page the operator happens to open.
+- **`browser_open` is the everyday half of this** (`src-tauri/src/browsers.rs`, meowork's
+  move): it reuses the same `Forwards::socks` proxy and spawns the operator's **own
+  Chromium-family browser**, detached, with `--proxy-server=socks5://127.0.0.1:<port>`,
+  `--proxy-bypass-list=<-loopback>` (loopback goes *through* the proxy, so `127.0.0.1:<port>`
+  in that window is the **server's** port — what makes the per-port OPEN button work with no
+  forwarding step) and a per-host profile under app-data. Not an in-app browser; rbrowse and
+  the control socket are untouched. Two bridge inputs are validated, not trusted: the `bin`
+  must appear in a **fresh detection on the Rust side** (the webview naming an arbitrary
+  executable to spawn is the same class of hole as a string pid), and the `url` must be
+  http(s) — a leading `-` is a Chromium flag, `file:` is a local read handed to a proxied
+  profile. Firefox is excluded on purpose (needs a prefs-configured profile, so it would be
+  half-supported). Detection walks PATH directly — no `sh -lc`, whose aliases could answer
+  instead of an executable — and the chips are *absent* when nothing is detected, per "never
+  show a control that cannot work".
 
 ## Claude credentials
 

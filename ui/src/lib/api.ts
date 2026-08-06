@@ -127,6 +127,9 @@ export type JiraIssueDetail = JiraIssue & {
 export type ForwardState = "local" | "starting" | "active" | "failed" | "stopped";
 export type Forward = { port: number; state: ForwardState; error?: string };
 
+/** A Chromium-family browser on this machine that `browserOpen` may launch. */
+export type BrowserInfo = { id: string; name: string; bin: string };
+
 export type JiraProfile = { name: string; baseUrl: string; email: string | null };
 export type JiraProject = { key: string; name: string };
 
@@ -416,6 +419,13 @@ export const api = {
   portsForwarded: (target: TargetRef) => call<Forward[]>("ports_forwarded", { target }),
   /** A SOCKS proxy onto the target — every port at once, plus its DNS. */
   portProxy: (target: TargetRef) => call<number>("port_proxy", { target }),
+  /** Chromium-family browsers installed here — the only ones browserOpen accepts. */
+  browsersDetect: () => call<BrowserInfo[]>("browsers_detect"),
+  /** Launch `bin` through the target's SOCKS proxy (started if need be) at
+   *  `url` (or a blank page). Loopback routes through the proxy too, so
+   *  `http://127.0.0.1:<port>` is the target's port. Returns the proxy port. */
+  browserOpen: (target: TargetRef, bin: string, url?: string) =>
+    call<number>("browser_open", { target, bin, url }),
 
   /** Write a pasted image to the target; returns the path to mention to Claude. */
   claudePasteImage: (target: TargetRef, data: string, kind: string) =>

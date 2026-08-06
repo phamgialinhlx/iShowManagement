@@ -55,7 +55,7 @@ function SessionPane({ session }: { session: SessionV3 }) {
 function HostPane({ serverId }: { serverId: string }) {
   const server = useWorkspace((s) => s.servers.find((sv) => sv.id === serverId));
   if (!server) return <PaneMissing what="server" />;
-  return <HostPanel target={server.target} />;
+  return <HostPanel target={server.target} serverId={serverId} />;
 }
 
 function PaneMissing({ what }: { what: string }) {

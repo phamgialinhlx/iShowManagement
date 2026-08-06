@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { api, isTauri, type Forward, type ListeningPort, type ProcessInfo, type TargetRef } from "../lib/api";
+import { api, isTauri, type BrowserInfo, type Forward, type ListeningPort, type ProcessInfo, type TargetRef } from "../lib/api";
+import { chosenBrowser, detectBrowsers, rememberBrowser } from "../lib/browsers";
+import { useWorkspace } from "../lib/workspace";
 
 /**
  * What the host is running, and how to reach it.
@@ -26,16 +28,30 @@ import { api, isTauri, type Forward, type ListeningPort, type ProcessInfo, type 
 
 const REFRESH_MS = 4000;
 
-export function HostPanel({ target }: { target: TargetRef }) {
+export function HostPanel({ target, serverId }: { target: TargetRef; serverId?: string }) {
+  const procsRef = useRef<HTMLElement | null>(null);
+  const portsRef = useRef<HTMLElement | null>(null);
+
+  // The rail's procs/ports verbs land here: reveal the pane, then scroll to the
+  // named section. Consumed once — cleared after applying, so a later remount
+  // of this pane does not replay an old request.
+  const hostFocus = useWorkspace((s) => s.hostFocus);
+  useEffect(() => {
+    if (!hostFocus || !serverId || hostFocus.serverId !== serverId) return;
+    const section = hostFocus.section === "procs" ? procsRef.current : portsRef.current;
+    section?.scrollIntoView({ block: "start", behavior: "smooth" });
+    useWorkspace.setState({ hostFocus: null });
+  }, [hostFocus, serverId]);
+
   return (
     <div className="flex h-full min-h-0 flex-col overflow-y-auto">
-      <Processes target={target} />
-      <Ports target={target} />
+      <Processes target={target} sectionRef={procsRef} />
+      <Ports target={target} sectionRef={portsRef} />
     </div>
   );
 }
 
-function Processes({ target }: { target: TargetRef }) {
+function Processes({ target, sectionRef }: { target: TargetRef; sectionRef?: React.Ref<HTMLElement> }) {
   const [rows, setRows] = useState<ProcessInfo[] | null>(null);
   const [by, setBy] = useState<"cpu" | "memory">("cpu");
   const [filter, setFilter] = useState("");
@@ -84,7 +100,7 @@ function Processes({ target }: { target: TargetRef }) {
   );
 
   return (
-    <section className="flex shrink-0 flex-col">
+    <section ref={sectionRef} className="flex shrink-0 flex-col">
       <header
         className="flex items-center gap-3 border-b px-4 py-2"
         style={{ borderColor: "var(--border)" }}
@@ -204,7 +220,7 @@ function Processes({ target }: { target: TargetRef }) {
  * app's own interface through the operator's server), so the port is printed
  * for something else to point at.
  */
-function Ports({ target }: { target: TargetRef }) {
+function Ports({ target, sectionRef }: { target: TargetRef; sectionRef?: React.Ref<HTMLElement> }) {
   const [listening, setListening] = useState<ListeningPort[] | null>(null);
   const [forwards, setForwards] = useState<Forward[]>([]);
   const [manual, setManual] = useState("");
@@ -212,7 +228,41 @@ function Ports({ target }: { target: TargetRef }) {
   const [proxy, setProxy] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // The proxied browser (meowork's PortsPanel move): pick a Chromium, open it
+  // through the SOCKS proxy — started implicitly, no separate step. Absent
+  // entirely when no Chromium-family browser is installed.
+  const [browsers, setBrowsers] = useState<BrowserInfo[]>([]);
+  const [chosen, setChosen] = useState<string | null>(null);
+  const [opening, setOpening] = useState<number | "blank" | null>(null);
+
   const local = !target.host;
+
+  useEffect(() => {
+    let cancelled = false;
+    void detectBrowsers().then((list) => {
+      if (cancelled) return;
+      setBrowsers(list);
+      setChosen((cur) => cur ?? chosenBrowser(list)?.bin ?? null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const openBrowser = async (key: number | "blank", url?: string) => {
+    if (!chosen || opening !== null) return;
+    setOpening(key);
+    setError(null);
+    try {
+      // browser_open starts (or reuses) the proxy itself; showing the returned
+      // port keeps the SOCKS chip honest about what just happened.
+      setProxy(await api.browserOpen(target, chosen, url));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setOpening(null);
+    }
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -290,6 +340,17 @@ function Ports({ target }: { target: TargetRef }) {
           </span>
         ) : null}
 
+        {!local && chosen && (
+          <button
+            type="button"
+            className="chip shrink-0"
+            disabled={opening !== null}
+            title={`Open http://127.0.0.1:${port} — that port on ${target.host} — in the proxied browser`}
+            onClick={() => void openBrowser(port, `http://127.0.0.1:${port}`)}
+          >
+            {opening === port ? "…" : "OPEN"}
+          </button>
+        )}
         <button
           type="button"
           className="chip w-[72px] shrink-0 text-right"
@@ -307,7 +368,7 @@ function Ports({ target }: { target: TargetRef }) {
   const canAdd = Number.isInteger(extra) && extra > 0 && extra < 65536;
 
   return (
-    <section className="flex shrink-0 flex-col">
+    <section ref={sectionRef} className="flex shrink-0 flex-col">
       <header
         className="flex items-center gap-3 border-b border-t px-4 py-2"
         style={{ borderColor: "var(--border)" }}
@@ -331,6 +392,41 @@ function Ports({ target }: { target: TargetRef }) {
         )}
       </header>
 
+      {/* Absent, not disabled, when no Chromium-family browser is installed. */}
+      {!local && browsers.length > 0 && (
+        <div
+          className="flex flex-wrap items-center gap-3 border-b px-4 py-1.5"
+          style={{ borderColor: "var(--border)" }}
+        >
+          <span className="micro">BROWSER</span>
+          <div className="seg">
+            {browsers.map((b) => (
+              <button
+                key={b.id}
+                type="button"
+                aria-pressed={chosen === b.bin}
+                title={b.bin}
+                onClick={() => {
+                  setChosen(b.bin);
+                  rememberBrowser(b.bin);
+                }}
+              >
+                {b.id.toUpperCase()}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="chip"
+            disabled={opening !== null}
+            title={`A fresh ${browsers.find((b) => b.bin === chosen)?.name ?? "browser"} window that sees the network from ${target.host} — its own profile, every request through the proxy`}
+            onClick={() => void openBrowser("blank")}
+          >
+            {opening === "blank" ? "OPENING…" : "OPEN BROWSER"}
+          </button>
+        </div>
+      )}
+
       {local && (
         <p className="data px-4 py-2 text-[11px]" style={{ color: "var(--text-soft)" }}>
           This session runs on your own machine, so its ports are already local — there is nothing
@@ -342,9 +438,11 @@ function Ports({ target }: { target: TargetRef }) {
         <p className="data px-4 py-2 text-[11px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
           Every port on <span style={{ color: "var(--text)" }}>{target.host}</span> is reachable
           through <span style={{ color: "var(--text)" }}>socks5h://127.0.0.1:{proxy}</span>, DNS
-          included — so an internal hostname resolves over there rather than failing here. Point a
-          browser profile or a tool at it; rmux's own window cannot use it, because there is only
-          one of it and proxying it would route this interface through your server.
+          included — so an internal hostname resolves over there rather than failing here.
+          OPEN BROWSER launches your own browser already pointed at it, loopback included, so
+          127.0.0.1 in that window is the server's. rmux's own window cannot use the proxy,
+          because there is only one of it and proxying it would route this interface through
+          your server.
         </p>
       )}
 
