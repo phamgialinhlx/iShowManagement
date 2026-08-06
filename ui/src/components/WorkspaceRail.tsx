@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
 import { useWorkspace } from "../lib/workspace";
@@ -205,6 +205,141 @@ function FolderIcon() {
   );
 }
 
+export type RailMenuTarget = { x: number; y: number };
+
+/** One item in a rail context menu. `destructive` reads red (rule 0). */
+function RailMenuItem({
+  label,
+  onClick,
+  destructive,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  destructive?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="data flex w-full items-center px-3 py-[5px] text-left text-[11px]"
+      style={{
+        color: disabled
+          ? "var(--text-faint)"
+          : destructive
+            ? "rgb(var(--primary))"
+            : "var(--text)",
+      }}
+      onMouseEnter={(e) => {
+        if (!disabled) e.currentTarget.style.background = "var(--hover)";
+      }}
+      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+    >
+      <span className="truncate">{label}</span>
+    </button>
+  );
+}
+
+/**
+ * A right-click context menu for the rail — the same gesture and shape as the
+ * file tree's `TreeMenu`, minus the file actions.
+ *
+ * **Flip before clamp** (the CLAUDE.md rule): the menu is rendered invisible at
+ * the cursor for one frame, measured, and moved up into view if it would fall
+ * past the window edge — clamping only when there is no room above. The scale is
+ * *measured* (`rect.height / offsetHeight`) rather than assumed, because `zoom`
+ * on `#root` puts `getBoundingClientRect` and the written `top` in different
+ * units.
+ */
+function RailMenu({
+  target,
+  onClose,
+  children,
+}: {
+  target: RailMenuTarget;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [placed, setPlaced] = useState({ x: target.x, y: target.y });
+  const [measured, setMeasured] = useState(false);
+
+  // Dismiss on outside click or Escape, like every context menu.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest("[data-rail-menu]")) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  // A placement function in its own stable callback so the layout effect and the
+  // observer share it. Content swaps (menu ↔ confirm/rename) change the height,
+  // and the observer re-measures on those — same "re-run when the menu's own
+  // height changes" rule as `TreeMenu`, but without depending on a render-prop.
+  const place = () => {
+    const el = menuRef.current;
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const scale = el.offsetHeight > 0 ? rect.height / el.offsetHeight : 1;
+    const margin = 8;
+
+    let x = target.x;
+    let y = target.y;
+
+    const overflowY = rect.bottom - (window.innerHeight - margin);
+    if (overflowY > 0) {
+      const height = rect.height / scale;
+      const above = (target.y * scale - margin) / scale;
+      y = height <= above ? target.y - height : Math.max(margin / scale, y - overflowY / scale);
+    }
+
+    const overflowX = rect.right - (window.innerWidth - margin);
+    if (overflowX > 0) {
+      const width = rect.width / scale;
+      x = Math.max(margin / scale, target.x - width);
+    }
+
+    setPlaced({ x, y });
+    setMeasured(true);
+  };
+
+  useLayoutEffect(() => {
+    place();
+    const el = menuRef.current;
+    if (!el) return;
+    const observer = new MutationObserver(() => place());
+    observer.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target.x, target.y]);
+
+  return (
+    <div
+      ref={menuRef}
+      data-rail-menu
+      className="menu fixed z-[80] min-w-[170px] p-1"
+      style={{
+        left: placed.x,
+        top: placed.y,
+        visibility: measured ? "visible" : "hidden",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function SessionRow({
   session,
   active,
@@ -220,6 +355,7 @@ function SessionRow({
 }) {
   const [confirming, setConfirming] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [menu, setMenu] = useState<RailMenuTarget | null>(null);
   const rename = useWorkspace((s) => s.renameSession);
   const status = useWorkspace((s) => s.statusOf(session.id));
 
@@ -232,7 +368,14 @@ function SessionRow({
       : undefined;
 
   return (
-    <div className="group relative" style={surface}>
+    <div
+      className="group relative"
+      style={surface}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
+    >
       {editing ? (
         <div className="flex items-center gap-2 px-3 py-[6px] pl-3">
           {session.kind === "claude" ? (
@@ -318,6 +461,23 @@ function SessionRow({
           </svg>
         </button>
       )}
+
+      {/* The same right-click menu as the project row: rename (into the existing
+          inline edit) and close (into the existing confirm). */}
+      {menu && (
+        <RailMenu target={menu} onClose={() => setMenu(null)}>
+          <div className="flex flex-col">
+            <RailMenuItem
+              label="Rename"
+              onClick={() => {
+                setMenu(null);
+                setEditing(true);
+              }}
+            />
+            <RailMenuItem label="Close session" destructive onClick={() => setConfirming(true)} />
+          </div>
+        </RailMenu>
+      )}
     </div>
   );
 }
@@ -338,6 +498,12 @@ function ProjectNode({
   const openSession = useWorkspace((s) => s.openSession);
   const addSession = useWorkspace((s) => s.addSession);
   const removeSession = useWorkspace((s) => s.removeSession);
+  const renameProject = useWorkspace((s) => s.renameProject);
+  const removeProject = useWorkspace((s) => s.removeProject);
+
+  const [menu, setMenu] = useState<RailMenuTarget | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const mine = sessions.filter((s) => s.projectId === project.id);
   const onScreen = new Set(
@@ -352,20 +518,50 @@ function ProjectNode({
   return (
     <div>
       {/* Group header — the "▾ TMUX" band: caret, an uppercase label, then the
-          verbs: open files (folder), new terminal (+), new Claude (✦). */}
-      <div className="group/prj flex items-center gap-1.5 py-[5px] pl-4 pr-2">
+          verbs: open files (folder), new terminal (+), new Claude (✦).
+          Right-clicking anywhere on the band opens the project menu (rename,
+          remove) — the same gesture as the file tree. */}
+      <div
+        className="group/prj flex items-center gap-1.5 py-[5px] pl-4 pr-2"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
         <button type="button" className="shrink-0" onClick={onToggle} aria-expanded={!folded} title={project.folder}>
           <Chevron folded={folded} />
         </button>
-        <button
-          type="button"
-          className="data min-w-0 flex-1 truncate text-left text-[10px]"
-          style={{ color: "var(--text-soft)", fontWeight: 600, letterSpacing: "0.09em", textTransform: "uppercase" }}
-          onClick={() => openFiles(project.id)}
-          title={`${project.folder}\nOpen files`}
-        >
-          {project.label}
-        </button>
+        {renaming ? (
+          <input
+            autoFocus
+            defaultValue={project.label}
+            aria-label="Project name"
+            className="data inset min-w-0 flex-1 px-1 py-[1px] text-[10px] outline-none"
+            style={{ border: "1px solid var(--border-strong)", color: "var(--text)", textTransform: "uppercase" }}
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={(e) => {
+              renameProject(project.id, e.currentTarget.value);
+              setRenaming(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") {
+                e.currentTarget.value = project.label;
+                e.currentTarget.blur();
+              }
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            className="data min-w-0 flex-1 truncate text-left text-[10px]"
+            style={{ color: "var(--text-soft)", fontWeight: 600, letterSpacing: "0.09em", textTransform: "uppercase" }}
+            onClick={() => openFiles(project.id)}
+            title={`${project.folder}\nOpen files\nRight-click for project actions`}
+          >
+            {project.label}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => openFiles(project.id)}
@@ -396,6 +592,73 @@ function ProjectNode({
           <ClaudeMark />
         </button>
       </div>
+
+      {/* Project actions: the verbs the inline icons cover, plus rename and
+          remove. Rename swaps into an inline input; remove confirms in place,
+          naming the folder and the consequence. */}
+      {menu && (
+        <RailMenu target={menu} onClose={() => setMenu(null)}>
+          <div className="flex flex-col">
+            <RailMenuItem
+              label="Open files"
+              onClick={() => {
+                setMenu(null);
+                openFiles(project.id);
+              }}
+            />
+            <RailMenuItem
+              label="New terminal"
+              onClick={() => {
+                setMenu(null);
+                add("terminal");
+              }}
+            />
+            <RailMenuItem
+              label="New Claude"
+              onClick={() => {
+                setMenu(null);
+                add("claude");
+              }}
+            />
+            <hr className="hairline my-1" />
+            {confirming ? (
+              <div className="flex flex-col gap-2 p-2">
+                <p className="data text-[11px]">
+                  Remove <span style={{ color: "rgb(var(--primary))" }}>{project.label}</span>?
+                </p>
+                <p className="micro">its sessions will be ended on the server</p>
+                <div className="flex gap-2">
+                  <button
+                    className="btn btn-primary flex-1"
+                    type="button"
+                    onClick={() => {
+                      setMenu(null);
+                      setConfirming(false);
+                      removeProject(project.id);
+                    }}
+                  >
+                    Remove
+                  </button>
+                  <button className="btn" type="button" onClick={() => setConfirming(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <RailMenuItem
+                  label="Rename"
+                  onClick={() => {
+                    setMenu(null);
+                    setRenaming(true);
+                  }}
+                />
+                <RailMenuItem label="Remove project" destructive onClick={() => setConfirming(true)} />
+              </>
+            )}
+          </div>
+        </RailMenu>
+      )}
 
       {/* Children hang off a vertical guide line, as in the reference. */}
       <AnimatePresence initial={false}>

@@ -119,3 +119,35 @@ export function closePane(ws: Core, index: number): Core {
   panes[index] = null;
   return { ...ws, panes };
 }
+
+/**
+ * Remove a Project from the structure — the **structural** half of what the
+ * store's `removeProject` does.
+ *
+ * The store cascades session kills first (each fires its own agent kill), then
+ * applies this to drop the project and clear the panes that pointed at it. A
+ * `files` pane has nowhere to go once its project is gone — `FilesPane` renders
+ * with no missing-guard, so leaving the tile would show a broken view. A `host`
+ * pane for the project's server is **kept**: the server may still hold other
+ * projects, and `HostPane` already guards a server that is gone.
+ *
+ * `Core` has no buffer maps, so the store also drops `openPaths`/`activePath`
+ * beside applying this.
+ */
+export function removeProjectCore(ws: Core, id: ProjectId): Core {
+  if (!ws.projects.some((p) => p.id === id)) return ws;
+  const panes = ws.panes.map((p) => (p && p.kind === "files" && p.projectId === id ? null : p));
+  return { ...ws, projects: ws.projects.filter((p) => p.id !== id), panes };
+}
+
+/**
+ * Remove a Server from the structure. Every project on it is removed too (the
+ * store cascades through `removeProject` first for the kills), and host panes
+ * pointing at the server are cleared — nothing else can host them, and `HostPane`
+ * would only report the server as gone anyway.
+ */
+export function removeServerCore(ws: Core, id: ServerId): Core {
+  if (!ws.servers.some((s) => s.id === id)) return ws;
+  const panes = ws.panes.map((p) => (p && p.kind === "host" && p.serverId === id ? null : p));
+  return { ...ws, servers: ws.servers.filter((s) => s.id !== id), panes };
+}

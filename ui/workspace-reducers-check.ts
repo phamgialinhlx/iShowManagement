@@ -4,6 +4,8 @@ import {
   addProject,
   addSession,
   removeSession,
+  removeProjectCore,
+  removeServerCore,
   assignPane,
   closePane,
   type Core,
@@ -91,6 +93,51 @@ export function run(log: (line: string) => void): boolean {
     check("close clears the tile", ws.panes[0] === null);
     check("the session still exists after closing its pane", ws.sessions.some((s) => s.id === "claude-1"));
     check("closing an out-of-range tile is a no-op", closePane(ws, 99) === ws);
+  }
+
+  // ── Removing a project: it goes, and files panes pointing at it clear ─────
+  {
+    let { ws, pid } = seed();
+    // A second project on the same server, with its own files pane.
+    const second = addProject(ws, serverId({ host: "prod" }), "/home/me/web");
+    ws = second.ws;
+    ws = assignPane(ws, 0, { kind: "files", projectId: pid });
+    ws = assignPane(ws, 1, { kind: "files", projectId: second.id });
+    ws = assignPane(ws, 2, { kind: "host", serverId: serverId({ host: "prod" }) });
+
+    const removed = removeProjectCore(ws, pid);
+    check("the project is gone", !removed.projects.some((p) => p.id === pid));
+    check("the other project stays", removed.projects.some((p) => p.id === second.id));
+    check("its files pane is cleared to null", removed.panes[0] === null);
+    check("the other project's files pane is untouched",
+      removed.panes[1]?.kind === "files" && (removed.panes[1] as { projectId: string }).projectId === second.id);
+    // The server may still hold other projects, so its host pane survives.
+    check("a host pane for the project's server is kept", removed.panes[2]?.kind === "host");
+    check("sessions under it are untouched (the store cascades kills separately)",
+      removed.sessions.length === 2);
+    check("removing an unknown project is a no-op", removeProjectCore(ws, "nope") === ws);
+  }
+
+  // ── Removing a server: it goes, and host panes pointing at it clear ───────
+  {
+    let { ws, sid, pid } = seed();
+    ws = assignPane(ws, 0, { kind: "files", projectId: pid });
+    ws = assignPane(ws, 1, { kind: "host", serverId: sid });
+    // A second server, with its own host pane, to prove only this one clears.
+    const other = addServer(ws, { host: "staging" });
+    ws = other.ws;
+    ws = assignPane(ws, 2, { kind: "host", serverId: other.id });
+
+    const removed = removeServerCore(ws, sid);
+    check("the server is gone", !removed.servers.some((s) => s.id === sid));
+    check("the other server stays", removed.servers.some((s) => s.id === other.id));
+    check("its host pane is cleared to null", removed.panes[1] === null);
+    check("the other server's host pane is untouched",
+      removed.panes[2]?.kind === "host" && (removed.panes[2] as { serverId: string }).serverId === other.id);
+    // `removeProjectCore` is applied by the store's cascade, not by this reducer.
+    check("projects stay (the store cascades removeProject first)",
+      removed.projects.some((p) => p.id === pid));
+    check("removing an unknown server is a no-op", removeServerCore(ws, "nope") === ws);
   }
 
   log("");
