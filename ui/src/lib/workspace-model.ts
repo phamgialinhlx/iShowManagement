@@ -64,6 +64,8 @@ export type SessionV3 = {
   kind: SessionKind;
   name: string;
   renamed?: boolean;
+  /** The host session name this row attaches to verbatim (adopted sessions only). */
+  hostName?: string;
 
   // ── claude-only ──────────────────────────────────────────────────────────
   resume?: string;

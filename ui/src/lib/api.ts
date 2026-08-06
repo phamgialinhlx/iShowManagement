@@ -72,6 +72,15 @@ export type TargetRef = {
   port?: number;
 };
 
+/** A session the agent is running on a host, as `agent list` reports it. */
+export type RunningSession = {
+  name: string;
+  pid: number | null;
+  ageSeconds: number;
+  attached: boolean;
+  command: string | null;
+};
+
 /** A port something is listening on, on the target. */
 export type ListeningPort = { port: number; process: string };
 
@@ -657,6 +666,11 @@ export const api = {
   hostSessions: (target: TargetRef) => call<AgentSession[]>("host_sessions", { target }),
 
   sshConfigHosts: () => call<ConfigHost[]>("ssh_config_hosts"),
+
+  /** Disconnect a server: close its SSH connection, keep sessions running. */
+  serverDisconnect: (target: TargetRef) => call<void>("server_disconnect", { target }),
+  /** Sessions the agent is running on a host — including ones another PC started. */
+  serverSessions: (target: TargetRef) => call<RunningSession[]>("server_sessions", { target }),
 
   claudeSessions: (target: TargetRef, folder: string) =>
     call<ClaudeSessionInfo[]>("claude_list_sessions", { target, folder }),

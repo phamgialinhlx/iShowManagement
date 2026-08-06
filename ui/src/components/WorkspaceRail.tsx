@@ -898,7 +898,7 @@ function ServerNode({
         </RailMenu>
       )}
 
-      {/* Task 6: the attach-to-running picker consumes `attaching`. */}
+      {/* The attach-to-running picker consumes `attaching`. */}
       {attaching && (
         <div className="mx-1.5 mb-1 rounded-none border p-2" style={{ borderColor: "var(--border)" }}>
           <div className="flex items-center justify-between px-1 pb-1">
