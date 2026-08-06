@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api, isTauri, type ProcessInfo, type TargetRef } from "../../lib/api";
+import { accent, paint, textRamp, tokenAlpha } from "../../lib/palette";
 
 /**
  * What is actually using the machine.
@@ -15,9 +16,6 @@ import { api, isTauri, type ProcessInfo, type TargetRef } from "../../lib/api";
  * each refresh is what makes a chart like this unreadable.
  */
 
-const RED = "#e63b2e";
-/** Chalk fading to near-background, brightest first. */
-const RAMP = ["#e8e6e1", "#b5b2ab", "#98958f", "#6e6b66", "#4a4844"];
 /** Gap between segments, in radians. */
 const GAP = 0.07;
 const POLL_MS = 3500;
@@ -129,9 +127,13 @@ function Donut({
 
       g.clearRect(0, 0, w, h);
 
+      // Resolved once per frame, so the ring follows the active theme. Chalk
+      // fading toward the background, brightest first.
+      const ramp = textRamp(5);
+
       // A slowly turning dotted ring. This is the widget's liveness cue —
       // motion, not a blinking number.
-      g.fillStyle = "rgba(232,230,225,.3)";
+      g.fillStyle = tokenAlpha("--text", 0.3);
       for (let d = 0; d < 60; d += 1) {
         const da = (d / 60) * Math.PI * 2 + rotation.current;
         g.fillRect(cx + Math.cos(da) * R * 0.72 - 1, cy + Math.sin(da) * R * 0.72 - 1, 2, 2);
@@ -139,10 +141,10 @@ function Donut({
 
       g.textAlign = "center";
       g.textBaseline = "middle";
-      g.fillStyle = total.current >= 90 ? RED : "#e8e6e1";
+      g.fillStyle = total.current >= 90 ? accent() : paint("--text");
       g.font = '700 28px "SFU Futura", "IBM Plex Mono", monospace';
       g.fillText(`${Math.round(total.current)}%`, cx, cy - 3);
-      g.fillStyle = "#8a8781";
+      g.fillStyle = paint("--text-faint");
       g.font = '600 9px "IBM Plex Mono", monospace';
       g.fillText(metric.current === "cpu" ? "CPU LOAD" : "RAM USED", cx, cy + 16);
       g.textBaseline = "alphabetic";
@@ -154,7 +156,7 @@ function Donut({
       };
 
       st.items.forEach((item, i) => {
-        g.strokeStyle = RAMP[i] ?? "#4a4844";
+        g.strokeStyle = ramp[i] ?? ramp[ramp.length - 1] ?? paint("--text-faint");
         g.lineWidth = 6;
         g.lineCap = "butt";
         g.beginPath();
@@ -185,7 +187,7 @@ function Donut({
           // Whatever room is actually left on this side, after the leader line.
           const room = dir > 0 ? w - lx - PAD : lx - PAD;
 
-          g.strokeStyle = "rgba(232,230,225,.25)";
+          g.strokeStyle = tokenAlpha("--text", 0.25);
           g.lineWidth = 1;
           g.beginPath();
           g.moveTo(px, py);
@@ -194,12 +196,12 @@ function Donut({
           g.stroke();
 
           g.textAlign = dir > 0 ? "left" : "right";
-          g.fillStyle = "#98958f";
+          g.fillStyle = paint("--text-soft");
           g.font = '16px "IBM Plex Mono", monospace';
           // Measured rather than guessed at a character count: a name only
           // reads as a name if it is not cut off mid-word by the canvas edge.
           g.fillText(fit(g, item.name, room - 6), lx + dir * 6, ly - 4);
-          g.fillStyle = RAMP[entry.i] ?? "#4a4844";
+          g.fillStyle = ramp[entry.i] ?? ramp[ramp.length - 1] ?? paint("--text-faint");
           g.font = '700 20px "SFU Futura", "IBM Plex Mono", monospace';
           g.fillText(`${Math.round(item.v)}%`, lx + dir * 6, ly + 16);
         });
@@ -266,7 +268,7 @@ export function TopProcesses({
     fontFamily: "var(--font-mono)",
     letterSpacing: "0.06em",
     textTransform: "uppercase" as const,
-    background: by === kind ? "rgba(232,230,225,0.26)" : "transparent",
+    background: by === kind ? "color-mix(in srgb, var(--text) 26%, transparent)" : "transparent",
     color: by === kind ? "var(--text)" : "var(--text-soft)",
   });
 

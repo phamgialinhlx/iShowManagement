@@ -7,10 +7,15 @@ import { App } from "./App";
 import { Settings } from "./screens/Settings";
 import { applyAppearance } from "./components/AppearancePanel";
 import { applyUserCss } from "./lib/user-css";
+import { applyCachedThemeEarly, initTheme } from "./lib/theme-runtime";
 
-// Before the first paint: applying this in an effect would flash the default
-// glass on every launch.
+// Before the first paint: applying these in an effect would flash the defaults
+// on every launch. The theme applies its localStorage paint-cache synchronously
+// here; `initTheme` reconciles against the canonical `theme.toml` a beat later
+// and starts listening for edits from other windows and hand-edits on disk.
 applyAppearance();
+applyCachedThemeEarly();
+void initTheme();
 
 /*
  * Swallow every file drop the app does not explicitly handle.

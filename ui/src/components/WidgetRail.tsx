@@ -6,6 +6,7 @@ import { TopProcesses } from "./widgets/TopProcesses";
 import { TokenSpend } from "./widgets/TokenSpend";
 import { Clock } from "./widgets/Clock";
 import { Note } from "./widgets/Note";
+import { SentPrompts } from "./widgets/SentPrompts";
 import { Uplink } from "./widgets/Uplink";
 import { JiraProgress } from "./widgets/JiraProgress";
 
@@ -19,7 +20,26 @@ import {
 } from "../lib/api";
 import { contextLimit } from "../lib/context-window";
 import { ContextMeter } from "./ContextMeter";
-import { basename, useSessions, type Session } from "../lib/sessions";
+import { basename } from "../lib/workspace-model";
+import { useRailWidth } from "../lib/rail-width";
+import { RailGrip } from "./RailGrip";
+import { useWorkspace } from "../lib/workspace";
+
+/**
+ * What the instruments need from the active session, flattened.
+ *
+ * v3 splits the fused `Session`: `target` comes from the Server, `folder` from
+ * the Project. `Workbench` resolves them and hands this down, so the widgets do
+ * not each reach into the store's tree.
+ */
+export type Active = {
+  id: string;
+  target: TargetRef;
+  folder: string;
+  resume?: string;
+  contextWindow?: number;
+  jiraProject?: string;
+};
 
 /**
  * The instrument rail.
@@ -40,7 +60,7 @@ import { basename, useSessions, type Session } from "../lib/sessions";
  *  - **No blinking.** Liveness comes from data changing.
  */
 
-const RAIL_WIDTH = 244;
+const RAIL_DEFAULT = 244;
 const RAIL_COLLAPSED = 40;
 /** Samples kept for the history chart. Its x-axis is "the last 30", so an
  *  unbounded buffer would quietly change what the chart means. */
@@ -276,7 +296,7 @@ function UsageWidget({
   session,
   onDragStart,
 }: {
-  session: Session;
+  session: Active;
   onDragStart?: (event: React.PointerEvent) => void;
 }) {
   const [usage, setUsage] = useState<TokenUsage | null>(null);
@@ -355,7 +375,7 @@ function SessionWidget({
   session,
   onDragStart,
 }: {
-  session: Session;
+  session: Active;
   onDragStart?: (event: React.PointerEvent) => void;
 }) {
   const [seconds, setSeconds] = useState(0);
@@ -398,11 +418,20 @@ function SessionWidget({
  * widget added after someone first dragged one is invisible to them forever,
  * with nothing to suggest why.
  */
-const INSTRUMENTS = ["clock", "host", "processes", "uplink", "usage", "jira", "note", "session"] as const;
+const INSTRUMENTS = ["clock", "host", "processes", "uplink", "usage", "sent", "jira", "note", "session"] as const;
 type InstrumentId = (typeof INSTRUMENTS)[number];
 
 const ORDER_KEY = "rmux.widgetRail.order";
 const ENABLED_KEY = "rmux.widgetRail.enabled";
+/**
+ * Which instruments existed when the preference above was written.
+ *
+ * Without this the enabled list is ambiguous: it records only what is *on*, so
+ * an id being absent means either "switched off" or "did not exist yet", and
+ * those want opposite treatment. Storing the vocabulary alongside the choice
+ * makes the difference readable.
+ */
+const KNOWN_KEY = "rmux.widgetRail.known";
 
 /**
  * Which instruments are switched on.
@@ -421,10 +450,40 @@ function readEnabled(): Set<InstrumentId> {
   }
   if (!Array.isArray(stored)) return new Set(INSTRUMENTS);
 
-  const known = new Set<string>(INSTRUMENTS);
+  const valid = new Set<string>(INSTRUMENTS);
   const on = new Set<InstrumentId>();
   for (const id of stored) {
-    if (typeof id === "string" && known.has(id)) on.add(id as InstrumentId);
+    if (typeof id === "string" && valid.has(id)) on.add(id as InstrumentId);
+  }
+
+  // **A widget added since this preference was written is ON.**
+  //
+  // This used to intersect the stored list with `INSTRUMENTS` and stop, so a new
+  // instrument was *off* for everyone who had ever opened the instruments menu —
+  // invisible, with nothing to say it existed. The comment here already claimed
+  // the set was reconciled "like the order is"; `readOrder` appends what it has
+  // not seen and this did not, so the rule was written down and never
+  // implemented.
+  //
+  // It cannot simply add every absent id, because the enabled list records only
+  // what is *on* — absent means "switched off" **or** "did not exist yet", and
+  // those want opposite answers. `KNOWN_KEY` stores the vocabulary the choice
+  // was made against, so the two are distinguishable: absent from `enabled` but
+  // present in `known` is a decision and stays off; absent from both is new.
+  let known: unknown;
+  try {
+    known = JSON.parse(localStorage.getItem(KNOWN_KEY) ?? "null");
+  } catch {
+    known = null;
+  }
+  // No vocabulary recorded means the preference predates this. The safe reading
+  // is that it knew about what it enabled and nothing more, so anything else is
+  // treated as new. That switches previously-hidden widgets back on once, which
+  // is visible and one click to undo — where the alternative failure, a widget
+  // that silently never appears, is neither.
+  const vocabulary = new Set<string>(Array.isArray(known) ? known.filter((x) => typeof x === "string") : stored.filter((x) => typeof x === "string"));
+  for (const id of INSTRUMENTS) {
+    if (!vocabulary.has(id)) on.add(id);
   }
   return on;
 }
@@ -461,7 +520,7 @@ function Instrument({
   host,
 }: {
   id: InstrumentId;
-  session: Session;
+  session: Active;
   host: ReturnType<typeof useHostSample>;
 }) {
   // Dragging is started by the header, not by the item — see `Widget`. Without
@@ -487,13 +546,19 @@ function Instrument({
       case "jira":
         return session.jiraProject ? (
           <Widget title={`JIRA · ${session.jiraProject}`} onDragStart={start}>
-            <JiraProgress project={session.jiraProject} />
+            <JiraProgress project={session.jiraProject} sessionId={session.id} />
           </Widget>
         ) : null;
       case "uplink":
         return (
           <Widget title="UPLINK" onDragStart={start}>
             <Uplink target={session.target} />
+          </Widget>
+        );
+      case "sent":
+        return (
+          <Widget title="SENT" onDragStart={start}>
+            <SentPrompts target={session.target} folder={session.folder} resume={session.resume} />
           </Widget>
         );
       case "note":
@@ -526,7 +591,7 @@ function Instrument({
 }
 
 /** The instruments, in the operator's own order. */
-function Instruments({ session, customising }: { session: Session; customising: boolean }) {
+function Instruments({ session, customising }: { session: Active; customising: boolean }) {
   const [order, setOrder] = useState<InstrumentId[]>(readOrder);
   const [enabled, setEnabled] = useState<Set<InstrumentId>>(readEnabled);
 
@@ -541,6 +606,9 @@ function Instruments({ session, customising }: { session: Session; customising: 
     setEnabled(next);
     try {
       localStorage.setItem(ENABLED_KEY, JSON.stringify([...next]));
+      // Record the vocabulary this choice was made against, so a widget added
+      // later can be told apart from one deliberately switched off.
+      localStorage.setItem(KNOWN_KEY, JSON.stringify([...INSTRUMENTS]));
     } catch {
       // A full localStorage costs the preference, not the app.
     }
@@ -613,18 +681,23 @@ const LABELS: Record<InstrumentId, string> = {
   uplink: "UPLINK",
   usage: "TOKEN SPEND",
   jira: "JIRA",
+  sent: "SENT",
   note: "NOTE",
   session: "SESSION",
 };
 
-export function WidgetRail({ session }: { session: Session | null }) {
+export function WidgetRail({ session }: { session: Active | null }) {
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem(COLLAPSE_KEY) === "1",
   );
   // Not persisted: this is a mode you are *in*, not a preference. Reopening the
   // app into a settings list rather than the instruments would be a surprise.
   const [customising, setCustomising] = useState(false);
-  const waiting = useSessions((s) => s.sessions.filter((x) => x.status === "waiting").length);
+  const waiting = useWorkspace(
+    (s) => s.sessions.filter((x) => x.kind === "claude" && s.runtime[x.id]?.status === "waiting").length,
+  );
+
+  const { width: railWidth, startResize } = useRailWidth("rmux.widgets.width", RAIL_DEFAULT);
 
   useEffect(() => {
     localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
@@ -632,11 +705,14 @@ export function WidgetRail({ session }: { session: Session | null }) {
 
   return (
     <motion.aside
-      className="panel flex shrink-0 flex-col overflow-hidden"
-      animate={{ width: collapsed ? RAIL_COLLAPSED : RAIL_WIDTH }}
+      className="panel relative flex shrink-0 flex-col overflow-hidden"
+      animate={{ width: collapsed ? RAIL_COLLAPSED : railWidth }}
       transition={{ type: "spring", stiffness: 320, damping: 34 }}
-      style={{ width: collapsed ? RAIL_COLLAPSED : RAIL_WIDTH }}
+      style={{ width: collapsed ? RAIL_COLLAPSED : railWidth }}
     >
+      {/* This rail sits on the right, so its grip is on its *left* edge and the
+          drag direction is inverted — see `useRailWidth`. */}
+      {!collapsed && <RailGrip side="left" onPointerDown={(e) => startResize(e, "right")} />}
       <header
         className="flex shrink-0 items-center justify-between border-b px-2 py-2"
         style={{ borderColor: "var(--border)" }}

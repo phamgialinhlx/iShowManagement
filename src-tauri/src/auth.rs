@@ -361,6 +361,18 @@ pub async fn jira_transition(
     Ok(session.jira_transition(&key, &transition).await?)
 }
 
+/// Create a task in `project`, assigned to the operator and put in the sprint.
+#[tauri::command]
+pub async fn jira_create(
+    store: State<'_, AuthStore>,
+    project: String,
+    summary: String,
+) -> Result<rmux_cowork::JiraIssue, AuthError> {
+    let guard = store.session.read().await;
+    let session = guard.as_ref().ok_or_else(|| AuthError::message("sign in first"))?;
+    Ok(session.jira_create(&project, &summary).await?)
+}
+
 #[tauri::command]
 pub async fn jira_comment(
     store: State<'_, AuthStore>,

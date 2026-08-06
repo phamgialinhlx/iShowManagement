@@ -1,4 +1,7 @@
 import * as monaco from "monaco-editor";
+
+import { monacoTheme } from "./theme";
+import { activeTheme } from "./theme-runtime";
 import editorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import jsonWorker from "monaco-editor/language/json/json.worker.js?worker";
 import cssWorker from "monaco-editor/language/css/css.worker.js?worker";
@@ -76,113 +79,33 @@ export function initMonaco() {
   if (initialized) return;
   initialized = true;
 
-  monaco.editor.defineTheme(THEME_NAME, {
-    base: "vs-dark",
-    inherit: true,
-    rules: [
-      { token: "", foreground: "e8e6e1" },
+  defineActiveTheme();
 
-      // Dim, but *legible* dim. The previous `5f5c56` measured 2.9:1 against
-      // the panel — under the 4.5:1 that normal text needs, and a comment is
-      // prose. Same correction `--text-faint` already got.
-      { token: "comment", foreground: "7e7b74", fontStyle: "italic" },
-      { token: "comment.doc", foreground: "8a8780", fontStyle: "italic" },
+  // Re-derive when the ANSI theme changes, and re-apply so open editors and any
+  // colourised transcript pick up the new palette. Monaco caches the theme's
+  // token stylesheet, so a redefine plus `setTheme` is what updates live views.
+  if (typeof window !== "undefined") {
+    window.addEventListener("rmux-theme", () => {
+      defineActiveTheme();
+      monaco.editor.setTheme(THEME_NAME);
+    });
+  }
+}
 
-      // Violet — the terminal's magenta. Keywords are the skeleton of a line,
-      // so they carry the strongest hue that is not reserved.
-      { token: "keyword", foreground: "c792ff" },
-      { token: "keyword.flow", foreground: "c792ff" },
-      { token: "keyword.json", foreground: "c792ff" },
-      { token: "storage", foreground: "c792ff" },
-      { token: "tag", foreground: "c792ff" },
-
-      // Green for anything that is literal text.
-      { token: "string", foreground: "5ef2b0" },
-      { token: "string.escape", foreground: "8aefff" },
-      { token: "string.key", foreground: "54b6ff" },
-      { token: "string.value", foreground: "5ef2b0" },
-      { token: "attribute.value", foreground: "5ef2b0" },
-
-      // Amber for literal values that are not text.
-      { token: "number", foreground: "ffd166" },
-      { token: "constant", foreground: "ffd166" },
-      { token: "regexp", foreground: "ffd166" },
-      { token: "annotation", foreground: "ffd166" },
-
-      // Cyan for the names of things — types, classes, namespaces.
-      { token: "type", foreground: "54e6ff" },
-      { token: "type.identifier", foreground: "54e6ff" },
-      { token: "namespace", foreground: "54e6ff" },
-      { token: "class", foreground: "54e6ff" },
-      { token: "struct", foreground: "54e6ff" },
-      { token: "interface", foreground: "54e6ff" },
-
-      // Blue for things that are called or referred to.
-      { token: "function", foreground: "54b6ff" },
-      { token: "support.function", foreground: "54b6ff" },
-      { token: "variable.predefined", foreground: "54b6ff" },
-      { token: "variable.parameter", foreground: "d6d3cd" },
-      { token: "attribute.name", foreground: "54b6ff" },
-      { token: "identifier", foreground: "e8e6e1" },
-      { token: "variable", foreground: "e8e6e1" },
-
-      // Punctuation recedes: it is structure the eye follows without reading.
-      { token: "delimiter", foreground: "98958f" },
-      { token: "operator", foreground: "b8b5ae" },
-      { token: "meta", foreground: "8a8780" },
-
-      // The one red in the editor, and it means what red always means here.
-      { token: "invalid", foreground: "e63b2e" },
-    ],
-    colors: {
-      // Transparent, so the editor sits on the glass panel rather than punching
-      // an opaque rectangle through it.
-      "editor.background": "#00000000",
-      "editor.foreground": "#e8e6e1",
-      "editorLineNumber.foreground": "#5c5953",
-      "editorLineNumber.activeForeground": "#98958f",
-      // The caret is the ONE place red belongs in the editor (rule 0, and rule 2
-      // makes the cursor the only thing allowed to blink).
-      "editorCursor.foreground": "#e63b2e",
-      // Selection and word-occurrence highlights are a neutral chalk wash. Left
-      // to inherit, Monaco derives them from the cursor colour and paints a
-      // bright red block around whatever word you are sitting on — which reads
-      // as an error on every single line you visit.
-      "editor.selectionBackground": "#e8e6e133",
-      "editor.inactiveSelectionBackground": "#e8e6e11a",
-      "editor.selectionHighlightBackground": "#e8e6e114",
-      "editor.wordHighlightBackground": "#e8e6e114",
-      "editor.wordHighlightStrongBackground": "#e8e6e11f",
-      "editor.findMatchBackground": "#c9b89147",
-      "editor.findMatchHighlightBackground": "#c9b89129",
-      "editor.lineHighlightBackground": "#e8e6e10a",
-      "editorIndentGuide.background1": "#e8e6e114",
-      "editorIndentGuide.activeBackground1": "#e8e6e124",
-      "editorWidget.background": "#0e0e0e",
-      "editorWidget.border": "#e8e6e124",
-      "editorSuggestWidget.background": "#0e0e0e",
-      "editorSuggestWidget.selectedBackground": "#e8e6e114",
-      // Bracket pair colourisation ignores the token rules above and ships a
-      // rainbow (gold, orchid, blue) that shouts louder than every control in
-      // the app. Overridden with muted steps of the same palette so nesting is
-      // still legible without spending attention.
-      "editorBracketHighlight.foreground1": "#98958f",
-      "editorBracketHighlight.foreground2": "#a9a6c2",
-      "editorBracketHighlight.foreground3": "#9fb3a4",
-      "editorBracketHighlight.foreground4": "#c9b891",
-      "editorBracketHighlight.foreground5": "#b8b5ae",
-      "editorBracketHighlight.foreground6": "#7f7c76",
-      // An unmatched bracket IS an error the operator must fix — the one place
-      // red is correct here.
-      "editorBracketHighlight.unexpectedBracket.foreground": "#e63b2e",
-      "editorBracketPairGuide.activeBackground1": "#e8e6e124",
-      "editorError.foreground": "#e63b2e",
-      "editorWarning.foreground": "#e0a44a",
-      "scrollbarSlider.background": "#24242499",
-      "scrollbarSlider.hoverBackground": "#2e2e2ecc",
-      "scrollbarSlider.activeBackground": "#2e2e2e",
-    },
-  });
+/**
+ * Define (or redefine) the editor theme from the active palette.
+ *
+ * The mapping — keyword=magenta, string=green, the one red for errors and the
+ * caret — lives in `monacoTheme` (`lib/theme.ts`) so it is derived from the same
+ * 23 colours the terminal uses, rather than hard-coded here. `monacoTheme`
+ * returns exactly `defineTheme`'s shape; the cast is only because it is typed
+ * structurally to stay free of a monaco import.
+ */
+function defineActiveTheme() {
+  monaco.editor.defineTheme(
+    THEME_NAME,
+    monacoTheme(activeTheme()) as monaco.editor.IStandaloneThemeData,
+  );
 }
 
 /**

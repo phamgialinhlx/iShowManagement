@@ -41,7 +41,7 @@ export function ScanBar({
       aria-valuemin={0}
       aria-valuemax={max}
     >
-      <div className="absolute inset-0" style={{ background: "rgba(232,230,225,0.09)" }} />
+      <div className="absolute inset-0" style={{ background: "color-mix(in srgb, var(--text) 9%, transparent)" }} />
       {/*
         No transition on the fill: a meter that eases between readings is
         displaying a value that was never measured.

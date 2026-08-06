@@ -10,6 +10,7 @@ import { CoworkPanel } from "../components/CoworkPanel";
 import { AppearancePanel } from "../components/AppearancePanel";
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { EditorPanel } from "../components/EditorPanel";
+import { ShortcutSettings } from "../components/ShortcutSettings";
 import { api, isTauri, type SignedIn } from "../lib/api";
 import { SERVER_KEY } from "../components/SignIn";
 
@@ -35,6 +36,7 @@ type Section =
   | "cowork"
   | "notifications"
   | "editor"
+  | "shortcuts"
   | "appearance"
   | "diagnostics";
 
@@ -45,7 +47,8 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "cowork", label: "COWORK", blurb: "Your team's server, if you use one" },
   { id: "notifications", label: "NOTIFICATIONS", blurb: "When a session wants you" },
   { id: "editor", label: "EDITOR", blurb: "Whether edits save themselves" },
-  { id: "appearance", label: "APPEARANCE", blurb: "How much desktop shows through" },
+  { id: "shortcuts", label: "SHORTCUTS", blurb: "Move around without the mouse" },
+  { id: "appearance", label: "APPEARANCE", blurb: "Colours, backdrop and interface scale" },
   { id: "diagnostics", label: "DIAGNOSTICS", blurb: "Export the log when something breaks" },
 ];
 
@@ -98,7 +101,7 @@ export function Settings() {
               onClick={() => setSection(s.id)}
               className="flex flex-col gap-[2px] px-2 py-[6px] text-left"
               style={{
-                background: section === s.id ? "rgba(232,230,225,0.06)" : "transparent",
+                background: section === s.id ? "color-mix(in srgb, var(--text) 6%, transparent)" : "transparent",
                 borderLeft:
                   section === s.id ? "2px solid rgb(var(--primary))" : "2px solid transparent",
               }}
@@ -142,6 +145,11 @@ export function Settings() {
           {section === "editor" && (
             <ErrorBoundary label="Editor">
               <EditorPanel />
+            </ErrorBoundary>
+          )}
+          {section === "shortcuts" && (
+            <ErrorBoundary label="Shortcuts">
+              <ShortcutSettings />
             </ErrorBoundary>
           )}
           {section === "appearance" && (

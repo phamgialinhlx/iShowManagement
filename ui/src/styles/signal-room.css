@@ -164,6 +164,33 @@ textarea,
   user-select: text;
 }
 
+/*
+ * Prose opts back in.
+ *
+ * The shell is `user-select: none` because it is an application, not a
+ * document. But a rendered markdown file, an office document or a transcript
+ * *is* a document, and text nobody can select is text nobody can quote, paste
+ * into a prompt, or copy out to a colleague — which for a file preview is most
+ * of what it is for. Reported as "markdown preview in files is not selectable
+ * nor copiable", and it was inherited from `body` rather than set anywhere near
+ * the preview, which is why it looked like a missing feature.
+ *
+ * The `*` is load-bearing: `user-select: none` inherits, so opting the
+ * container in leaves every heading, paragraph and list item inside it still
+ * refusing. `-webkit-` is spelled out because WebKit needs the prefixed
+ * property to override an inherited `none` (the same thing `TranscriptView`
+ * discovered and set inline).
+ */
+.selectable,
+.selectable * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.selectable {
+  cursor: text;
+}
+
 ::selection {
   background: rgb(var(--primary) / 0.3);
   color: var(--text);
@@ -423,6 +450,35 @@ textarea,
  * not apply here.
  */
 .xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+/*
+ * ...and every other layer that can carry one.
+ *
+ * `.xterm-viewport` above is the one that was actually found painting; these are
+ * defensive, so a future xterm release cannot reintroduce an opaque background
+ * somewhere new in the same subtree. `fit()` floors to whole rows, so there is
+ * always a remainder of up to one cell below the last row, and anything opaque
+ * around the canvas shows through it.
+ *
+ * **This is not the fix for the black bar that was reported, and neither was
+ * anything else tried against it.** It was added believing it was, and it
+ * changed nothing. Nor did three scrollbar rules — `overflow-x: hidden` on the
+ * viewport, then on `.xterm-scrollable-element`, then hiding
+ * `.scrollbar.horizontal` — each announced as the answer and each verified to be
+ * served without moving the band. They have been removed; only this rule stays,
+ * because it is correct on its own terms.
+ *
+ * **The band was never in the terminal.** It was Claude's decision card, laid
+ * out below the pane by a cascade collision and clipped to a 12px sliver — see
+ * the `.corner` rule below for the whole account. Nothing in this subtree was
+ * ever involved, which is why ten fixes aimed at it all failed.
+ */
+.xterm,
+.xterm .xterm-screen,
+.xterm .xterm-scroll-area,
+.xterm .xterm-decoration-overlay {
   background-color: transparent !important;
 }
 
@@ -704,8 +760,42 @@ textarea,
 
 /* ------------------------------------------------------------------ motifs */
 
-/* Corner L-bracket. The single most recognisable mark in the language. */
-.corner {
+/*
+ * Corner L-bracket. The single most recognisable mark in the language.
+ *
+ * **The `:not()` is the whole black-bar bug, and it is not cosmetic.**
+ * `.corner` needs a positioning context for its `::after`, but this file is
+ * *unlayered* while Tailwind's utilities live in `@layer utilities` — and an
+ * unlayered rule beats a layered one whatever the source order. So
+ * `class="window corner absolute bottom-3"` computed `position: relative`, and
+ * Tailwind's `absolute` never applied.
+ *
+ * Under relative positioning `bottom`/`left` shift a box from where it already
+ * is instead of pinning it. Claude's decision card is `absolute inset-x-3
+ * bottom-3` inside a pane whose terminal wrapper is `h-full`, so its static
+ * position was *below the pane*: measured 241px tall starting at y=705.5 with
+ * the pane ending at 717.5, shifted 12px up and 12px right by the offsets that
+ * were supposed to pin it. The grid cell is `overflow-hidden`, so all that ever
+ * showed was its top 12px — a dark band across the bottom of the pane, painted
+ * `--app-panel` at `--glass-pct` (94%), which composites to exactly the
+ * rgb(22,13,23) measured off the screen.
+ *
+ * It was read as a transparency fault for a day and a half. Everything about it
+ * pointed the wrong way: it appeared only in *some* sessions (the card exists
+ * only while Claude is waiting on an answer), moved when the window was resized,
+ * and came and went when switching sessions. Ten fixes aimed at xterm — viewport
+ * backgrounds, three scrollbar rules, `FitAddon` padding, the GPU renderer,
+ * native glass — could not have worked: nothing in the terminal was ever
+ * involved. The paint test that finally cornered it showed the band claiming
+ * none of fourteen element backgrounds, which was true and misleading: the card
+ * is a *sibling* of the terminal, so it was never in the chain being painted.
+ * What found it: a probe reporting the rects of *every child of the pane*
+ * rather than a list of suspects chosen in advance. One round.
+ *
+ * A positioning utility now wins, and `::after` still has a positioned ancestor
+ * either way — `absolute`, `fixed` and `sticky` are all positioned.
+ */
+.corner:not(.absolute):not(.fixed):not(.sticky) {
   position: relative;
 }
 
@@ -1024,4 +1114,112 @@ body[data-hidden="true"] * {
   .done-swell {
     animation: none;
   }
+}
+
+/* ------------------------------------------------------------- note widget */
+
+/*
+ * A note renders its own markdown, in a widget a few centimetres wide.
+ *
+ * The transcript's `.markdown` spacing is tuned for a reading column and is far
+ * too airy here — a three-item list would not fit without scrolling. These
+ * override only the vertical rhythm, so headings, code and links keep the one
+ * definition they have everywhere else.
+ */
+.note-block > :first-child {
+  margin-top: 0;
+}
+.note-block > :last-child {
+  margin-bottom: 0;
+}
+.note-block p,
+.note-block ul,
+.note-block ol {
+  margin: 0 0 2px;
+}
+.note-block li {
+  margin: 0;
+}
+.note-block ul {
+  /* Task lists carry their own box; the bullet beside it is noise. */
+  list-style: none;
+  padding-left: 0;
+}
+.note-block ul ul {
+  padding-left: 12px;
+}
+/* An ordinary (non-task) bullet still needs a marker to read as a list. */
+.note-block li:not(:has(> .note-check))::before {
+  content: "· ";
+  color: var(--text-faint);
+}
+
+/*
+ * The checkbox is drawn rather than native.
+ *
+ * A native `<input type=checkbox>` on macOS is a rounded, blue, glossy control
+ * — three separate breaks with the design system (rule 1 forbids radius, and
+ * blue is not in the palette at all), and `accent-color` cannot fix the shape.
+ * `appearance: none` plus a square is the only way it reads as part of rmux.
+ */
+.note-check {
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin: 0 6px 0 0;
+  vertical-align: -1px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.note-check:hover {
+  border-color: var(--text-soft);
+}
+.note-check:checked {
+  /* Amber, not red: a finished task is progress, and rule 0 keeps red for
+     "the operator must act". The tick is drawn with a gradient rather than a
+     glyph so it stays square-capped and needs no font. */
+  background:
+    linear-gradient(45deg, transparent 44%, rgb(var(--busy)) 44%, rgb(var(--busy)) 56%, transparent 56%),
+    linear-gradient(-45deg, transparent 44%, rgb(var(--busy)) 44%, rgb(var(--busy)) 56%, transparent 56%);
+  border-color: rgb(var(--busy) / 0.6);
+}
+/* Done text steps back but stays legible — struck-through *and* faint would put
+   it under the 4.5:1 the design system requires of anything still on screen. */
+.note-block li:has(> .note-check:checked) {
+  color: var(--text-soft);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+}
+
+/* The editing textarea must not jump when it replaces a rendered block. */
+.note-surface textarea {
+  font: inherit;
+  padding: 0;
+}
+
+/* --------------------------------------------------------- progress page */
+
+/*
+ * The Progress page is a *surface*, not a panel over content.
+ *
+ * `.panel` sits at `--panel-tint` (38% by default) and that is right for the
+ * deck: a terminal paints its own dark content, so the desktop showing through
+ * the gaps reads as depth. This page is the opposite — hairline charts, 9px
+ * axis labels and a table of small numbers, with nothing behind them but
+ * wallpaper. Measured against a bright photograph it was unreadable: the bars
+ * competed with clouds.
+ *
+ * So it takes the same treatment as `.window` and `.menu`, for the same stated
+ * reason — a surface that *stacks over* other content is opaque enough to read,
+ * because the alternative is a translucent dialog over a photograph, which is
+ * worse than a plain one. Progress replaces the entire workbench body while it
+ * is open, which makes it a window in every sense but the frame.
+ *
+ * It still tracks `--glass-pct`, so the operator's own material setting moves
+ * it; it is not a hard-coded opaque slab.
+ */
+.progress-page {
+  background: color-mix(in srgb, var(--app-panel) var(--glass-pct), transparent);
 }

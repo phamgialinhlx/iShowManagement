@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api, isTauri, type JiraProfile, type JiraProject } from "../lib/api";
-import { useSessions, type Session } from "../lib/sessions";
+import { useWorkspace } from "../lib/workspace";
 import { ModelChoice } from "./ModelChoice";
 
 /**
@@ -23,16 +23,19 @@ import { ModelChoice } from "./ModelChoice";
  * has to be dismissed before you can look at anything else. As a tab it sits
  * beside Claude and the terminal, where the rest of the session's surfaces are.
  */
-export function SessionSettings({ session }: { session: Session }) {
-  const configure = useSessions((s) => s.configureSession);
-  const setModelProfile = useSessions((s) => s.setModelProfile);
+export function SessionSettings({ sessionId }: { sessionId: string }) {
+  const session = useWorkspace((s) => s.sessions.find((x) => x.id === sessionId));
+  const host = useWorkspace((s) => s.serverOf(sessionId)?.target.host);
+  const configure = useWorkspace((s) => s.configureSession);
+  const setModelProfile = useWorkspace((s) => s.setModelProfile);
+  const setFullscreen = useWorkspace((s) => s.setFullscreen);
 
   const [profiles, setProfiles] = useState<JiraProfile[] | null>(null);
   const [profile, setProfile] = useState("");
   const [projects, setProjects] = useState<JiraProject[]>([]);
-  const [project, setProject] = useState(session.jiraProject ?? "");
-  const [account, setAccount] = useState(session.claudeAccount ?? "");
-  const [window_, setWindow] = useState(String(session.contextWindow ?? ""));
+  const [project, setProject] = useState(session?.jiraProject ?? "");
+  const [account, setAccount] = useState(session?.claudeAccount ?? "");
+  const [window_, setWindow] = useState(String(session?.contextWindow ?? ""));
   const [error, setError] = useState<string | null>(null);
   /** Why the connection list could not be read, as the server put it. */
   const [profileError, setProfileError] = useState<string | null>(null);
@@ -86,7 +89,7 @@ export function SessionSettings({ session }: { session: Session }) {
   const [saved, setSaved] = useState(false);
 
   const save = () => {
-    configure(session.id, {
+    configure(sessionId, {
       claudeAccount: account.trim(),
       jiraProject: project,
       contextWindow: Number(window_) || 0,
@@ -108,8 +111,8 @@ export function SessionSettings({ session }: { session: Session }) {
     <div className="h-full overflow-auto p-5">
       <div className="flex w-full max-w-[520px] flex-col gap-4">
         <header className="flex items-baseline justify-between">
-          <span className="kicker">SESSION · {session.name.toUpperCase()}</span>
-          <span className="micro">{session.target.host ?? "this machine"}</span>
+          <span className="kicker">SESSION · {(session?.name ?? "").toUpperCase()}</span>
+          <span className="micro">{host ?? "this machine"}</span>
         </header>
 
         {/* Applied on the next start rather than staged with the rest of this
@@ -119,12 +122,54 @@ export function SessionSettings({ session }: { session: Session }) {
             is the same "is this broken?" impression as one that does. */}
         <div className="flex flex-col gap-1">
           <ModelChoice
-            value={session.modelProfile ?? null}
-            onChange={(id) => setModelProfile(session.id, id ?? undefined)}
+            value={session?.modelProfile ?? null}
+            onChange={(id) => setModelProfile(sessionId, id ?? undefined)}
           />
           <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
             Takes effect the next time this session's Claude starts — restart the Claude tab to
             switch provider. Profiles are managed under Settings › Models.
+          </span>
+        </div>
+
+        {/*
+          **Moved here out of the Claude tab's header.**
+
+          It restarts the conversation to take effect, and in that header it sat
+          a stray click from INTERRUPT — a control with a real cost, at the
+          busiest point in the app, reached mid-run. It is also decided once per
+          session rather than adjusted while working, which is what this tab is
+          for.
+
+          Inline is the default and should stay it: fullscreen moves Claude to
+          the alternate screen and takes the mouse, so selection, Cmd-C and
+          native scrolling all stop working — the three symptoms that made this
+          pane close to unusable before. The label says what is lost rather than
+          naming the mode, because "fullscreen" does not tell anyone that.
+        */}
+        <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+          <span className="micro">CLAUDE RENDERING</span>
+          <div className="flex gap-2">
+            {([false, true] as const).map((mode) => (
+              <button
+                key={String(mode)}
+                type="button"
+                className="chip"
+                onClick={() => session && setFullscreen(session.id, mode)}
+                style={{
+                  flex: "1 1 0",
+                  color: !!session?.fullscreen === mode ? "var(--text)" : "var(--text-faint)",
+                  background: !!session?.fullscreen === mode ? "var(--hover)" : "transparent",
+                  textDecoration: !!session?.fullscreen === mode ? "underline" : "none",
+                }}
+              >
+                {mode ? "FULLSCREEN TUI" : "INLINE"}
+              </button>
+            ))}
+          </div>
+          <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+            Inline keeps selection, Cmd-C and native scrolling. Claude's fullscreen TUI takes the
+            mouse, so all three stop working — choose it only for its in-TUI scrolling or /focus.
+            Takes effect the next time this session's Claude starts.
           </span>
         </div>
 

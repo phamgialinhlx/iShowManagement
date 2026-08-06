@@ -445,8 +445,8 @@ mod tests {
     const DIALOG_SCRIPT: &str = r#"
 printf 'Do you want to make this edit to a.txt?\r\n'
 printf '\r\n'
-printf '  1. Yes\r\n'
-printf '  2. No\r\n'
+printf ' \xe2\x9d\xaf 1. Yes\r\n'
+printf '   2. No\r\n'
 read -r answer
 printf 'ANSWERED:%s\r\n' "$answer"
 sleep 2

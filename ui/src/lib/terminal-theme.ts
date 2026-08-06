@@ -1,3 +1,6 @@
+import { terminalTheme as themeTerminal, claudeTheme as themeClaude } from "./theme";
+import { activeTheme } from "./theme-runtime";
+
 /**
  * One palette for every terminal in rmux.
  *
@@ -24,49 +27,22 @@
  * asides unreadable rather than subtle.
  */
 /**
- * Read a design token as it is *currently* resolved.
+ * The palette, resolved against the *active theme*.
  *
- * The appearance settings write these onto the root element, so asking the
- * computed style is what makes a terminal obey a choice the operator made after
- * the palette module was first imported.
- */
-function token(name: string, fallback: string): string {
-  if (typeof window === "undefined") return fallback;
-  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return value || fallback;
-}
-
-/**
- * The palette, resolved against the current appearance.
- *
- * **The terminals were the one surface the appearance settings did not reach.**
- * `foreground` was `#e8f4f2` — a cooler, brighter white than the app's own
- * `--text` (`#e8e6e1`) — so the terminal and Claude panes read as whiter than
- * everything around them even at default settings, and a chosen text colour
- * changed every surface except the two the operator spends all day looking at.
- * Reported exactly that way: "the main terminal and claude section always feels
- * more white".
- *
- * `white` and `brightWhite` follow too. `brightWhite` was pure `#ffffff`, which
- * is what bold text in a TUI uses constantly — so the brightest thing on screen
- * was brighter than anything the design system allows anywhere else.
+ * These used to read design tokens off the DOM. Now the ANSI theme system is the
+ * source of truth (`lib/theme.ts` + `lib/theme-runtime.ts`), so both delegate to
+ * the pure derivation applied to whichever theme is active — the terminal and the
+ * chrome finally agree on every colour, and switching a theme re-skins them
+ * together. The no-arg shape is kept so the xterm hosts do not change their call
+ * sites; they re-read on the `rmux-theme` event when the active theme changes.
  */
 export function terminalTheme(): Record<string, string> {
-  const text = token("--text", "#e8e6e1");
-  return {
-    ...TERMINAL_THEME,
-    foreground: text,
-    white: text,
-    // Still a step up from `white`, because a TUI uses bold to mean something —
-    // but derived from the operator's colour rather than overshooting it.
-    brightWhite: token("--text-bright", text),
-    cursor: token("--text", TERMINAL_THEME.cursor),
-  };
+  return themeTerminal(activeTheme());
 }
 
-/** The Claude pane differs in one thing only: red, because that is its cursor. */
+/** The Claude pane now matches the terminal exactly, cursor included. */
 export function claudeTheme(): Record<string, string> {
-  return { ...terminalTheme(), cursor: "#e63b2e" };
+  return themeClaude(activeTheme());
 }
 
 export const TERMINAL_THEME = {
@@ -97,8 +73,9 @@ export const TERMINAL_THEME = {
   brightWhite: "#ffffff",
 } as const;
 
-/** Kept for callers that want the static defaults; the live one is `claudeTheme()`. */
-export const CLAUDE_THEME = { ...TERMINAL_THEME, cursor: "#e63b2e" } as const;
+/** Kept for callers that want the static defaults; the live one is `claudeTheme()`.
+ *  Identical to `TERMINAL_THEME` now — the Claude pane no longer reddens its cursor. */
+export const CLAUDE_THEME = { ...TERMINAL_THEME } as const;
 
 /**
  * Whether terminals render on the GPU.

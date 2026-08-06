@@ -2,7 +2,15 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { isTauri } from "../lib/api";
-import { quietWhenWatching, setQuietWhenWatching } from "../lib/notify";
+import {
+  quietWhenWatching,
+  setQuietWhenWatching,
+  alertWhenUnwatched,
+  setAlertWhenUnwatched,
+  alertSound,
+  setAlertSound,
+  playAlertSound,
+} from "../lib/notify";
 
 /**
  * Notifications, and a way to find out whether they actually work.
@@ -22,6 +30,8 @@ import { quietWhenWatching, setQuietWhenWatching } from "../lib/notify";
 export function NotificationsPanel() {
   const [sent, setSent] = useState(false);
   const [quiet, setQuiet] = useState(quietWhenWatching);
+  const [alerting, setAlerting] = useState(alertWhenUnwatched);
+  const [sound, setSound] = useState(alertSound);
   const [error, setError] = useState<string | null>(null);
 
   const test = async () => {
@@ -71,6 +81,54 @@ export function NotificationsPanel() {
               Off by default. This was once the unconditional behaviour and it made the feature
               look broken — you watch a session precisely because you are waiting on it, and
               silence is indistinguishable from a bug.
+            </span>
+          </span>
+        </label>
+
+        <label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            checked={alerting}
+            style={{ accentColor: "rgb(var(--primary))", marginTop: 2 }}
+            onChange={(e) => {
+              setAlerting(e.target.checked);
+              setAlertWhenUnwatched(e.target.checked);
+            }}
+          />
+          <span className="flex flex-col gap-[2px]">
+            <span className="data text-[11px]" style={{ color: "var(--text)" }}>
+              Also alert in the app, for sessions I am not watching
+            </span>
+            <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+              On by default. A notification banner slides away on its own, which is fine for
+              &ldquo;this finished&rdquo; and not enough for a session that has stopped to ask
+              something and is blocking everything behind it. The alert stays until you deal with
+              it. Turn this off to get notifications only.
+            </span>
+          </span>
+        </label>
+
+        <label className="flex items-start gap-2" style={{ marginLeft: 20 }}>
+          <input
+            type="checkbox"
+            checked={sound}
+            disabled={!alerting}
+            style={{ accentColor: "rgb(var(--primary))", marginTop: 2 }}
+            onChange={(e) => {
+              setSound(e.target.checked);
+              setAlertSound(e.target.checked);
+              if (e.target.checked) playAlertSound();
+            }}
+          />
+          <span className="flex flex-col gap-[2px]">
+            <span
+              className="data text-[11px]"
+              style={{ color: alerting ? "var(--text)" : "var(--text-faint)" }}
+            >
+              Play a sound with the alert
+            </span>
+            <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+              Ticking this plays it, so you know what you are agreeing to and that it works at all.
             </span>
           </span>
         </label>

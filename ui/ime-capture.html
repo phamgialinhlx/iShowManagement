@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>IME capture</title>
+<style>
+  html, body { margin: 0; background: #141414; color: #e8e6e1;
+               font: 13px "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+  #wrap { padding: 14px; display: flex; flex-direction: column; gap: 12px; height: 100vh;
+          box-sizing: border-box; }
+  h1 { font-size: 13px; letter-spacing: .08em; margin: 0; color: #7e7b74; font-weight: 400; }
+  #term { height: 220px; }
+  #log { flex: 1; overflow: auto; white-space: pre; background: #0d0d0d; padding: 8px;
+         font-size: 11px; line-height: 1.45; border: 1px solid #2a2a2a; }
+  button { font: inherit; background: #1f1f1f; color: #e8e6e1; border: 1px solid #3a3a3a;
+           padding: 6px 12px; cursor: pointer; }
+  .step { color: #e8c15a; }
+</style>
+<div id="wrap">
+  <h1>IME CAPTURE — TYPE ONE VIETNAMESE WORD INTO THE TERMINAL BELOW</h1>
+  <div class="step">
+    1. Switch macOS to Vietnamese (Telex).&nbsp; 2. Click the black terminal.&nbsp;
+    3. Type <b>tieengs</b> (→ &ldquo;tiếng&rdquo;), then a space.&nbsp;
+    4. Press COPY LOG and paste it back.
+  </div>
+  <div id="term"></div>
+  <div>
+    <button id="copy">COPY LOG</button>
+    <button id="clear">CLEAR</button>
+    <span id="sent" style="margin-left:14px;color:#7e7b74"></span>
+  </div>
+  <div id="log"></div>
+</div>
+<script type="module" src="/ime-capture.ts"></script>

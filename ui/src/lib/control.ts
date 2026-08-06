@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 
 import { api, isTauri } from "./api";
-import { useSessions, type Session } from "./sessions";
+import { useWorkspace } from "./workspace";
 
 /**
  * Keeping rmux's backend face in step with the workbench.
@@ -18,13 +18,14 @@ import { useSessions, type Session } from "./sessions";
  * because every one of those is free to change without warning.
  */
 
-const shape = (s: Session) => ({
-  id: s.id,
-  name: s.name,
-  // Omitted rather than "localhost" for a local session: a client might try to
-  // ssh to whatever this says.
-  ...(s.target.host ? { host: s.target.host } : {}),
-  folder: s.folder,
+/** The client-facing view of a session: id, name, and — resolved from its
+ *  Project/Server — the host and folder. Host is omitted rather than "localhost"
+ *  for a local session: a client might try to ssh to whatever this says. */
+const shape = (id: string, name: string, host: string | undefined, folder: string) => ({
+  id,
+  name,
+  ...(host ? { host } : {}),
+  folder,
 });
 
 /** What a browser told us about a page. Mirrors `rmux_control::Report`. */
@@ -71,18 +72,27 @@ export function startControlBridge(): void {
   if (started || !isTauri()) return;
   started = true;
 
-  const push = (state: { sessions: Session[]; activeSession: string | null }) => {
-    void api.controlSync(state.sessions.map(shape), state.activeSession).catch(() => {
+  const push = (state: ReturnType<typeof useWorkspace.getState>) => {
+    const mirror = state.sessions.map((s) =>
+      shape(s.id, s.name, state.serverOf(s.id)?.target.host, state.projectOf(s.id)?.folder ?? ""),
+    );
+    void api.controlSync(mirror, state.activeSession).catch(() => {
       // The socket is optional — see `control.rs`. A client that cannot attach
       // is not a reason to surface anything in the workbench.
     });
   };
 
-  push(useSessions.getState());
-  useSessions.subscribe((state, previous) => {
+  push(useWorkspace.getState());
+  useWorkspace.subscribe((state, previous) => {
     // Cheap guard: this fires on every keystroke in an editor, and re-sending
-    // an unchanged list would be an IPC call per character.
-    if (state.sessions === previous.sessions && state.activeSession === previous.activeSession) {
+    // an unchanged list would be an IPC call per character. Projects/servers are
+    // watched too, because host and folder are resolved from them.
+    if (
+      state.sessions === previous.sessions &&
+      state.activeSession === previous.activeSession &&
+      state.projects === previous.projects &&
+      state.servers === previous.servers
+    ) {
       return;
     }
     push(state);
@@ -92,8 +102,8 @@ export function startControlBridge(): void {
     // A client asking rmux to switch. Honoured only for a session that exists —
     // activating an unknown id would blank the workbench.
     const id = event.payload;
-    if (useSessions.getState().sessions.some((s) => s.id === id)) {
-      useSessions.getState().activate(id);
+    if (useWorkspace.getState().sessions.some((s) => s.id === id)) {
+      useWorkspace.getState().activate(id);
     }
   });
 

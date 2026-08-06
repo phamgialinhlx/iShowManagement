@@ -61,7 +61,7 @@ export function SshPrompt() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.15 }}
           className="fixed inset-0 z-[100] grid place-items-center"
-          style={{ background: "rgba(6,6,6,0.62)" }}
+          style={{ background: "color-mix(in srgb, var(--app-bg) 62%, transparent)" }}
         >
           <motion.form
             initial={{ opacity: 0, y: 12 }}

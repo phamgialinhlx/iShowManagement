@@ -122,7 +122,11 @@ pub fn probe_script() -> String {
 /// name, and it is the same binary.
 fn is_wsl_launcher(path: &str) -> bool {
     let lower = path.to_ascii_lowercase().replace('/', "\\");
-    lower.ends_with("\\system32\\bash.exe") || lower.ends_with("\\sysnative\\bash.exe")
+    lower.ends_with("\\system32\\bash.exe")
+        || lower.ends_with("\\sysnative\\bash.exe")
+        // Windows 10/11 also exposes the WSL launcher via the per-user app
+        // package path; `where bash.exe` reports it ahead of Git Bash.
+        || lower.ends_with("\\windowsapps\\bash.exe")
 }
 
 /// Pick the shell out of [`probe_script`]'s output.
@@ -165,7 +169,11 @@ pub fn wrap(bash: &str, posix_line: &str) -> String {
         "s=$(mktemp);echo {encoded}|base64 -d>$s;SHELL=$BASH bash $s;e=$?;rm -f $s;exit $e"
     );
 
-    format!("{bash} -lc \"{inner}\"")
+    // `TERM=dumb` prevents the login shell's startup files (e.g. Git Bash's
+    // default `.bash_profile`) from emitting terminal reset sequences such as
+    // `\x1b[H\x1b[2J\x1b[3J`, which corrupt file listings and file contents.
+    // The value is quoted so spaces in the eventual path do not break the `set`.
+    format!("set \"TERM=dumb\" && {bash} -lc \"{inner}\"")
 }
 
 /// Standard base64, no wrapping.
@@ -210,9 +218,13 @@ mod tests {
             assert!(!line.contains(fragment), "{fragment:?} reached the command line: {line}");
         }
 
-        // Exactly one pair of quotes, opened and closed by us. A third would end
-        // the argument early and hand the rest to `cmd` as commands.
-        assert_eq!(line.matches('"').count(), 2, "{line}");
+        // The wrapper's own arguments are quoted too (`set "TERM=dumb"` and the
+        // `-lc` argument). What matters is no *script* text reaches the command
+        // line and every quote is balanced.
+        assert!(
+            line.matches('"').count() >= 2 && line.matches('"').count().is_multiple_of(2),
+            "{line}"
+        );
         // And a `%` from a script must never survive: `cmd` expands it.
         assert!(!line.contains('%'), "{line}");
     }
@@ -268,6 +280,13 @@ mod tests {
         assert_eq!(parse_probe("C:\\Windows\\Sysnative\\bash.exe"), None);
         // Case is not meaningful on Windows paths, and neither is the separator.
         assert_eq!(parse_probe("c:/windows/system32/BASH.EXE"), None);
+        // Modern Windows puts the WSL launcher in the per-user package path as
+        // well; selecting it would list the distro's filesystem under the
+        // Windows host's name.
+        assert_eq!(
+            parse_probe("C:\\Users\\ngoca\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe"),
+            None
+        );
     }
 
     #[test]
@@ -284,6 +303,16 @@ mod tests {
         // starts — would have launched cmd through a POSIX wrapper.
         let line = wrap("bash", "exec $SHELL -l -i");
         assert!(line.contains("SHELL=$BASH bash $s"), "{line}");
+    }
+
+    #[test]
+    fn dumb_term_prevents_login_shell_output_from_corrupting_command_output() {
+        // Git Bash's default `.bash_profile` clears the terminal on login. The
+        // escape sequences it emits would otherwise be appended to every file
+        // read and directory listing as if they were part of the payload.
+        let line = wrap("bash", "cat f");
+        assert!(line.contains("set \"TERM=dumb\""), "{line}");
+        assert!(line.contains("TERM=dumb"), "{line}");
     }
 
     #[test]

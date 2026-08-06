@@ -1,24 +1,30 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Metrics } from "../components/Metrics";
-import { NewSessionLayer } from "../components/NewSession";
-import { SessionDeck } from "../components/SessionView";
-import { SessionRail } from "../components/SessionRail";
-import { WidgetRail } from "../components/WidgetRail";
+import { WorkspaceNewSessionLayer, type NewMode } from "../components/WorkspaceNewSession";
+import { WorkspaceDeck } from "../components/WorkspaceDeck";
+import { WorkspaceRail } from "../components/WorkspaceRail";
+import { WidgetRail, type Active } from "../components/WidgetRail";
+import { AlertStack } from "../components/AlertStack";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
-import { isDirty, useSessions } from "../lib/sessions";
+import { DECKS, deckId } from "../lib/grid";
+import { useWorkspace } from "../lib/workspace";
+import { startAttentionWatch } from "../lib/attention";
+import { useShortcuts } from "../lib/use-shortcuts";
 import { startStatusWatch } from "../lib/status-watch";
 import { api, isTauri, type LockStatus, type SignedIn } from "../lib/api";
 import { SignIn } from "../components/SignIn";
+import { Dashboard } from "./Dashboard";
 
 /**
  * The workbench.
  *
- * Sessions on the left, the active session's workspace on the right. The rail is
- * always present because the app's real job is not "edit this folder" — it is
- * "keep several pieces of work moving, and tell me which one needs me".
+ * A **Server → Project → Session** tree on the left, a pane manager in the
+ * middle, instruments on the right. The rail is always present because the
+ * app's job is not "edit this folder" — it is "keep several pieces of work
+ * moving across several machines, and tell me which one needs me".
  */
 export function Workbench({
   session,
@@ -30,13 +36,13 @@ export function Workbench({
   const [signInOpen, setSignInOpen] = useState(false);
   const [lock, setLock] = useState<LockStatus | null>(null);
 
-  // The rail's status for sessions that are *not* on screen. Started here
-  // rather than in a pane, because a pane only exists for a session you can
-  // already see — see `status-watch`.
+  // The rail's status for sessions that are not on screen. Started here rather
+  // than in a pane, because a pane only exists for a session you can see.
   useEffect(() => startStatusWatch(), []);
+  // One watcher for the whole app: attention is singular, so counting it per
+  // pane would credit every mounted session at once. See `lib/attention.ts`.
+  useEffect(() => startAttentionWatch(), []);
 
-  // Whether a lock exists is keychain state, not something this screen can infer
-  // from having a session — the app may have been unlocked on the way in.
   useEffect(() => {
     if (!isTauri() || !session) return;
     let cancelled = false;
@@ -48,28 +54,63 @@ export function Workbench({
       cancelled = true;
     };
   }, [session]);
-  const sessions = useSessions((s) => s.sessions);
-  const activeId = useSessions((s) => s.activeSession);
-  const buffers = useSessions((s) => s.buffers);
-  const activate = useSessions((s) => s.activate);
-  const grid = useSessions((s) => s.grid);
-  const setGrid = useSessions((s) => s.setGrid);
 
-  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const servers = useWorkspace((s) => s.servers);
+  const sessions = useWorkspace((s) => s.sessions);
+  const activeId = useWorkspace((s) => s.activeSession);
+  const runtime = useWorkspace((s) => s.runtime);
+  const activate = useWorkspace((s) => s.activate);
+  const deck = useWorkspace((s) => s.deck);
+  const setDeck = useWorkspace((s) => s.setDeck);
+  const railCollapsed = useWorkspace((s) => s.railCollapsed);
+  const toggleRail = useWorkspace((s) => s.toggleRail);
+  const serverOf = useWorkspace((s) => s.serverOf);
+  const projectOf = useWorkspace((s) => s.projectOf);
+  const targetOf = useWorkspace((s) => s.targetOf);
+
+  const [newMode, setNewMode] = useState<NewMode | null>(null);
+  const [dashboard, setDashboard] = useState(false);
+
+  // The keyboard, bound once for the whole workbench. See `use-shortcuts.ts`
+  // for why it is one listener and why it bubbles rather than captures.
+  useShortcuts({ progressOpen: dashboard, onProgress: setDashboard });
 
   const active = sessions.find((s) => s.id === activeId) ?? null;
-  const dirtyCount = Object.values(buffers).filter(isDirty).length;
-  const waiting = sessions.filter((s) => s.status === "waiting");
+  const activeProject = active ? projectOf(active.id) : undefined;
+  const activeTarget = active ? targetOf(active.id) : undefined;
+  const activeHost = active ? serverOf(active.id)?.target.host : undefined;
 
-  // Open the dialog on a first run, so the app is never a blank window with no
-  // obvious next step.
+  const waitingIds = useMemo(
+    () =>
+      sessions
+        .filter((s) => s.kind === "claude" && runtime[s.id]?.status === "waiting")
+        .map((s) => s.id),
+    [sessions, runtime],
+  );
+
+  // The flattened context the instruments read (v3 splits target/folder off the
+  // session — see `Active`).
+  const activeCtx: Active | null =
+    active && activeTarget
+      ? {
+          id: active.id,
+          target: activeTarget,
+          folder: activeProject?.folder ?? "",
+          resume: active.resume,
+          contextWindow: active.contextWindow,
+          jiraProject: active.jiraProject,
+        }
+      : null;
+
+  // Open the connect dialog on a first run, so the app is never a blank window
+  // with no obvious next step.
   useEffect(() => {
-    if (sessions.length === 0) setNewSessionOpen(true);
+    if (servers.length === 0) setNewMode({ kind: "server" });
     // Only on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Global shortcuts. Session-scoped ones live in SessionView.
+  // Global shortcuts. Pane-scoped ones live in the panes.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
@@ -77,10 +118,8 @@ export function Workbench({
 
       if (e.key.toLowerCase() === "n") {
         e.preventDefault();
-        setNewSessionOpen(true);
+        setNewMode({ kind: "server" });
       }
-      // ⌘1..⌘9 jumps straight to a session — the fastest way to switch when
-      // several are running at once.
       const digit = Number(e.key);
       if (Number.isInteger(digit) && digit >= 1 && digit <= 9) {
         const target = sessions[digit - 1];
@@ -101,105 +140,132 @@ export function Workbench({
         <div className="flex items-center gap-3" data-tauri-drag-region>
           {active && (
             <span className="micro" data-tauri-drag-region>
-              {active.name} · {active.target.host ?? "local"}
+              {active.name} · {activeHost ?? "local"}
             </span>
           )}
         </div>
       </TitleBar>
 
       <div className="flex h-full w-full flex-col" style={{ paddingTop: TITLE_BAR_HEIGHT }}>
+        {/*
+          **Progress replaces the body; it does not float over it.** Every panel
+          here is translucent by design, so an overlay let the terminal and the
+          rail show straight through the charts — and tinting the sheet to fix
+          that would just make the app opaque, which is the thing the appearance
+          system exists to avoid. The title bar and footer stay, because they
+          carry the way back.
+        */}
+        {dashboard ? (
+          <ErrorBoundary label="Progress">
+            <Dashboard onClose={() => setDashboard(false)} />
+          </ErrorBoundary>
+        ) : (
         <div className="flex min-h-0 flex-1">
-          <SessionRail onNewSession={() => setNewSessionOpen(true)} />
+          <WorkspaceRail
+            onConnectServer={() => setNewMode({ kind: "server" })}
+            onNewProject={(serverId) => setNewMode({ kind: "project", serverId })}
+          />
 
-          {active ? (
-            <ErrorBoundary label="This session">
-              <SessionDeck />
-            </ErrorBoundary>
-          ) : (
-            <div className="grid flex-1 place-items-center">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => setNewSessionOpen(true)}
-              >
-                New session
-              </button>
-            </div>
-          )}
+          <ErrorBoundary label="The workbench">
+            <WorkspaceDeck />
+          </ErrorBoundary>
 
-          {/* Instruments last, so the work keeps the middle of the screen. Its
-              own error boundary: a widget that throws must not take the session
-              down with it. */}
           <ErrorBoundary label="Instruments">
-            <WidgetRail session={active ?? null} />
+            <WidgetRail session={activeCtx} />
           </ErrorBoundary>
         </div>
+        )}
 
         <footer
           className="flex shrink-0 items-center gap-4 border-t px-3 py-1"
           style={{ borderColor: "var(--border)" }}
         >
+          <button
+            type="button"
+            aria-label={railCollapsed ? "Show the servers panel" : "Hide the servers panel"}
+            aria-pressed={!railCollapsed}
+            title={railCollapsed ? "Show servers panel" : "Hide servers panel"}
+            onClick={toggleRail}
+            className="shrink-0"
+            style={{ color: railCollapsed ? "var(--text-faint)" : "var(--text-soft)" }}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="square"
+              aria-hidden="true"
+            >
+              <rect x="3" y="4" width="18" height="16" />
+              <path d="M9 4v16" />
+            </svg>
+          </button>
+
           {active && (
             <>
-              <span className="micro">
-                {active.target.host ? `ssh · ${active.target.host}` : "local"}
-              </span>
-              <span className="micro truncate" title={active.folder}>
-                {active.folder}
-              </span>
+              <span className="micro">{activeHost ? `ssh · ${activeHost}` : "local"}</span>
+              {activeProject && (
+                <span className="micro truncate" title={activeProject.folder}>
+                  {activeProject.folder}
+                </span>
+              )}
             </>
           )}
 
           <div className="ml-auto flex items-center gap-4">
-            {/* Sessions needing attention, visible wherever you are. Clicking
-                jumps straight there — the point of the whole design. */}
-            {waiting.length > 0 && (
+            {waitingIds.length > 0 && (
               <button
                 type="button"
                 className="chip"
                 style={{ color: "rgb(var(--primary))" }}
-                onClick={() => activate(waiting[0]!.id)}
+                onClick={() => activate(waitingIds[0]!)}
                 title="Go to the session waiting on you"
               >
-                {waiting.length} waiting
+                {waitingIds.length} waiting
               </button>
             )}
 
-            {dirtyCount > 0 && (
-              <span className="micro" style={{ color: "rgb(var(--busy))" }}>
-                {dirtyCount} unsaved
-              </span>
-            )}
+            <button
+              type="button"
+              className="chip"
+              onClick={() => setDashboard((on) => !on)}
+              title="Tasks, time, charts and goals across every session"
+              style={{ color: dashboard ? "var(--text)" : undefined, background: dashboard ? "var(--hover)" : undefined }}
+            >
+              PROGRESS
+            </button>
 
-            {/* Focus, or an NxN grid — several sessions at once, the way you
-                would watch several cameras. */}
             <div className="flex items-center gap-1">
               <span className="micro">VIEW</span>
-              {[1, 2, 3, 4].map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  className="data px-[5px] text-[10px]"
-                  onClick={() => setGrid(n)}
-                  title={n === 1 ? "One session at a time" : `${n}×${n} grid`}
-                  style={{
-                    border: "1px solid var(--border)",
-                    color: grid === n ? "var(--text)" : "var(--text-soft)",
-                    background: grid === n ? "var(--hover)" : "transparent",
-                  }}
-                >
-                  {n === 1 ? "1" : `${n}×${n}`}
-                </button>
-              ))}
+              {DECKS.map((d) => {
+                const on = deckId(deck) === d.id;
+                return (
+                  <button
+                    key={d.id}
+                    type="button"
+                    className="data px-[5px] text-[10px]"
+                    onClick={() => setDeck(d.deck)}
+                    title={d.title}
+                    style={{
+                      border: "1px solid var(--border)",
+                      color: on ? "var(--text)" : "var(--text-soft)",
+                      background: on ? "var(--hover)" : "transparent",
+                      // Selection is not carried by tone alone: at 10px a tonal
+                      // step is not a state anyone can see across six chips.
+                      textDecoration: on ? "underline" : "none",
+                    }}
+                  >
+                    {d.label}
+                  </button>
+                );
+              })}
             </div>
 
-            {active && <Metrics target={active.target} />}
+            {activeTarget && <Metrics target={activeTarget} />}
 
-            <span className="micro">
-              {session ? session.account.displayName || session.account.username : "not signed in"}
-            </span>
-            {/* Settings is a separate window: account management and the lock
-                are decisions you visit and leave, not things to watch. */}
             <button
               type="button"
               className="chip"
@@ -209,26 +275,13 @@ export function Workbench({
             >
               {lock?.locked ? "settings · locked" : "settings"}
             </button>
-            <button
-              type="button"
-              className="chip"
-              style={{ color: session ? "var(--text-faint)" : "var(--text)" }}
-              onClick={() => {
-                if (!session) {
-                  setSignInOpen(true);
-                  return;
-                }
-                void api.signOut().finally(() => onSession(null));
-              }}
-            >
-              {session ? "sign out" : "sign in"}
-            </button>
           </div>
         </footer>
-      </div>
+            <AlertStack />
+</div>
 
-      <ErrorBoundary label="New session" onReset={() => setNewSessionOpen(false)}>
-        <NewSessionLayer open={newSessionOpen} onClose={() => setNewSessionOpen(false)} />
+      <ErrorBoundary label="New" onReset={() => setNewMode(null)}>
+        <WorkspaceNewSessionLayer mode={newMode} onClose={() => setNewMode(null)} />
       </ErrorBoundary>
 
       <AnimatePresence>

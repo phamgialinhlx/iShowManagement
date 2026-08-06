@@ -182,6 +182,16 @@ fn parse_choice(line: &str) -> Option<(String, String, bool)> {
     Some((digits.to_owned(), label.to_owned(), selected))
 }
 
+/// Is this option line drawn inside Claude's box frame?
+///
+/// Only the vertical rules count. A `─` run is the *trust* prompt's separator
+/// rather than a frame, and matching it would re-admit every numbered list that
+/// happens to sit under a horizontal rule.
+fn is_framed(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with(['│', '|']) && trimmed.ends_with(['│', '|'])
+}
+
 /// Strip box-drawing characters and surrounding whitespace from a line.
 fn strip_chrome(line: &str) -> String {
     line.trim_matches(|c: char| {
@@ -267,6 +277,31 @@ pub fn parse_state(lines: &[String]) -> ClaudeState {
     // A lone numbered line is ordinary output — a list in a code block, a
     // changelog. Two or more consecutive options is what makes it a dialog.
     if choices.len() < 2 {
+        return ClaudeState { prompt: None, working };
+    }
+
+    // **A dialog has a cursor; prose does not.** Counting numbered lines alone
+    // turned any "1. … 2. … 3. …" list into a decision card — measured on a real
+    // session, a six-point security summary became a six-option card covering the
+    // terminal. It went unnoticed for as long as it did only because a separate
+    // CSS fault (see `.corner` in `signal-room.css`) clipped that card to a 12px
+    // sliver, which was reported as a black bar; fixing the position exposed this
+    // underneath it.
+    //
+    // Requiring the box-drawing frame was the mitigation this code suggested, and
+    // it is wrong: Claude's *trust* prompt is not framed — it uses a horizontal
+    // rule — so a frame check would silently stop detecting the one dialog that
+    // blocks a session from ever starting.
+    //
+    // What both real captures have, and what a numbered list in prose never has,
+    // is the selection caret marking the highlighted option. That is the TUI's
+    // cursor: an interactive select always renders it, because it is how the
+    // operator knows what Enter will choose. The frame is still accepted as an
+    // alternative so a repaint that lands mid-frame — options drawn, caret not yet
+    // — does not make the card flicker out.
+    let has_cursor = choices.iter().any(|c| c.selected);
+    let framed = first_choice_row.is_some_and(|row| is_framed(&lines[row]));
+    if !has_cursor && !framed {
         return ClaudeState { prompt: None, working };
     }
 
@@ -365,7 +400,7 @@ mod tests {
     #[test]
     fn a_question_is_preferred_over_nearer_prose() {
         let screen = lines(
-            "Should I delete the old migrations?\n\nSee the docs\n\n  1. Yes\n  2. No\n",
+            "Should I delete the old migrations?\n\nSee the docs\n\n ❯ 1. Yes\n   2. No\n",
         );
         let prompt = parse_state(&screen).prompt.unwrap();
         // "See the docs" is nearer, but it asks nothing.
@@ -375,7 +410,7 @@ mod tests {
     #[test]
     fn a_dialog_with_no_question_mark_still_gets_a_label() {
         // Better a nearby line than an empty card.
-        let prompt = parse_state(&lines("Choose a branch\n\n  1. main\n  2. develop\n"))
+        let prompt = parse_state(&lines("Choose a branch\n\n ❯ 1. main\n   2. develop\n"))
             .prompt
             .unwrap();
         assert_eq!(prompt.question, "Choose a branch");
@@ -434,22 +469,20 @@ mod tests {
         assert!(state.prompt.is_none());
     }
 
-    /// Known limitation, asserted so it is a deliberate choice rather than a
-    /// surprise: a numbered list in Claude's prose is indistinguishable from a
-    /// dialog by shape alone, so it raises a prompt card.
+    /// A numbered list in prose is not a dialog.
     ///
-    /// Screen scraping cannot fully resolve this — the TUI gives no marker that
-    /// says "this is a dialog". The mitigation is that answering is guarded by a
-    /// fingerprint, so a spurious card cannot deliver a keystroke to something
-    /// that has moved on; pressing it merely types a digit into the composer.
-    /// If it becomes a nuisance, the fix is to require the box-drawing frame
-    /// Claude puts around real dialogs.
+    /// This asserted the opposite for months — "documenting current behaviour,
+    /// not endorsing it" — and the behaviour it documented was a real fault:
+    /// on a live session a six-point security summary became a six-option
+    /// decision card drawn over the terminal. Nobody reported it because a CSS
+    /// fault clipped that card to a 12px sliver, which was reported instead as
+    /// a black bar along the bottom of the pane.
     #[test]
-    fn a_numbered_list_in_prose_is_currently_mistaken_for_a_dialog() {
+    fn a_numbered_list_in_prose_is_not_a_dialog() {
         let state = parse_state(&lines(
             "Here is the plan:\n\n1. Read the config\n2. Update the port\n3. Restart",
         ));
-        assert!(state.prompt.is_some(), "documenting current behaviour, not endorsing it");
+        assert!(state.prompt.is_none(), "no cursor and no frame — this is prose");
     }
 
     #[test]

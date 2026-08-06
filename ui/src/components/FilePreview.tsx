@@ -103,7 +103,7 @@ const humanBytes = (bytes: number) => {
 export function MarkdownPreview({ text }: { text: string }) {
   return (
     <div className="h-full overflow-auto px-6 py-4">
-      <div className="markdown data mx-auto max-w-[820px] text-[13px] leading-[1.7]">
+      <div className="markdown selectable data mx-auto max-w-[820px] text-[13px] leading-[1.7]">
         <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
       </div>
     </div>
@@ -342,7 +342,7 @@ function OfficePreview({
         {/* mammoth emits a fixed, small set of semantic tags — no scripts, no
             styles, no attributes — so the markdown typography applies cleanly. */}
         <div
-          className="markdown data mx-auto max-w-[820px] text-[13px] leading-[1.7]"
+          className="markdown selectable data mx-auto max-w-[820px] text-[13px] leading-[1.7]"
           dangerouslySetInnerHTML={{ __html: result.html }}
         />
       </div>

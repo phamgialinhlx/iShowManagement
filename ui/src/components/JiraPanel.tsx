@@ -4,7 +4,6 @@ import { api, isTauri, type JiraIssue, type JiraIssueDetail, type JiraTransition
 import { classify, inProject, loadIssues, summarise, type IssuesState } from "../lib/jira";
 // The same sanitiser the `.docx` reader uses, and for the same reason.
 import { sanitize } from "../lib/office";
-import type { Session } from "../lib/sessions";
 
 /**
  * The session's Jira work.
@@ -42,8 +41,7 @@ const CATEGORY_TONE: Record<string, string> = {
   inprogress: "rgb(var(--busy))",
 };
 
-export function JiraPanel({ session }: { session: Session }) {
-  const project = session.jiraProject ?? "";
+export function JiraPanel({ project }: { project: string }) {
   const [state, setState] = useState<IssuesState>({ state: "loading" });
 
   const reload = useCallback(async () => {

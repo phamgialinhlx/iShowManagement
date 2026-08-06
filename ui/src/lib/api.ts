@@ -1,5 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { Theme } from "./theme";
+
+/**
+ * The theme config as Rust serves it: which theme is active, plus only the
+ * operator's saved themes. The UI merges its code-defined built-ins on top — a
+ * built-in may be `active` without appearing in `userThemes`.
+ */
+export type ThemeState = { active: string; userThemes: Theme[] };
+
 /**
  * Typed wrappers over the Rust IPC surface.
  *
@@ -465,6 +474,17 @@ export const api = {
   glassStatus: () => call<GlassStatus>("glass_status"),
   setGlass: (options: GlassOptions) => call<GlassStatus>("set_glass", { options }),
 
+  // --- the theme (ANSI palette) ---------------------------------------------
+  //
+  // The file is canonical (`src-tauri/src/theme.rs`). Rust stores only the
+  // operator's themes plus which one is active; the built-in palettes are the
+  // UI's (`lib/theme.ts`), merged over what this returns.
+  themeState: () => call<ThemeState>("theme_state"),
+  /** Create or update a user theme. Rust refuses a built-in name. */
+  themeSave: (theme: Theme) => call<ThemeState>("theme_save", { theme }),
+  themeSetActive: (name: string) => call<ThemeState>("theme_set_active", { name }),
+  themeDelete: (name: string) => call<ThemeState>("theme_delete", { name }),
+
   jiraProfiles: () => call<JiraProfile[]>("jira_profiles"),
   jiraProjects: (profile: string) => call<JiraProject[]>("jira_projects", { profile }),
   /** The signed-in account's assigned issues. Server-side route: /agency/missions. */
@@ -475,6 +495,13 @@ export const api = {
   jiraTransition: (key: string, transition: string) =>
     call<void>("jira_transition", { key, transition }),
   jiraComment: (key: string, body: string) => call<void>("jira_comment", { key, body }),
+  /**
+   * Create a task. Assignee and sprint are the *server's* decision — it assigns
+   * to the calling account's own Jira user and discovers the project's active
+   * sprint, so the app never has to know either.
+   */
+  jiraCreate: (project: string, summary: string) =>
+    call<JiraIssue>("jira_create", { project, summary }),
 
   // --- the Claude credential ------------------------------------------------
   //

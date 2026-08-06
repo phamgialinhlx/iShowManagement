@@ -75,7 +75,7 @@ export function Metrics({ target }: { target: TargetRef }) {
         LOAD {sample.loadAverage.toFixed(2)}
       </span>
       {/* A meter for memory, since that is the figure with a hard ceiling. */}
-      <div className="h-[8px] w-[52px]" style={{ background: "rgba(232,230,225,0.09)" }}>
+      <div className="h-[8px] w-[52px]" style={{ background: "color-mix(in srgb, var(--text) 9%, transparent)" }}>
         <div
           className="h-full"
           style={{

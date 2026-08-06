@@ -23,5 +23,5 @@
   // The browser harnesses (`ui/*-check.ts`) are included deliberately. They were
   // outside this list and therefore silently unchecked, so `tsc --noEmit` passed
   // while one of them referenced an undefined symbol.
-  "include": ["ui/src", "ui/office-check.ts", "ui/terminal-check.ts", "ui/xterm-clipboard-check.ts", "ui/xterm-glass-check.ts", "ui/lock-check.ts", "ui/context-check.ts", "ui/grid-check.ts", "ui/highlight-check.ts", "ui/atmosphere-check.ts", "ui/groups-check.ts", "ui/affordance-check.ts", "ui/resize-check.ts", "ui/autosave-check.ts", "ui/rail-selection-check.ts", "ui/ime-check.ts", "vite.config.ts"]
+  "include": ["ui/src", "ui/office-check.ts", "ui/terminal-check.ts", "ui/xterm-clipboard-check.ts", "ui/xterm-glass-check.ts", "ui/lock-check.ts", "ui/context-check.ts", "ui/grid-check.ts", "ui/highlight-check.ts", "ui/atmosphere-check.ts", "ui/affordance-check.ts", "ui/resize-check.ts", "ui/autosave-check.ts", "ui/rail-selection-check.ts", "ui/ime-check.ts", "ui/theme-check.ts", "ui/workspace-migration-check.ts", "ui/workspace-reducers-check.ts", "ui/note-tasks-check.ts", "ui/note-widget-check.ts", "ui/activity-hours-check.ts", "ui/jira-focus-check.ts", "ui/shortcuts-check.ts", "ui/select-check.ts", "ui/blackbar-check.ts", "ui/ime-capture.ts", "vite.config.ts"]
 }

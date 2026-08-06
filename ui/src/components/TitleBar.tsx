@@ -19,13 +19,15 @@
  *    Genuinely clickable children (buttons, links, inputs) still block dragging
  *    automatically, so they keep working without extra markup.
  *
- * The band is deliberately generous — this is the only way to move the window, so
- * a thin strip is frustrating to hit. The left padding clears the macOS traffic
- * lights, which float over the content in this style.
+ * The band clears the macOS traffic lights (left padding) and stays a usable drag
+ * target. It was 56px, which read as a lot of empty space above the tabs; 40px is
+ * tighter without becoming a thin strip that is frustrating to grab. The traffic
+ * lights are an OS layer drawn over the webview, so the band height does not clip
+ * them — this is purely how much of our own chrome sits up top.
  */
 
 /** Height of the drag band. Exported so layouts can offset content by it. */
-export const TITLE_BAR_HEIGHT = 56;
+export const TITLE_BAR_HEIGHT = 36;
 
 export function TitleBar({ children }: { children?: React.ReactNode }) {
   const isMac = navigator.userAgent.includes("Mac");

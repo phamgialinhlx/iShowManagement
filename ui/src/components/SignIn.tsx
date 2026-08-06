@@ -126,7 +126,7 @@ export function SignIn({
       exit={{ opacity: 0 }}
       transition={{ duration: 0.12 }}
       className="fixed inset-0 z-[95] grid place-items-start justify-center pt-[14vh]"
-      style={{ background: "rgba(6,6,6,0.62)" }}
+      style={{ background: "color-mix(in srgb, var(--app-bg) 62%, transparent)" }}
       onClick={onClose}
     >
       <motion.div
@@ -251,7 +251,7 @@ export function SignIn({
             </p>
             <div
               className="w-full overflow-hidden"
-              style={{ height: 2, background: "rgba(232,230,225,0.10)" }}
+              style={{ height: 2, background: "color-mix(in srgb, var(--text) 10%, transparent)" }}
             >
               <div className="sweep" style={{ height: "100%", width: "38%" }} />
             </div>

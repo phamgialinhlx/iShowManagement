@@ -516,6 +516,101 @@ to say "this is a string".
 - The header counts **both** kinds of "needs you". Counting only `waiting` left a rail full of
   accent dots above a header claiming everything was fine.
 
+## Progress — counting the day without inventing it
+
+`ui/src/lib/activity.ts` is the only place rmux keeps a tally of its own, and everything on
+the Progress page is derived from it or from notes. The rule it exists to serve is that a
+number nobody measured must be **absent, not estimated** — a dashboard that fills a gap with
+something plausible cannot be told apart from one that measured it.
+
+- **Only two things are stored, because only two have no other record.** Terminal commands
+  (a shell's history belongs to the shell, and reading it back over SSH per refresh is a poll
+  of someone else's file) and attention time (nothing else knows which pane you were looking
+  at). Prompts, tokens and timings come from Claude's own transcripts, which go back further
+  than any counter we could start.
+- **Task completions are recorded as they happen.** A note stores only the *current* state of
+  its checkboxes, so "tasks finished on Tuesday" is unknowable from the notes alone and any
+  chart over time had to either invent it or not exist. Un-ticking decrements, so the count
+  stays a description of the board and not a score that only goes up.
+- **The hour bucket is written at the moment time is banked, never derived later.** Deriving
+  it on read gives whatever hour the dashboard happened to be opened in, which piles the whole
+  day into one column — a chart that is confidently, silently wrong. Five seconds of
+  misattribution once an hour is the accepted cost of not splitting every tick.
+- **Both dimensions are pruned on every write.** `days` was bounded and `hours` was not, at
+  first; a store bounded in one dimension reads as bounded right up until the `localStorage`
+  quota it shares with the session list runs out. `ui/activity-hours-check.ts` pins this and
+  was verified red before the prune existed.
+- **Peak hour is `undefined` when nothing is recorded, never `0`.** Hour zero is a real
+  answer, so a falsy default tells someone who works late that their busiest hour is the one
+  they never worked.
+- **Empty hours and empty days are drawn, not skipped.** Closing the gaps turns a week off
+  into a continuous run and puts lunch next to midnight.
+- **A goal of zero means "not tracking this"**, rather than a second switch beside every
+  field. Nobody holds a target of zero tasks, so the value carries its own off state.
+
+## Jira — what rmux may say about someone else's system
+
+`ui/src/lib/jira-focus.ts` stores **selections only** — issue keys. Status, summary and
+category are read back from the board every time, never cached, because they are edited by
+other people in another system all day; a cached status is a claim rmux is not in a position
+to make.
+
+- **Done is Jira's `statusCategory`, never a status name.** "Shipped", "Closed" and "Ready
+  for QA" are all real done-column names, and a status *called* "Done" in an unfinished
+  category is a real configuration too. Names are per-project and renameable, so a bar built
+  on them is right on the board it was written against and quietly wrong everywhere else.
+  Both directions are pinned in `ui/jira-focus-check.ts`.
+- **Two stores, because they are two different facts.** Which ticket a *session* is on has no
+  date and must survive the night — it is a property of the work, like the model profile.
+  What you meant to finish *today* must expire, or Tuesday's list shown on Friday makes the
+  progress bar meaningless. Folding them together gets one of the two wrong whichever way you
+  fold.
+- **Transitions are asked for, never assumed.** The buttons are literally what
+  `/transitions` returned for that issue at that moment. A hard-coded To Do → In Progress →
+  Done produces controls that fail on any board with a customised workflow, which is most of
+  them.
+- **Finishing a ticket prompts in place, not in a modal.** A dialog appearing over the
+  workbench takes the keystrokes of whoever is typing in a terminal. The panel opens inside
+  the widget, where the change happened, and waits. It fires on the *observed* transition to
+  done — so a ticket somebody else closed in Jira prompts here too, which is the case the
+  operator is least likely to notice unaided — and never merely because the app opened on a
+  session already pointed at a finished ticket.
+- **rmux cannot create an issue, and does not pretend to.** The server exposes
+  `POST /agency/missions/:key/transitions` and `/comment` and nothing that creates; adding one
+  means a new route in `server/` *and* a deploy. So the picker offers Jira's own create screen
+  in the real browser instead of a button that would fail — never show a control that cannot
+  work.
+
+## Keyboard shortcuts, in an app made of terminals
+
+`ui/src/lib/shortcuts.ts`. The governing constraint is that rmux is mostly two full-screen
+programs reading raw keystrokes, so **anything a shortcut swallows is a key the shell never
+sees, and nothing anywhere says why**.
+
+- **A binding without a modifier is refused at the point of binding**, with the reason shown.
+  Shift does not count — `Shift+a` is `A`, and taking capitals is the same bug wearing a hat.
+- **`keydown` bubbles; it does not capture.** Capture would beat xterm to *every* key, because
+  deciding whether a chord is bound means running the match first. Bubbling means xterm acts
+  and rmux only intervenes on chords it does not use. `preventDefault` fires only on a match.
+- **xterm's textarea is deliberately not a "typing target".** It holds focus the entire time a
+  terminal is on screen, so exempting it — the obvious reading of "don't fire while typing" —
+  would disable every shortcut in the app's main view. Ordinary `input`/`textarea` outside
+  `.xterm` do suppress.
+- **Chords are normalised before comparison** (`Mod`, `Ctrl`, `Alt`, `Shift`, key). Without it
+  `Alt+Mod+K` and `Mod+Alt+K` are two bindings that fire on one keystroke and the conflict
+  detector reports all-clear.
+- **`Mod` is ⌘ on macOS and Ctrl elsewhere**, and on macOS Ctrl stays a *separate* modifier —
+  counted twice off macOS, no `Mod` binding would ever match.
+- **Grid movement clamps, never wraps.** Wrapping "left" at the left edge of a 4×4 lands six
+  tiles away, and nothing on screen suggests those are adjacent.
+- **Conflicts are marked, not prevented.** Mid-rebind, two actions sharing a chord is a state
+  you pass through.
+- **Defaults avoid ⌘W/⌘Q/⌘N/⌘M** (macOS binds them in the app menu) and use `Mod+Alt+Arrow`
+  rather than `Mod+Arrow`, which is line-start/line-end in every macOS text field.
+- **A pane's sub-view stays local to the pane**; the shortcut is a `rmux:set-view` event
+  addressed by session id. Putting it in the persisted workspace would restore someone into a
+  transcript they closed days ago, and an unaddressed one would switch all sixteen tiles.
+
 ## Searching a project
 
 **`grep` runs on the machine that owns the disk** (`crates/rmux-fs/src/search.rs`). Listing
@@ -681,6 +776,28 @@ because `/tui fullscreen` persists, so anyone who ran it once carries the proble
   interactive-terminal-only (`/compact`, `/context`, `/resume`, `/permissions`, `/plan`, …),
   so it would trade real capability for scrolling. Keeping the real TUI is what guarantees
   parity — it *is* the CLI.
+
+## A decision card needs a cursor, not just numbers
+
+`parse_state` (`crates/rmux-claude/src/screen.rs`) turns Claude's screen into a prompt. It used
+to accept any two numbered lines, so **"1. … 2. … 3. …" in ordinary prose became a decision
+card** — measured on a live session, a six-point security summary rendered as a six-option card
+drawn over the terminal. A test asserted this ("documenting current behaviour, not endorsing
+it") for months.
+
+It went unreported for so long only because a *second* bug hid it: the card computed
+`position: relative` and was clipped to a 12px sliver, which was reported as a black bar. Fixing
+the position exposed the misdetection underneath.
+
+- **The signal is the selection caret, not the frame.** The code's own suggested mitigation —
+  require the box-drawing frame — is wrong: Claude's **trust prompt is not framed**, it uses a
+  horizontal rule, so a frame check would stop detecting the one dialog that blocks a session
+  from ever starting. Both real captures carry `❯` on the highlighted option, because that is
+  how the operator knows what Enter will pick. Prose has no cursor.
+- **A frame is still accepted as an alternative**, so a repaint landing mid-frame — options
+  drawn, caret not yet — does not flicker the card out.
+- **Synthetic fixtures must draw a caret.** Three tests wrote `  1. Yes` with no marker, which
+  is not a screen Claude ever produces; they encoded the bug into the suite.
 
 ## rmux is a backend, and the browser is not part of it
 
@@ -975,6 +1092,80 @@ app, never in front of it, so an unreachable server delays a footer label and no
 - **Every xterm host must load `WebglAddon`.** Without it xterm falls back to the DOM
   renderer, and scrolling or dragging over a constantly-redrawing TUI is visibly slow. The
   Claude pane shipped without it and that was the lag.
+- **An IME is not simulable, and `ime-check.ts` is the proof.** It fires the composition
+  events macOS was *assumed* to fire, passes 4/4 against a real xterm, and the app stayed
+  broken for weeks underneath it. Marked text is produced by the input method **above the
+  DOM**; a script cannot make one. The only thing that worked was recording the real events
+  from the running app while a person typed. Three separate faults came out of two minutes of
+  that, and none of them matched the simulation:
+
+  1. **macOS Vietnamese has *two* modes and fires completely different events in each.** One
+     recording had **no composition events at all** — the accent arrives as
+     `insertReplacementText`, which xterm has no handler for, so the base letter went out and
+     every accent was dropped (`ee ee ee` → `e e e`). The next recording used compositions
+     throughout. Handle both or half of Vietnamese is broken.
+  2. **xterm parks a NBSP in its textarea and never clears it** — measured, the value grew to
+     `"…xin chào tôi đang gõ "` across one sentence. `compositionstart` records
+     `start = value.length`, counting that NBSP, but the IME inserts *before* it, so the
+     finalising slice begins one character late and **every word loses its first letter**
+     (`Tiếng Việt` → `iếng iệt`). Clearing the textarea at `compositionstart` fixes it;
+     clearing at any other time moves the ground under the same offsets.
+  3. **xterm flushes marked text as it changes.** On the wire `Tiếng` left as `"Ti"` then
+     `"ê"`, two sends, mid-word — so the tone key that came next had nothing left to modify
+     and landed literally (`Tiêngs`). A terminal cannot unsend, so `onData` is **gated shut
+     for the duration of a composition**. Its *partial* states are the fault; its committed
+     one is correct, so the gate reopens in the capture phase at `compositionend` and xterm's
+     own final send passes through. **Do not send the committed word yourself** — that was
+     tried and doubled everything (`TiêngsêngsViệtViệt`).
+
+  `lib/ime-replace.ts` is all three. Anything that changes typing must be checked against a
+  real IME by a person, because nothing else can produce these events.
+- **A recorder that posts per event is not free.** The instrument that found the above fired
+  an HTTP POST on every `keydown`, `beforeinput`, `input`, `compositionupdate` and wire write
+  — a dozen round trips per keystroke — and typing became visibly laggy. That was read as a
+  regression in the fix. Measure with it, then take it out, and say which build has it.
+- **Never put padding on the element `FitAddon` measures.** It reads
+  `getComputedStyle(host).height`, and under `box-sizing: border-box` — which Tailwind sets
+  globally — the resolved `height` is the *padding* box. The addon does subtract padding, but
+  it reads it from `.xterm`, because it assumes the padding is on the terminal element rather
+  than on the parent. So `p-2` on the host handed `fit()` 16px it did not own and never took
+  back, and it asked for **one row more than the pane could hold**: measured at 25 rows ×
+  19.5px = 487.5px into 476px of content, with `.xterm`, `.xterm-viewport`, `.xterm-screen`
+  and the canvas all hanging 4px past the pane edge.
+
+  The overshoot is real, measured and fixed. **It was not, however, the "black bar along the
+  bottom of the Claude pane" that was reported** — that band survived this fix and nine more
+  after it, because it was never in the terminal at all. See the `.corner` rule in
+  `signal-room.css`: it was Claude's *decision card*, defeated by a cascade collision, laid
+  out below the pane and clipped by `overflow-hidden` to a 12px sliver. Ten fixes aimed at
+  xterm — viewport backgrounds, three scrollbar rules, this padding, the GPU renderer, native
+  glass — could not have worked.
+
+  **Two lessons, and the second is the expensive one.**
+
+  `document.elementsFromPoint` plus `getComputedStyle().backgroundColor` is blind to
+  scrollbars, pseudo-elements and renderer-drawn content. A probe built on it reported
+  "nothing paints here" for nine rounds and was believed over the operator looking straight at
+  the thing. When measurement and observation disagree, stop reading properties and paint the
+  candidates.
+
+  But painting then gave a result that was *true and completely misleading*: every layer from
+  `.xterm-screen` up through `.panel`, the grid cell and `body` was given a distinct colour,
+  and the band claimed none of them. That read as "nothing in the DOM paints this" and sent
+  the search to native glass and the compositor. It actually meant **"you are painting the
+  wrong subtree"** — the card is a *sibling* of the terminal, so it was never in the chain
+  being coloured. A list of suspects chosen in advance cannot find a culprit that is not on
+  it, and every round of narrowing made the list more confidently wrong.
+
+  What worked in one round: dump the rects of **every child of the pane**, enumerated rather
+  than named, and read which box the strip falls in. Prefer enumeration to a hypothesis list
+  whenever something has already survived more than two fixes.
+
+  The padding goes on a wrapper *inside* the `relative` pane — not on the pane itself, whose
+  padding box positions the absolute overlays. `ui/blackbar-check.ts` builds the real DOM
+  chain, fits, and fails on the old structure; `?fixed` builds the corrected one. Its first
+  version never called `fit()` and so measured an unfitted 80×24 terminal, which is how the
+  first two guesses got made — **a terminal harness that does not fit measures nothing.**
 - **Select mode** (`ui/src/lib/mouse-modes.ts`) writes the mouse-reporting reset sequences
   *into xterm*, not to the program — mouse tracking is state in this terminal, so turning it
   off locally makes drags select again without the program knowing. The modes are tracked

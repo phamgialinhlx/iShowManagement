@@ -18,7 +18,7 @@
 // inherited value and the hierarchy checks below compare a colour with itself —
 // which is exactly how they first passed nothing and reported 12.15:1 twice.
 import "./src/styles/signal-room.css";
-import { rowSurface } from "./src/components/SessionRail";
+import { rowSurface } from "./src/components/WorkspaceRail";
 
 let failures = 0;
 const check = (name: string, ok: boolean, detail: string) => {

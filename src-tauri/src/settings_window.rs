@@ -39,8 +39,11 @@ pub async fn open_settings(app: AppHandle) -> Result<(), String> {
     // async, and awaiting it would flash the workbench inside this window.
     let builder = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App(WINDOW_URL.into()))
         .title("rmux — settings")
-        .inner_size(720.0, 620.0)
-        .min_inner_size(560.0, 460.0)
+        // Sized for the tallest panel — Palette lays out the 16 ANSI wells plus
+        // the specials and roles, which overran the old 620px height and clipped
+        // its own header and Apply bar off the top and bottom.
+        .inner_size(920.0, 800.0)
+        .min_inner_size(640.0, 560.0)
         // Matching the main window's chrome, so the two read as one app.
         //
         // `transparent` and the window effect go **together**. On its own,

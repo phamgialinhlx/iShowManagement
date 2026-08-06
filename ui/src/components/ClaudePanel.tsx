@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -8,12 +8,16 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
 import { contextLimit, sniffWindow } from "../lib/context-window";
 import { settleResize } from "../lib/terminal-resize";
-import { useSessions } from "../lib/sessions";
+import { useWorkspace } from "../lib/workspace";
+import { basename } from "../lib/workspace-model";
 import { claudeTheme, gpuRendering } from "../lib/terminal-theme";
+import { readMonoStack } from "../lib/fonts";
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { ContextMeter } from "./ContextMeter";
 import { BrowserReports } from "./BrowserReports";
-import { attachClipboard, copyAll, copySelection, copyViewport } from "../lib/terminal-clipboard";
+import { record } from "../lib/activity";
+import { attachImeReplace } from "../lib/ime-replace";
+import { attachClipboard } from "../lib/terminal-clipboard";
 import { MouseModeTracker } from "../lib/mouse-modes";
 import { PanelLoader } from "./PanelLoader";
 
@@ -118,10 +122,13 @@ export function ClaudePanel({
   fullscreen,
   skipPermissions,
   modelProfile,
+  headerActions,
 }: {
   sessionId: string;
   target: TargetRef;
   cwd?: string;
+  /** Controls rendered at the right of the status line (e.g. open-transcript). */
+  headerActions?: ReactNode;
   /** Conversation to continue instead of starting a new one. */
   resume?: string;
   /** Let Claude use its fullscreen TUI. Off by default — see `Rendering`. */
@@ -138,17 +145,39 @@ export function ClaudePanel({
    */
   modelProfile?: string;
 }) {
-  const setStatus = useSessions((s) => s.setStatus);
-  const setClaudeSession = useSessions((s) => s.setClaudeSession);
-  const adoptTitle = useSessions((s) => s.adoptClaudeTitle);
-  const clearClaudeSession = useSessions((s) => s.clearClaudeSession);
-  const setFullscreen = useSessions((s) => s.setFullscreen);
-  const setResume = useSessions((s) => s.setResume);
-  const configure = useSessions((s) => s.configureSession);
+  const setStatus = useWorkspace((s) => s.setStatus);
+  const setClaudeSession = useWorkspace((s) => s.setLive);
+  const adoptTitle = useWorkspace((s) => s.adoptClaudeTitle);
+  const clearClaudeSession = useWorkspace((s) => s.clearLive);
+  const configure = useWorkspace((s) => s.configureSession);
   // The window Claude itself printed. Read from the pane's own output rather
   // than inferred, which is the only way anyone actually knows it: the
   // transcript records `claude-opus-5` whether that is a 200k or a 1M window.
-  const contextWindow = useSessions((s) =>
+  /**
+   * The session's own name, shown in its header.
+   *
+   * In a grid every pane says "CLAUDE" and nothing else, so telling four
+   * conversations apart meant looking away to the rail and counting positions —
+   * which is exactly the question the pane itself should answer. It replaces the
+   * static "CLAUDE" label rather than sitting beside it: the tab strip above
+   * already says which surface this is, so the word carried no information while
+   * occupying the most valuable space in the header.
+   */
+  const sessionName = useWorkspace((s) => s.sessions.find((x) => x.id === sessionId)?.name);
+
+  /**
+   * The header is titled by the **folder**, not the session's name.
+   *
+   * A session name is now frequently a resumed conversation's title — long,
+   * about the *topic*, and identical-looking across machines. The folder is the
+   * one thing that says which body of work this pane is, it is stable across
+   * every session started in it, and it is what an operator scanning a grid is
+   * actually matching against. The session name is not lost: it follows as the
+   * secondary label, and it is what the rail is sorted by.
+   */
+  const paneTitle = cwd ? basename(cwd) : (sessionName ?? "claude");
+
+  const contextWindow = useWorkspace((s) =>
     s.sessions.find((x) => x.id === sessionId)?.contextWindow,
   );
   // Read by the output handler, which is installed once and never re-created —
@@ -156,18 +185,17 @@ export function ClaudePanel({
   // value. A ref is the only thing that stays current there.
   const windowRef = useRef(contextWindow);
   windowRef.current = contextWindow;
-  const [switching, setSwitching] = useState(false);
   // The running session, remembered across remounts so the view reattaches
   // rather than launching a second Claude in the same folder.
-  const runningId = useSessions((s) => s.claudeSessions[sessionId]);
+  const runningId = useWorkspace((s) => s.live[sessionId]);
   const runningRef = useRef(runningId);
   runningRef.current = runningId;
   const hostRef = useRef<HTMLDivElement>(null);
-  // Held so the header's copy controls can reach the live terminal. Claude's TUI
-  // captures the mouse, so without these there is no discoverable way to get
-  // text out of this pane at all.
+  /** Typed since the last Enter, for the prompt tally. */
+  const pendingPrompt = useRef("");
+  // Held so the pane's own handlers (focus restore, select mode, drops) can reach
+  // the live terminal.
   const xtermRef = useRef<Xterm | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
   // Select mode turns Claude's mouse reporting off *locally*, so a drag selects
   // instead of being sent to Claude. See lib/mouse-modes.ts.
   const mouseModes = useRef(new MouseModeTracker());
@@ -248,7 +276,9 @@ export function ClaudePanel({
     const xterm = new Xterm({
       theme: claudeTheme(),
       allowTransparency: true,
-      fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
+      // The operator's chosen mono font (ADR-003) — same live-token read and
+      // event-driven push as the terminal tab.
+      fontFamily: readMonoStack(),
       fontSize: 12,
       lineHeight: 1.3,
       cursorBlink: true,
@@ -259,6 +289,7 @@ export function ClaudePanel({
     const fit = new FitAddon();
     xterm.loadAddon(fit);
     xterm.open(host);
+
 
     // The GPU renderer, same as the terminal tab. Without it this pane falls back
     // to the DOM renderer, and scrolling or dragging a selection across Claude's
@@ -277,8 +308,18 @@ export function ClaudePanel({
 
     // Copy and paste are xterm's own; this only adds select-all. Claude's TUI
     // turns on mouse reporting, so a plain drag goes to Claude rather than
-    // selecting — hold Option to select, or use the copy buttons in the header.
+    // selecting — hold Option to select, then ⌘C.
     attachClipboard(xterm);
+
+    // Vietnamese and every other IME that rewrites what it already typed.
+    // macOS Telex fires no composition events at all — it inserts the plain
+    // letter and then replaces it via `insertReplacementText`, which xterm
+    // drops. Measured in this app; see `lib/ime-replace.ts`.
+    const ime = attachImeReplace(host.querySelector("textarea")!, (data) => {
+      if (id) void invoke("claude_write", { id, data: data.normalize("NFC") });
+    });
+
+
 
     const output = new Channel<ArrayBuffer>();
     output.onmessage = (chunk) => {
@@ -395,12 +436,26 @@ export function ClaudePanel({
       //
       // Normalising costs nothing for ASCII (`normalize` returns the same
       // string) and is the form a terminal should receive in any case.
+      // **A prompt is Enter on a line with something on it**, counted the same
+      // way the terminal counts commands — Claude's own transcript is the real
+      // record of what was asked, but it lags by a turn and cannot see a prompt
+      // that is still being typed. Both are needed: this one is live, the
+      // transcript is history.
+      if (data === "\r" || data === "\n") {
+        if (pendingPrompt.current.trim()) record(sessionId, "prompts");
+        pendingPrompt.current = "";
+      } else if (data === "\x7f") {
+        pendingPrompt.current = pendingPrompt.current.slice(0, -1);
+      } else if (!data.startsWith("\x1b")) {
+        pendingPrompt.current += data;
+      }
       if (id) void invoke("claude_write", { id, data: data.normalize("NFC") });
     });
 
     // Fit locally on every callback so the grid tracks the window, but tell
     // Claude only once the drag stops — see `settleResize` for what forty
     // redraws during one drag does to an inline TUI.
+
     const settle = settleResize(
       () => fit.fit(),
       () => {
@@ -439,12 +494,22 @@ export function ClaudePanel({
       // The palette is derived from the live design tokens, so a colour chosen
       // in Settings has to be pushed into xterm — it does not re-read CSS on
       // its own. Without this the terminals keep the colours they were born
-      // with, which is the whole complaint being fixed.
+      // with, which is the whole complaint being fixed. Same for the mono font
+      // (ADR-003): the token changed, but xterm cached the family.
       xterm.options.theme = claudeTheme();
+      xterm.options.fontFamily = readMonoStack();
+      requestAnimationFrame(() => requestAnimationFrame(refit));
+    };
+    // The ANSI theme *or the font* changed in this document — push both in, like
+    // above (`applyFonts` dispatches this for the live font preview).
+    const onTheme = () => {
+      xterm.options.theme = claudeTheme();
+      xterm.options.fontFamily = readMonoStack();
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     window.addEventListener("storage", onAppearance);
     window.addEventListener("resize", refit);
+    window.addEventListener("rmux-theme", onTheme);
 
 
     if (host.clientWidth > 0 && host.clientHeight > 0) startClaude();
@@ -452,9 +517,11 @@ export function ClaudePanel({
     return () => {
       disposed = true;
       observer.disconnect();
+      ime.dispose();
       settle.dispose();
       window.removeEventListener("storage", onAppearance);
       window.removeEventListener("resize", refit);
+      window.removeEventListener("rmux-theme", onTheme);
       onData.dispose();
       xtermRef.current = null;
       xterm.dispose();
@@ -624,8 +691,8 @@ export function ClaudePanel({
       }}
       // **Clicking the pane gives the keyboard back to Claude.**
       //
-      // The terminal was focused once, at start. Use any control in the header —
-      // COPY, the mode toggle — or click the padding around the rows, and focus
+      // The terminal was focused once, at start. Use any control in the header,
+      // or click the padding around the rows, and focus
       // moved away with nothing to bring it back. From then on a keystroke went
       // to whatever the browser considered focused, which for **Space** means
       // scrolling the nearest scrollable ancestor: xterm's own viewport, jumping
@@ -645,130 +712,83 @@ export function ClaudePanel({
         className="flex shrink-0 items-center gap-3 border-b px-3 py-1"
         style={{ borderColor: "var(--border)" }}
       >
-        <span className="micro">CLAUDE</span>
+        {/* Truncated, never wrapped: a long name must not push the status strip
+            onto a second line — the header's height is what `fit()` measures, so
+            a wrapped header silently costs the terminal a row. */}
+        <span
+          className="micro truncate"
+          style={{ color: "var(--text)", maxWidth: "34%", flex: "0 1 auto" }}
+          title={cwd ? `${cwd}${sessionName ? `\n${sessionName}` : ""}` : (sessionName ?? "Claude")}
+        >
+          {paneTitle.toUpperCase()}
+        </span>
+
+        {/* The session's own name, second and dimmer — several sessions share a
+            folder, so the title alone cannot tell them apart. Dropped first when
+            the header runs out of room, because the status strip beside it is
+            live data and this is a label. */}
+        {sessionName && sessionName !== paneTitle && (
+          <span
+            className="micro truncate"
+            style={{ color: "var(--text-faint)", maxWidth: "30%", flex: "0 1 auto" }}
+            title={sessionName}
+          >
+            {sessionName}
+          </span>
+        )}
 
         <ClaudeStatusStrip status={claudeStatus} window={contextWindow} />
 
-        {/* Copying out of this pane needs help. A drag is sent to Claude, not
-            used to select, so the usual gesture silently does nothing. */}
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className="chip"
-            title="Copy the selection, or the visible screen if nothing is selected"
-            onClick={() => {
-              const term = xtermRef.current;
-              if (!term) return;
-              void copySelection(term)
-                .then(async (had) => {
-                  if (!had) await copyViewport(term);
-                  setCopied(had ? "selection copied" : "screen copied");
-                  setTimeout(() => setCopied(null), 2500);
-                })
-                .catch(() => setCopied("copy failed"));
-            }}
-          >
-            copy
-          </button>
-          <button
-            type="button"
-            className="chip"
-            title="Copy the whole scrollback"
-            onClick={() => {
-              const term = xtermRef.current;
-              if (!term) return;
-              void copyAll(term)
-                .then(() => {
-                  setCopied("scrollback copied");
-                  setTimeout(() => setCopied(null), 2500);
-                })
-                .catch(() => setCopied("copy failed"));
-            }}
-          >
-            copy all
-          </button>
-          {copied && (
-            <span
-              className="micro"
+        {/*
+          **No copy buttons, and no rendering toggle.**
+
+          The copy pair existed because Claude's fullscreen TUI captured the
+          mouse: a drag went *to Claude* rather than making a selection, so
+          Cmd-C had nothing to copy and the buttons were the only way out. rmux
+          now runs Claude **inline** with `CLAUDE_CODE_DISABLE_MOUSE=1`, so
+          dragging selects and Cmd-C works as it does anywhere else. Keeping
+          them would leave two chips in the busiest header in the app
+          duplicating a gesture the operator already has.
+
+          The fullscreen toggle lives in Session Settings. It restarts the
+          conversation to take effect -- not a thing to sit one stray click from
+          INTERRUPT, and a per-session property decided once rather than a
+          control reached mid-run.
+        */}
+        {/* Select mode is meaningful only in Claude's fullscreen TUI, which
+            captures the mouse; turning capture off locally lets a drag select
+            again. It stays hidden in the default inline rendering. */}
+        {fullscreen && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="chip"
+              title={
+                selectMode
+                  ? "Give the mouse back to Claude"
+                  : "Turn Claude's mouse capture off so you can select text"
+              }
+              onClick={() => {
+                const term = xtermRef.current;
+                if (!term) return;
+                const next = !selectMode;
+                // Written into xterm, not sent to Claude: this changes what *this*
+                // terminal does with the mouse, and Claude is never told.
+                term.write(
+                  next ? mouseModes.current.disableSequence() : mouseModes.current.restoreSequence(),
+                );
+                setSelectMode(next);
+              }}
               style={{
-                color: copied === "copy failed" ? "rgb(var(--primary))" : "var(--text)",
+                color: selectMode ? "var(--text)" : "var(--text-faint)",
+                background: selectMode ? "var(--hover)" : "transparent",
+                padding: "1px 6px",
               }}
             >
-              {copied}
-            </span>
-          )}
-          <button
-            type="button"
-            className="chip"
-            disabled={switching}
-            title={
-              fullscreen
-                ? "Switch to inline rendering: native selection, copy and scrollback"
-                : "Switch to Claude's fullscreen TUI. It takes the mouse, so selection and scrolling stop being native."
-            }
-            onClick={() => {
-              if (switching) return;
-              setSwitching(true);
-              const next = !fullscreen;
-              // The conversation must survive the restart. Its id comes from the
-              // transcript, which knows it even for a session started fresh.
-              void (async () => {
-                try {
-                  if (cwd) {
-                    const t = await api.claudeTranscript(target, cwd, resume, 65536);
-                    if (t.sessionId) setResume(sessionId, t.sessionId);
-                  }
-                  // The agent reattaches by name, so the running Claude has to
-                  // end or the new mode would never take effect.
-                  await api.claudeEndSession(target, `claude-${sessionId}`);
-                } catch {
-                  // Even if that failed, switching is still what was asked for.
-                } finally {
-                  clearClaudeSession(sessionId);
-                  setFullscreen(sessionId, next);
-                  setSwitching(false);
-                }
-              })();
-            }}
-            style={{
-              color: fullscreen ? "var(--text)" : "var(--text-faint)",
-              background: fullscreen ? "var(--hover)" : "transparent",
-              padding: "1px 6px",
-            }}
-          >
-            {switching ? "switching…" : fullscreen ? "fullscreen" : "inline"}
-          </button>
-
-          {fullscreen && (
-          <button
-            type="button"
-            className="chip"
-            title={
-              selectMode
-                ? "Give the mouse back to Claude"
-                : "Turn Claude's mouse capture off so you can select text"
-            }
-            onClick={() => {
-              const term = xtermRef.current;
-              if (!term) return;
-              const next = !selectMode;
-              // Written into xterm, not sent to Claude: this changes what *this*
-              // terminal does with the mouse, and Claude is never told.
-              term.write(
-                next ? mouseModes.current.disableSequence() : mouseModes.current.restoreSequence(),
-              );
-              setSelectMode(next);
-            }}
-            style={{
-              color: selectMode ? "var(--text)" : "var(--text-faint)",
-              background: selectMode ? "var(--hover)" : "transparent",
-              padding: "1px 6px",
-            }}
-          >
-            select mode
-          </button>
-          )}
-        </div>
+              select mode
+            </button>
+          </div>
+        )}
 
         {state.working && (
           <div className="flex items-center gap-2">
@@ -789,16 +809,7 @@ export function ClaudePanel({
           </span>
         )}
 
-        <div className="ml-auto flex gap-2">
-          <button
-            type="button"
-            className="chip"
-            onClick={() => claudeId && void invoke("claude_interrupt", { id: claudeId })}
-            title="Interrupt (Esc)"
-          >
-            interrupt
-          </button>
-        </div>
+        {headerActions && <div className="ml-auto flex items-center gap-1">{headerActions}</div>}
       </header>
 
       {/* What a connected browser sent back for this session. Empty, and takes
@@ -856,8 +867,46 @@ export function ClaudePanel({
         </div>
       )}
 
-      <div className="relative min-h-0 flex-1">
-        <div ref={hostRef} className="h-full w-full p-2" />
+      <div className="claude-pane-area relative min-h-0 flex-1">
+        {/*
+          **The padding is on a wrapper, never on the element `fit()` measures.**
+          This was the black bar along the bottom of the pane, and it is a layout
+          fault rather than the transparency one it looks like.
+
+          `FitAddon` reads `getComputedStyle(host).height` — and under
+          `box-sizing: border-box`, which Tailwind sets globally, the resolved
+          `height` is the *padding* box. It compensates by subtracting padding,
+          but it reads that padding from `.xterm`, which has none: the addon
+          assumes any padding is on the terminal element itself. With `p-2` here,
+          16px of padding was counted as terminal space and never taken back, so
+          `fit()` asked for one row more than the pane could hold — measured at
+          25 rows x 19.5px = 487.5px into 476px, hanging 4px past the pane edge.
+          The overhanging viewport is what painted the bar, and it carried the
+          scrollbar thumb that was visible inside it.
+
+          Two rounds of `background: transparent` could not have worked: it was
+          real content in the wrong place, not an unpainted gap.
+
+          The wrapper also cannot be the `relative` element — the overlays below
+          position against it, and padding it would inset them by 8px.
+
+          `ui/blackbar-check.ts` measures this against a real xterm and fails on
+          the old structure.
+        */}
+        {/*
+          **No padding along the bottom.** `fit()` floors to whole rows, so a
+          remainder of up to one cell is always left below the last row and no
+          arithmetic removes it. Eight more pixels of padding under it made that
+          bare region half again as tall for no gain — the rows are already clear
+          of the pane edge by the remainder itself. Under native glass with a low
+          overlay the panel paints nothing there, so bare is *visible*: measured
+          in the running app, `.panel` resolves to `rgba(0, 0, 0, 0)` from the top
+          of the pane to the bottom, which makes any region the terminal does not
+          cover read as a hole rather than as part of the app.
+        */}
+        <div className="claude-pane-host h-full w-full px-2 pt-2">
+          <div ref={hostRef} className="h-full w-full" />
+        </div>
 
         {/* Until Claude's first byte, the pane is a black rectangle — which reads
             as a crash, not as work in progress. */}

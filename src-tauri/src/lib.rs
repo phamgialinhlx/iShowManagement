@@ -28,6 +28,7 @@ mod lock;
 mod logs;
 mod model_profile;
 mod settings_window;
+mod theme;
 pub mod files;
 pub mod metrics;
 pub mod terminal;
@@ -123,6 +124,7 @@ pub fn run() {
         .manage(control::ControlState::default())
         .manage(notify::NotifyStore::default())
         .manage(uplink::UplinkStore::default())
+        .manage(theme::ThemeStore::default())
         .invoke_handler(tauri::generate_handler![
             commands::local_target,
             commands::run_on_target,
@@ -140,6 +142,7 @@ pub fn run() {
             auth::jira_transitions,
             auth::jira_transition,
             auth::jira_comment,
+            auth::jira_create,
             settings_window::open_settings,
             lock::lock_status,
             lock::lock_enable,
@@ -219,6 +222,10 @@ pub fn run() {
             glass::set_glass,
             logs::log_status,
             logs::log_export,
+            theme::theme_state,
+            theme::theme_save,
+            theme::theme_set_active,
+            theme::theme_delete,
         ])
         .setup(|app| {
             // Bring the askpass bridge up before any connection can need it.
@@ -245,6 +252,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 control::start(handle, forwards).await;
             });
+
+            // Watch theme.toml so an external hand-edit repaints the running app.
+            // Best-effort: without it, edits are picked up on the next launch.
+            theme::start_watcher(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())

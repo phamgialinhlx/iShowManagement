@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 
 import { initMonaco, languageForPath, monaco, THEME_NAME } from "../lib/monaco";
-import type { Buffer } from "../lib/sessions";
+import { readMonoStack } from "../lib/fonts";
+import type { Buffer } from "../lib/buffers";
 
 /**
  * The Monaco editor bound to one buffer.
@@ -57,7 +58,10 @@ export function CodeEditor({
     const editor = monaco.editor.create(host, {
       theme: THEME_NAME,
       automaticLayout: true,
-      fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
+      // The operator's chosen mono font (ADR-003), read from the live token.
+      // Monaco caches this, so it is re-applied on the appearance/theme events
+      // below.
+      fontFamily: readMonoStack(),
       fontSize: 12.5,
       lineHeight: 1.6,
       minimap: { enabled: false },
@@ -89,7 +93,20 @@ export function CodeEditor({
       saveRef.current();
     });
 
+    // Adopt a font change (ADR-003). Monaco caches `fontFamily` and does not
+    // watch CSS, so the mono font is re-applied when it changes in this document
+    // (`rmux-theme`, fired by `applyFonts` for the live preview) or in another
+    // window (the `storage` event on `rmux.appearance`).
+    const restyleFont = () => editor.updateOptions({ fontFamily: readMonoStack() });
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === "rmux.appearance") restyleFont();
+    };
+    window.addEventListener("rmux-theme", restyleFont);
+    window.addEventListener("storage", onStorage);
+
     return () => {
+      window.removeEventListener("rmux-theme", restyleFont);
+      window.removeEventListener("storage", onStorage);
       // Detach the model first: disposing an editor that still owns a shared
       // model would take the model with it, losing every other tab's content.
       editor.setModel(null);

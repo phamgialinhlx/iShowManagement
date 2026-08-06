@@ -60,7 +60,7 @@ export function ContextMeter({
       <span className="flex shrink-0 items-center gap-1.5" title={title}>
         <span
           className="relative block overflow-hidden"
-          style={{ width: 54, height: 4, background: "rgba(232,230,225,0.10)" }}
+          style={{ width: 54, height: 4, background: "color-mix(in srgb, var(--text) 10%, transparent)" }}
         >
           {percent !== null && (
             <motion.span
@@ -92,7 +92,7 @@ export function ContextMeter({
             : `${Math.round(percent)}% · ${compactTokens(tokens)}`}
         </span>
       </div>
-      <div style={{ height: 4, background: "rgba(232,230,225,0.10)" }} title={title}>
+      <div style={{ height: 4, background: "color-mix(in srgb, var(--text) 10%, transparent)" }} title={title}>
         {percent !== null && (
           <motion.div
             style={{ height: "100%", background: tone, transformOrigin: "left" }}

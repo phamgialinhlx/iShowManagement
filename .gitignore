@@ -54,3 +54,10 @@ server/
 # The askpass sidecar: a host-native binary staged by scripts/build-askpass.mjs
 # on every `pnpm build`, so it is always rebuilt rather than committed.
 /src-tauri/binaries/
+# Reference material read for design/feature history — not authored work.
+# zed is a 580MB clone (own nested .git); tsmanager is the project being ported.
+references/ui-ux
+references/zed
+references/tsmanager
+tmp/
+web/dist

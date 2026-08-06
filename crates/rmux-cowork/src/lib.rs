@@ -698,6 +698,22 @@ impl Session {
         self.get("/agency/missions").await
     }
 
+    /// Create a task: assigned to the signed-in operator, in the active sprint.
+    ///
+    /// The two things that make it a *quick* add are decided server-side, and
+    /// deliberately not passed from here: the assignee is the calling account's
+    /// own Jira user (so the task appears in the missions list it was created
+    /// from), and the sprint is discovered from the project's board. Sending
+    /// either from the client would mean the app deciding who a ticket belongs
+    /// to, which is the server's fact, not ours.
+    pub async fn jira_create(&self, project: &str, summary: &str) -> Result<JiraIssue, CoworkError> {
+        self.post_json(
+            "/agency/missions",
+            &serde_json::json!({ "projectKey": project, "summary": summary }),
+        )
+        .await
+    }
+
     /// One issue in full, including its description and comments.
     pub async fn jira_mission(&self, key: &str) -> Result<JiraIssueDetail, CoworkError> {
         self.get(&format!("/agency/missions/{}", encode_segment(key))).await
