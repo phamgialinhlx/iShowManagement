@@ -86,6 +86,9 @@ type State = Core & {
   grid: number;
   focusedCell: number | null;
   railCollapsed: boolean;
+  /** Session ids in most-recently-activated order. Runtime only — it feeds the
+   *  focus-mode warm set (`warmSessions`), not anything worth persisting. */
+  recentSessions: string[];
 
   // ── selectors (cheap derivations consumers reach for) ──────────────────────
   serverOf: (sessionOrProjectId: string) => Server | undefined;
@@ -257,6 +260,7 @@ export const useWorkspace = create<State>((set, get) => ({
   grid: Number(storage?.getItem("rmux.grid")) || 1,
   focusedCell: null,
   railCollapsed: false,
+  recentSessions: [],
 
   // ── selectors ──────────────────────────────────────────────────────────────
   projectOf: (sessionId) => {
@@ -439,6 +443,13 @@ export const useWorkspace = create<State>((set, get) => ({
       const cur = s.runtime[id];
       return {
         activeSession: id,
+        // Most-recent first, deduplicated, and bounded — this only feeds the
+        // warm set, which caps itself anyway. Untouched when `id` already
+        // leads, so re-clicking the active session changes no references.
+        recentSessions:
+          s.recentSessions[0] === id
+            ? s.recentSessions
+            : [id, ...s.recentSessions.filter((x) => x !== id)].slice(0, 8),
         runtime:
           cur && cur.finishedAt !== undefined
             ? { ...s.runtime, [id]: { ...cur, finishedAt: undefined } }

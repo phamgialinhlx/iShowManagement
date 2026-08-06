@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 
 import { useWorkspace } from "../lib/workspace";
-import { layoutPanes } from "../lib/grid";
+import { layoutPanes, warmSessions } from "../lib/grid";
 import { reattachName, type PaneRef, type SessionV3 } from "../lib/workspace-model";
 import { ClaudeSessionPane } from "./ClaudeSessionPane";
 import { TerminalView } from "./Terminal";
@@ -78,10 +78,16 @@ function Pane({ pane }: { pane: PaneRef }) {
   return <FilesPane projectId={pane.projectId} />;
 }
 
+/** How many sessions stay mounted in focus mode. Each warm pane holds an xterm
+ *  (and a WebGL context when GPU rendering is on), so this is deliberately
+ *  small — enough to make alternating between a few sessions instant. */
+const KEEP_WARM = 4;
+
 export function WorkspaceDeck() {
   const sessions = useWorkspace((s) => s.sessions);
   const panes = useWorkspace((s) => s.panes);
   const active = useWorkspace((s) => s.activeSession);
+  const recent = useWorkspace((s) => s.recentSessions);
   const grid = useWorkspace((s) => s.grid);
   const focusedCell = useWorkspace((s) => s.focusedCell);
   const focusCell = useWorkspace((s) => s.focusCell);
@@ -91,6 +97,16 @@ export function WorkspaceDeck() {
     () => layoutPanes(panes, sessions, active, grid),
     [panes, sessions, active, grid],
   );
+
+  // The focus-mode warm set. The visible pane is prepended so an explicitly
+  // assigned cell 0 that differs from the active session is always mounted.
+  const only = cells[0] ?? null;
+  const visibleSession = grid === 1 && only?.kind === "session" ? only.id : null;
+  const warm = useMemo(() => {
+    if (grid !== 1) return [];
+    const order = visibleSession ? [visibleSession, ...recent] : recent;
+    return warmSessions(active, order, sessions, KEEP_WARM);
+  }, [grid, visibleSession, active, recent, sessions]);
 
   if (grid >= 2) {
     return (
@@ -118,6 +134,10 @@ export function WorkspaceDeck() {
                     : "1px solid transparent",
               outlineOffset: -1,
               background: pane ? undefined : "var(--app-bg)",
+              // Scope layout and paint to the cell: a rail animating its width
+              // reflows the deck every frame, and without containment that
+              // reflow walks into all sixteen terminal subtrees.
+              contain: "layout paint",
             }}
           >
             {pane ? (
@@ -135,24 +155,50 @@ export function WorkspaceDeck() {
     );
   }
 
-  // Focus mode: the single effective pane for cell 0. The `key` forces a
-  // remount when the pane changes — without it, switching between two Claude
-  // sessions updates in place and the xterm stays bound to the first one (the
-  // pane looked "stuck"). Remounting reattaches (scrollback replayed), so
-  // nothing is lost. The wrapper carries `flex-1` because this parent is a flex
-  // *row*: without it the pane sizes to its content width, not the deck.
-  // TODO: a warm set (as the old deck kept) to make switches instant.
-  const only = cells[0] ?? null;
+  // Focus mode: one pane visible, the warm set mounted behind it.
+  //
+  // Switching sessions used to remount the pane (a `key` per pane), disposing
+  // the xterm and replaying scrollback over SSH on every switch — the slow
+  // path, taken every time. Now the warm sessions stay mounted and hidden with
+  // `display:none`: xterm stops painting a hidden terminal on its own (its
+  // renderer watches intersection), the 0×0 guard keeps a hidden pane from
+  // resizing the far side, and switching back is a display toggle — instant,
+  // with scrollback and selection intact. Keys are session identity, so the
+  // set reordering never remounts a member. Host and files panes still swap by
+  // key; they hold no terminal, so a remount is cheap.
+  //
+  // Each wrapper carries `flex-1` because this parent is a flex *row*: without
+  // it the pane sizes to its content width, not the deck.
   return (
     <div className="flex min-h-0 flex-1">
-      {only ? (
+      {warm.map((session) => (
+        <div
+          key={`session:${session.id}`}
+          className="relative min-h-0 flex-1 flex-col overflow-hidden"
+          style={{
+            display: session.id === visibleSession ? "flex" : "none",
+            contain: "layout paint",
+          }}
+        >
+          <SessionPane session={session} />
+        </div>
+      ))}
+      {only && only.kind !== "session" && (
         <div
           key={paneKey(only, 0)}
           className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
         >
           <Pane pane={only} />
         </div>
-      ) : (
+      )}
+      {/* A cell holding a session that no longer exists — the warm set drops
+          stale ids, so say so instead of showing nothing at all. */}
+      {visibleSession && !warm.some((s) => s.id === visibleSession) && (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <PaneMissing what="session" />
+        </div>
+      )}
+      {!only && (
         <div className="grid h-full flex-1 place-items-center">
           <span className="micro" style={{ color: "var(--text-faint)" }}>
             nothing open — pick a session, or connect a server
