@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -119,10 +119,13 @@ export function ClaudePanel({
   fullscreen,
   skipPermissions,
   modelProfile,
+  headerActions,
 }: {
   sessionId: string;
   target: TargetRef;
   cwd?: string;
+  /** Controls rendered at the right of the status line (e.g. open-transcript). */
+  headerActions?: ReactNode;
   /** Conversation to continue instead of starting a new one. */
   resume?: string;
   /** Let Claude use its fullscreen TUI. Off by default — see `Rendering`. */
@@ -712,6 +715,7 @@ export function ClaudePanel({
           </span>
         )}
 
+        {headerActions && <div className="ml-auto flex items-center gap-1">{headerActions}</div>}
       </header>
 
       {/* What a connected browser sent back for this session. Empty, and takes
