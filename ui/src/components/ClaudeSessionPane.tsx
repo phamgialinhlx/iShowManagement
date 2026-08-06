@@ -6,6 +6,7 @@ import { ClaudePanel } from "./ClaudePanel";
 import { TranscriptView } from "./TranscriptView";
 import { JiraPanel } from "./JiraPanel";
 import { FilesPane } from "./FilesPane";
+import { SessionSettings } from "./SessionSettings";
 
 /**
  * A Claude session pane: the live TUI is the pane. **Transcript** and **Jira**
@@ -20,7 +21,7 @@ import { FilesPane } from "./FilesPane";
  * mount on demand and unmount when hidden, so their polling stops when they are
  * not on screen (the "a widget switched off must not run" rule).
  */
-type View = "claude" | "transcript" | "jira" | "files";
+type View = "claude" | "transcript" | "jira" | "files" | "settings";
 
 /** Rule 3: inline SVG, Lucide-style, square caps — no glyph font, no emoji. */
 function Icon({ d, size = 14 }: { d: string; size?: number }) {
@@ -68,6 +69,7 @@ function IconButton({
 const TRANSCRIPT_PATH = "M4 6h16M4 10h16M4 14h10M4 18h7"; // stacked lines = a transcript
 const FOLDER_PATH = "M3 6v13h18V8h-9l-2-2H3z"; // folder = this project's files
 const BOARD_PATH = "M4 4h16v16H4zM10 4v16M16 4v16"; // kanban columns = Jira
+const GEAR_PATH = "M4 8h16M9 6v4M4 16h16M15 14v4"; // sliders = session settings
 const BACK_PATH = "M15 5l-7 7 7 7"; // ← return to the conversation
 
 export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
@@ -98,6 +100,9 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
           <Icon d={BOARD_PATH} />
         </IconButton>
       )}
+      <IconButton label="Session settings" onClick={() => setView("settings")}>
+        <Icon d={GEAR_PATH} />
+      </IconButton>
     </>
   );
 
@@ -128,6 +133,12 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
         {active === "files" && project && (
           <BackView label={`FILES · ${folder}`} onBack={() => setView("claude")}>
             <FilesPane projectId={project.id} />
+          </BackView>
+        )}
+
+        {active === "settings" && (
+          <BackView label="SETTINGS" onBack={() => setView("claude")}>
+            <SessionSettings sessionId={session.id} />
           </BackView>
         )}
 
