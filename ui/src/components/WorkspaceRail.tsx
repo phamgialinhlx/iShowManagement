@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
+import { api } from "../lib/api";
 import { useWorkspace } from "../lib/workspace";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
 
@@ -721,6 +722,7 @@ function ServerNode({
   const allSessions = useWorkspace((s) => s.sessions);
   const runtime = useWorkspace((s) => s.runtime);
   const openHost = useWorkspace((s) => s.openHost);
+  const removeServer = useWorkspace((s) => s.removeServer);
 
   const projectIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
   const mine = useMemo(
@@ -740,6 +742,10 @@ function ServerNode({
     return waiting ? "waiting" : "idle";
   }, [mine, runtime]);
 
+  const [menu, setMenu] = useState<RailMenuTarget | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+
   return (
     <div className="mb-1">
       {/* Server card — accent bar, status dot, bold name; the HOST / + verbs. */}
@@ -748,6 +754,10 @@ function ServerNode({
         style={{
           background: "color-mix(in srgb, var(--text) 6%, transparent)",
           boxShadow: "inset 3px 0 0 var(--text-soft)",
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
         }}
       >
         <button type="button" className="shrink-0" onClick={onToggle} aria-expanded={!folded}>
@@ -782,6 +792,63 @@ function ServerNode({
           <PlusIcon />
         </button>
       </div>
+
+      {menu && (
+        <RailMenu target={menu} onClose={() => setMenu(null)}>
+          <div className="flex flex-col">
+            <RailMenuItem
+              label="Disconnect"
+              onClick={() => {
+                setMenu(null);
+                api.serverDisconnect(server.target);
+              }}
+            />
+            <RailMenuItem
+              label="Attach to running session…"
+              onClick={() => {
+                setMenu(null);
+                setAttaching(true);
+              }}
+            />
+            <hr className="hairline my-1" />
+            {confirming ? (
+              <div className="flex flex-col gap-2 p-2">
+                <p className="data text-[11px]">
+                  Remove <span style={{ color: "rgb(var(--primary))" }}>{serverLabel(server)}</span>?
+                </p>
+                <p className="micro">its sessions will be ended on the server</p>
+                <div className="flex gap-2">
+                  <button
+                    className="btn btn-primary flex-1"
+                    type="button"
+                    onClick={() => {
+                      setMenu(null);
+                      setConfirming(false);
+                      removeServer(server.id);
+                    }}
+                  >
+                    Remove
+                  </button>
+                  <button className="btn" type="button" onClick={() => setConfirming(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <RailMenuItem label="Remove server" destructive onClick={() => setConfirming(true)} />
+            )}
+          </div>
+        </RailMenu>
+      )}
+
+      {/* Task 6: the attach-to-running picker consumes `attaching`. */}
+      {attaching && (
+        <div className="fixed inset-0 z-[70]" onClick={() => setAttaching(false)}>
+          <div className="micro absolute left-2 top-2 rounded p-2" style={{ background: "var(--panel)" }}>
+            Attach picker (Task 6)
+          </div>
+        </div>
+      )}
 
       {!folded &&
         projects.map((project) => (

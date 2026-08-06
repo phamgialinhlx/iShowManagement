@@ -114,9 +114,12 @@ type State = Core & {
         | "claudeAccount"
         | "jiraProject"
         | "contextWindow"
+        | "renamed"
+        | "hostName"
       >
     >,
   ) => string;
+  adoptServerSession: (serverId: ServerId, name: string, kind: "terminal" | "claude") => void;
   removeSession: (id: string) => void;
   detachSession: (id: string) => void;
   removeProject: (id: ProjectId) => void;
@@ -224,6 +227,23 @@ const mintSessionId = (kind: SessionKind): string =>
 
 const restored = load();
 
+const RUNNING_LABEL = "running";
+
+/**
+ * The synthetic project adopted "running" sessions hang under — a grouping key,
+ * not a real folder. Created idempotently; returns the project id.
+ *
+ * The folder string `<serverId>\0running` is synthetic — it is a grouping key only,
+ * so it must never be shell_quote'd into a remote path (adopted sessions reuse the
+ * host name for the attach, never the project folder).
+ */
+const makeRunningBucket = (state: State, serverId: ServerId): { ws: Core; id: string } => {
+  const runningFolder = `${serverId}\0${RUNNING_LABEL}`;
+  const existing = state.projects.find((p) => p.folder === runningFolder);
+  if (existing) return { ws: coreOf(state), id: existing.id };
+  return rAddProject(coreOf(state), serverId, runningFolder, RUNNING_LABEL);
+};
+
 /** Just the reducer core, for handing to a reducer and merging its result back. */
 const coreOf = (s: State): Core => ({
   servers: s.servers,
@@ -302,6 +322,23 @@ export const useWorkspace = create<State>((set, get) => ({
     set({ ...ws, runtime: { ...get().runtime, [id]: { ...IDLE } } });
     schedulePersist(get);
     return id;
+  },
+
+  adoptServerSession: (serverId, name, kind) => {
+    const id = kind === "claude" ? name.replace(/^claude-/, "") : name;
+    if (get().sessions.some((x) => x.id === id)) {
+      get().openSession(id);
+      return;
+    }
+    const { ws: bucketWs, id: projectId } = makeRunningBucket(get(), serverId);
+    set(bucketWs);
+    schedulePersist(get);
+    const newId = get().addSession(projectId, kind, {
+      name: kind === "claude" ? name.replace(/^claude-/, "") : name,
+      renamed: true,
+      hostName: name,
+    });
+    get().openSession(newId);
   },
 
   removeSession: (id) => {
