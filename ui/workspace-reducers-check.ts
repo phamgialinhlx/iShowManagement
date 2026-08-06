@@ -6,6 +6,8 @@ import {
   removeSession,
   assignPane,
   closePane,
+  closeTab,
+  ensureTab,
   type Core,
 } from "./src/lib/workspace-reducers.ts";
 import { serverId } from "./src/lib/workspace-model.ts";
@@ -91,6 +93,39 @@ export function run(log: (line: string) => void): boolean {
     check("close clears the tile", ws.panes[0] === null);
     check("the session still exists after closing its pane", ws.sessions.some((s) => s.id === "claude-1"));
     check("closing an out-of-range tile is a no-op", closePane(ws, 99) === ws);
+  }
+
+  // ── Tabs: creating and placing opens; closing a tab never kills ───────────
+  {
+    let { ws, sid } = seed();
+    check("creating sessions opened their tabs",
+      ws.tabs.length === 2 && ws.tabs.every((t) => t.kind === "session"));
+
+    ws = assignPane(ws, 0, { kind: "host", serverId: sid });
+    check("assigning a pane ensures its tab", ws.tabs.some((t) => t.kind === "host"));
+    const before = ws.tabs.length;
+    ws = assignPane(ws, 1, { kind: "host", serverId: sid });
+    check("ensureTab dedups by identity", ws.tabs.length === before);
+    check("ensureTab is idempotent",
+      ensureTab(ws, { kind: "session", id: "claude-1" }).tabs.length === before);
+
+    ws = closeTab(ws, { kind: "session", id: "term-1" });
+    check("closeTab strips the tab",
+      !ws.tabs.some((t) => t.kind === "session" && t.id === "term-1"));
+    check("closeTab does NOT kill the session", ws.sessions.some((s) => s.id === "term-1"));
+    check("closing the active tab hands active to the last session tab",
+      ws.activeSession === "claude-1");
+
+    ws = assignPane(ws, 2, { kind: "session", id: "claude-1" });
+    ws = closeTab(ws, { kind: "session", id: "claude-1" });
+    check("closeTab frees the cell to null (not 'empty')", ws.panes[2] === null);
+    check("closing the last session tab leaves no active", ws.activeSession === null);
+  }
+  {
+    let { ws } = seed();
+    ws = removeSession(ws, "term-1");
+    check("removeSession strips its tab too",
+      !ws.tabs.some((t) => t.kind === "session" && t.id === "term-1"));
   }
 
   log("");

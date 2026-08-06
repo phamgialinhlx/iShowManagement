@@ -84,6 +84,26 @@ export type PaneRef =
   | { kind: "files"; projectId: ProjectId }
   | { kind: "empty" };
 
+/** What the tab bar holds — everything a pane can show *except* the cleared
+ *  tile. Typed as an exclusion so "a tab is never empty" is a compile-time
+ *  fact, not a runtime rule someone has to remember. */
+export type TabRef = Exclude<PaneRef, { kind: "empty" }>;
+
+/** A pane's deterministic identity — what tabs dedupe by. Joined on NUL like
+ *  `serverId`/`projectId`, so no printable id can forge a collision. */
+export function paneRefKey(ref: PaneRef): string {
+  switch (ref.kind) {
+    case "session":
+      return ["session", ref.id].join(SEP);
+    case "host":
+      return ["host", ref.serverId].join(SEP);
+    case "files":
+      return ["files", ref.projectId].join(SEP);
+    case "empty":
+      return "empty";
+  }
+}
+
 export type PersistedV3 = {
   version: 3;
   servers: Server[];
@@ -91,6 +111,11 @@ export type PersistedV3 = {
   sessions: SessionV3[];
   /** The grid layout — one entry per cell, `null` for an empty tile. */
   panes: (PaneRef | null)[];
+  /** The open set — what the tab bar shows, in creation order, deduped by
+   *  `paneRefKey`. The single truth of "open": auto-fill draws from these, and
+   *  a session without a tab exists only in the rail. Closing a tab never
+   *  touches the session behind it. */
+  tabs: TabRef[];
   activeSession: string | null;
   /** Open file paths, now **per project** (were per session). Contents re-read. */
   openPaths: Record<ProjectId, string[]>;
@@ -249,10 +274,69 @@ export function migrateV2toV3(v2: PersistedV2): PersistedV3 {
     projects: [...projects.values()],
     sessions,
     panes,
+    tabs: seedTabs(panes, sessions),
     activeSession: v2.activeSession ?? null,
     openPaths,
     activePath,
   };
+}
+
+// ── tabs: seeding and validation ─────────────────────────────────────────────
+
+/**
+ * Reconstruct the open set for a workspace persisted before tabs existed:
+ * everything on the deck first (dedup, cleared tiles skipped), then every
+ * remaining session in array order. That matches what the old auto-fill (which
+ * drew from *all* sessions) put on screen, so the upgraded deck looks exactly
+ * like the deck the operator left.
+ */
+export function seedTabs(
+  panes: readonly (PaneRef | null)[],
+  sessions: readonly Pick<SessionV3, "id">[],
+): TabRef[] {
+  const seen = new Set<string>();
+  const out: TabRef[] = [];
+  for (const p of panes) {
+    if (!p || p.kind === "empty") continue;
+    const key = paneRefKey(p);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  for (const s of sessions) {
+    const ref: TabRef = { kind: "session", id: s.id };
+    const key = paneRefKey(ref);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ref);
+  }
+  return out;
+}
+
+/** Validate a persisted tab list: drop empties, duplicates, unknown kinds and
+ *  refs whose entity no longer exists in the blob. */
+export function sanitizeTabs(raw: unknown, ws: PersistedV3): TabRef[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: TabRef[] = [];
+  for (const entry of raw) {
+    const t = entry as PaneRef | null;
+    if (!t || typeof t !== "object") continue;
+    const alive =
+      t.kind === "session"
+        ? ws.sessions.some((s) => s.id === t.id)
+        : t.kind === "host"
+          ? ws.servers.some((s) => s.id === t.serverId)
+          : t.kind === "files"
+            ? ws.projects.some((p) => p.id === t.projectId)
+            : false; // "empty" and future kinds are not tabs
+    if (!alive) continue;
+    const key = paneRefKey(t);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t as TabRef);
+  }
+  return out;
 }
 
 // ── loading (v3, else migrate v2, else empty) ────────────────────────────────
@@ -263,6 +347,7 @@ export const EMPTY_V3: PersistedV3 = {
   projects: [],
   sessions: [],
   panes: [],
+  tabs: [],
   activeSession: null,
   openPaths: {},
   activePath: {},
@@ -282,7 +367,14 @@ export const EMPTY_V3: PersistedV3 = {
 export function resolveWorkspace(v3raw: string | null, v2raw: string | null): PersistedV3 {
   if (v3raw) {
     try {
-      return { ...EMPTY_V3, ...(JSON.parse(v3raw) as Partial<PersistedV3>), version: 3 };
+      const parsed = JSON.parse(v3raw) as Partial<PersistedV3>;
+      const ws: PersistedV3 = { ...EMPTY_V3, ...parsed, version: 3 };
+      // Seed on key *absence*, never on emptiness: a blob from before tabs
+      // existed gets its open set reconstructed so the deck looks unchanged,
+      // while an operator who closed every tab must not have them resurrected
+      // on the next launch.
+      ws.tabs = "tabs" in parsed ? sanitizeTabs(parsed.tabs, ws) : seedTabs(ws.panes, ws.sessions);
+      return ws;
     } catch {
       // fall through — a corrupt v3 blob must not wedge the app
     }

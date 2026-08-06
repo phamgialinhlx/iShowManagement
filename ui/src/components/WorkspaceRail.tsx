@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
+import { api } from "../lib/api";
 import { useWorkspace } from "../lib/workspace";
 import { onScreenSessions } from "../lib/grid";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
@@ -44,8 +45,8 @@ function writeFolded(set: Set<string>) {
   }
 }
 
-/** `user@host:port`, or `local` for the local machine. */
-function serverLabel(server: Server): string {
+/** `user@host:port`, or `local` for the local machine. Exported for the tab bar. */
+export function serverLabel(server: Server): string {
   const t = server.target;
   if (!t.host) return "local";
   return `${t.user ? `${t.user}@` : ""}${t.host}${t.port ? `:${t.port}` : ""}`;
@@ -113,7 +114,7 @@ function ServerDot({ status }: { status: SessionStatus }) {
 }
 
 /** Terminal glyph: a prompt mark (`>_`). Rule 3 — inline SVG, square caps. */
-function TerminalMark() {
+export function TerminalMark() {
   return (
     <svg
       width="11"
@@ -137,7 +138,7 @@ function TerminalMark() {
  * emoji. A fill path, not a stroke, so it takes `fill`, not `stroke`; the colour
  * comes from the tokens so it follows the theme.
  */
-function ClaudeMark({ color = "var(--text-soft)" }: { color?: string }) {
+export function ClaudeMark({ color = "var(--text-soft)" }: { color?: string }) {
   return (
     <svg
       width="12"
@@ -195,6 +196,47 @@ function PlusIcon() {
   return (
     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" aria-hidden="true">
       <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+/** Host glyph for the tab bar: a small rack. Same style rules as the others. */
+export function HostMark() {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="var(--text-soft)"
+      strokeWidth="2"
+      strokeLinecap="square"
+      aria-hidden="true"
+      className="shrink-0"
+    >
+      <rect x="3" y="4" width="18" height="7" />
+      <rect x="3" y="13" width="18" height="7" />
+      <path d="M6.5 7.5h.01M6.5 16.5h.01" />
+    </svg>
+  );
+}
+
+/** Files glyph for the tab bar: a folder outline. */
+export function FilesMark() {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="var(--text-soft)"
+      strokeWidth="2"
+      strokeLinecap="square"
+      strokeLinejoin="miter"
+      aria-hidden="true"
+      className="shrink-0"
+    >
+      <path d="M3 6v13h18V8h-9l-2-2H3z" />
     </svg>
   );
 }
@@ -328,6 +370,7 @@ function ProjectNode({
   const sessions = useWorkspace((s) => s.sessions);
   const active = useWorkspace((s) => s.activeSession);
   const panes = useWorkspace((s) => s.panes);
+  const tabs = useWorkspace((s) => s.tabs);
   const grid = useWorkspace((s) => s.grid);
   const openFiles = useWorkspace((s) => s.openFiles);
   const openSession = useWorkspace((s) => s.openSession);
@@ -338,7 +381,7 @@ function ProjectNode({
   // Derived with the same `layoutPanes` the deck uses — the raw `panes` array
   // both misses auto-filled cells (the common case) and keeps orphan entries
   // beyond the visible cell count, so reading it directly marked the wrong rows.
-  const onScreen = onScreenSessions(panes, sessions, active, grid);
+  const onScreen = onScreenSessions(panes, tabs, sessions, active, grid);
 
   const add = (kind: "terminal" | "claude") => {
     const id = addSession(project.id, kind);
@@ -434,6 +477,31 @@ function ServerNode({
   const allSessions = useWorkspace((s) => s.sessions);
   const runtime = useWorkspace((s) => s.runtime);
   const openHost = useWorkspace((s) => s.openHost);
+  const createProject = useWorkspace((s) => s.createProject);
+  const addSession = useWorkspace((s) => s.addSession);
+  const openSession = useWorkspace((s) => s.openSession);
+
+  // meowork's "+ shell": a terminal/Claude straight off the server row, no
+  // folder picker. First use creates (or reuses — project ids derive from the
+  // folder) a "home" project at the operator's home directory. The home is
+  // resolved over the connection (`fs_home`), never spelled "~"/"$HOME" — a
+  // quoted "~" becomes a literal directory (CLAUDE.md).
+  const [quick, setQuick] = useState<"terminal" | "claude" | null>(null);
+  const [quickError, setQuickError] = useState<string | null>(null);
+  const quickAdd = async (kind: "terminal" | "claude") => {
+    if (quick) return;
+    setQuick(kind);
+    setQuickError(null);
+    try {
+      const home = await api.fsHome(server.target);
+      const projectId = createProject(server.id, home, "home");
+      openSession(addSession(projectId, kind));
+    } catch (e) {
+      setQuickError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setQuick(null);
+    }
+  };
 
   const projectIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
   const mine = useMemo(
@@ -478,6 +546,25 @@ function ServerNode({
         </button>
         <button
           type="button"
+          className="chip shrink-0"
+          onClick={() => void quickAdd("terminal")}
+          disabled={quick !== null}
+          title="New shell in your home folder"
+        >
+          {quick === "terminal" ? "…" : "+ sh"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void quickAdd("claude")}
+          disabled={quick !== null}
+          aria-label={`New Claude session in your home folder on ${serverLabel(server)}`}
+          title="New Claude session in your home folder"
+          className="shrink-0 px-1 opacity-70 hover:opacity-100"
+        >
+          {quick === "claude" ? <span className="micro">…</span> : <ClaudeMark />}
+        </button>
+        <button
+          type="button"
           onClick={() => onNewProject(server.id)}
           aria-label={`New project on ${serverLabel(server)}`}
           title="Add a project (folder) on this server"
@@ -487,6 +574,12 @@ function ServerNode({
           <PlusIcon />
         </button>
       </div>
+
+      {quickError && (
+        <p className="data mx-1.5 px-2.5 py-1 text-[10px]" style={{ color: "rgb(var(--primary))" }}>
+          {quickError}
+        </p>
+      )}
 
       {!folded &&
         projects.map((project) => (

@@ -13,6 +13,7 @@ import {
   RETRY_DELAY,
 } from "./autosave";
 import {
+  paneRefKey,
   reattachName,
   resolveWorkspace,
   serverId as deriveServerId,
@@ -25,6 +26,7 @@ import {
   type SessionKind,
   type SessionStatus,
   type SessionV3,
+  type TabRef,
 } from "./workspace-model.ts";
 import { isFocus, layoutPanes, openTarget, parseGridLayout, type GridLayoutId } from "./grid";
 import {
@@ -33,7 +35,10 @@ import {
   addSession as rAddSession,
   assignPane as rAssignPane,
   closePane as rClosePane,
+  closeTab as rCloseTab,
+  ensureTab as rEnsureTab,
   removeSession as rRemoveSession,
+  stripRef as rStripRef,
   type Core,
 } from "./workspace-reducers.ts";
 
@@ -149,6 +154,12 @@ type State = Core & {
   openFiles: (projectId: ProjectId) => void;
   /** Activate a session *and* make sure it is on screen — the "go to it" verb. */
   revealSession: (id: string) => void;
+  /** Reveal any tab: focus its cell if on screen, open it into the target cell
+   *  if not (re-adding the tab if it was closed). */
+  revealTab: (ref: TabRef) => void;
+  /** Close a tab everywhere. The session behind it keeps running — killing is
+   *  the rail's confirm flow (`removeSession`), nothing else. */
+  closeTab: (ref: TabRef) => void;
 
   // ── runtime handles ──────────────────────────────────────────────────────
   setLive: (id: string, handle: string) => void;
@@ -194,6 +205,7 @@ function persist(state: State) {
     projects: state.projects,
     sessions: state.sessions,
     panes: state.panes,
+    tabs: state.tabs,
     activeSession: state.activeSession,
     openPaths,
     activePath,
@@ -232,6 +244,7 @@ const coreOf = (s: State): Core => ({
   projects: s.projects,
   sessions: s.sessions,
   panes: s.panes,
+  tabs: s.tabs,
   activeSession: s.activeSession,
 });
 
@@ -241,13 +254,14 @@ const coreOf = (s: State): Core => ({
 const openCell = (s: State): number =>
   isFocus(s.grid)
     ? 0
-    : openTarget(layoutPanes(s.panes, s.sessions, s.activeSession, s.grid), s.focusedCell);
+    : openTarget(layoutPanes(s.panes, s.tabs, s.sessions, s.activeSession, s.grid), s.focusedCell);
 
 export const useWorkspace = create<State>((set, get) => ({
   servers: restored.servers,
   projects: restored.projects,
   sessions: restored.sessions,
   panes: restored.panes,
+  tabs: restored.tabs,
   activeSession: restored.activeSession,
   openPaths: restored.openPaths,
   activePath: restored.activePath,
@@ -343,6 +357,8 @@ export const useWorkspace = create<State>((set, get) => ({
     // then drop the now-empty project. Removing a session mutates the store, so
     // snapshot the ids before iterating.
     for (const s of get().sessions.filter((x) => x.projectId === id)) get().removeSession(s.id);
+    // A deleted project must not leave its files tab/pane dangling.
+    set(rStripRef(coreOf(get()), { kind: "files", projectId: id }));
     set((s) => {
       const buffers = Object.fromEntries(
         Object.entries(s.buffers).filter(([, b]) => b.projectId !== id),
@@ -356,6 +372,8 @@ export const useWorkspace = create<State>((set, get) => ({
 
   removeServer: (id) => {
     for (const p of get().projects.filter((x) => x.serverId === id)) get().removeProject(p.id);
+    // A deleted server must not leave its host tab/pane dangling.
+    set(rStripRef(coreOf(get()), { kind: "host", serverId: id }));
     set((s) => ({ servers: s.servers.filter((sv) => sv.id !== id) }));
     schedulePersist(get);
   },
@@ -495,19 +513,34 @@ export const useWorkspace = create<State>((set, get) => ({
   // "Go to this session." Bare `activate` only moves highlights: in focus mode
   // an assigned pane 0 wins the cell, and a grid is deliberately stable — so
   // the waiting chip and the ⌘digits, which used to call it, appeared to do
-  // nothing. If the session is already on screen this just points at its cell;
-  // otherwise it is opened into the usual target cell.
-  revealSession: (id) => {
+  // nothing.
+  revealSession: (id) => get().revealTab({ kind: "session", id }),
+
+  revealTab: (ref) => {
     const s = get();
-    if (!s.sessions.some((x) => x.id === id)) return;
-    const cells = layoutPanes(s.panes, s.sessions, s.activeSession, s.grid);
-    const index = cells.findIndex((p) => p?.kind === "session" && p.id === id);
-    s.activate(id);
+    // A vanished entity gets no tab back.
+    if (ref.kind === "session" && !s.sessions.some((x) => x.id === ref.id)) return;
+    if (ref.kind === "host" && !s.servers.some((x) => x.id === ref.serverId)) return;
+    if (ref.kind === "files" && !s.projects.some((x) => x.id === ref.projectId)) return;
+    // Re-open first: the waiting chip and ⌘digits must work for a tab that was
+    // closed — revealing is what brings it back.
+    set(rEnsureTab(coreOf(s), ref));
+    const now = get();
+    const cells = layoutPanes(now.panes, now.tabs, now.sessions, now.activeSession, now.grid);
+    const key = paneRefKey(ref);
+    const index = cells.findIndex((p) => p !== null && paneRefKey(p) === key);
+    if (ref.kind === "session") now.activate(ref.id);
     if (index >= 0) {
-      if (!isFocus(s.grid)) s.focusCell(index);
-      return;
+      if (!isFocus(now.grid)) now.focusCell(index);
+    } else {
+      now.assignPane(isFocus(now.grid) ? 0 : openTarget(cells, now.focusedCell), ref);
     }
-    s.assignPane(isFocus(s.grid) ? 0 : openTarget(cells, s.focusedCell), { kind: "session", id });
+    schedulePersist(get);
+  },
+
+  closeTab: (ref) => {
+    set(rCloseTab(coreOf(get()), ref));
+    schedulePersist(get);
   },
 
   // ── runtime handles ──────────────────────────────────────────────────────

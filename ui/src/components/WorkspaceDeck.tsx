@@ -89,6 +89,7 @@ const KEEP_WARM = 4;
 export function WorkspaceDeck() {
   const sessions = useWorkspace((s) => s.sessions);
   const panes = useWorkspace((s) => s.panes);
+  const tabs = useWorkspace((s) => s.tabs);
   const active = useWorkspace((s) => s.activeSession);
   const recent = useWorkspace((s) => s.recentSessions);
   const grid = useWorkspace((s) => s.grid);
@@ -98,8 +99,8 @@ export function WorkspaceDeck() {
   const assignPane = useWorkspace((s) => s.assignPane);
 
   const cells = useMemo(
-    () => layoutPanes(panes, sessions, active, grid),
-    [panes, sessions, active, grid],
+    () => layoutPanes(panes, tabs, sessions, active, grid),
+    [panes, tabs, sessions, active, grid],
   );
 
   // The focus-mode warm set. The visible pane is prepended so an explicitly
@@ -112,8 +113,11 @@ export function WorkspaceDeck() {
   const warm = useMemo(() => {
     if (!isFocus(grid)) return [];
     const order = visibleSession ? [visibleSession, ...recent] : recent;
-    return warmSessions(active, order, sessions, KEEP_WARM);
-  }, [grid, visibleSession, active, recent, sessions]);
+    // Only tabbed sessions may stay warm: a session whose tab was closed must
+    // not keep an xterm and a WebGL context mounted behind display:none.
+    const tabbed = new Set(tabs.flatMap((t) => (t.kind === "session" ? [t.id] : [])));
+    return warmSessions(active, order, sessions.filter((s) => tabbed.has(s.id)), KEEP_WARM);
+  }, [grid, visibleSession, active, recent, sessions, tabs]);
 
   if (!isFocus(grid)) {
     const { rows, cols } = gridDims(grid);
@@ -157,8 +161,8 @@ export function WorkspaceDeck() {
                 <button
                   type="button"
                   data-pane-clear
-                  aria-label="Clear this tile"
-                  title="Clear this tile (does not end the session)"
+                  aria-label="Hide from this tile"
+                  title="Hide from this tile (tab stays open — does not end the session)"
                   className="pane-clear absolute right-1 top-1 z-10"
                   onClick={() => assignPane(index, { kind: "empty" })}
                 >
@@ -179,7 +183,7 @@ export function WorkspaceDeck() {
             ) : (
               <div className="grid h-full place-items-center">
                 <span className="micro" style={{ color: "var(--text-faint)" }}>
-                  EMPTY — CLICK A NODE IN THE RAIL TO FILL
+                  EMPTY — CLICK A TAB, OR A NODE IN THE RAIL
                 </span>
               </div>
             )}
@@ -235,7 +239,7 @@ export function WorkspaceDeck() {
       {!only && (
         <div className="grid h-full flex-1 place-items-center">
           <span className="micro" style={{ color: "var(--text-faint)" }}>
-            nothing open — pick a session, or connect a server
+            nothing open — connect a server, then + shell
           </span>
         </div>
       )}

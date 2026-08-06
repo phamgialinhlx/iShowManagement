@@ -159,6 +159,36 @@ export function run(log: (line: string) => void): boolean {
       resolveWorkspace(JSON.stringify({ version: 3, servers: [{ id: "local", target: {} }] }), null).panes.length === 0);
   }
 
+  // ── Tabs: seeded for old blobs, kept verbatim for new ones ────────────────
+  {
+    check("v2 migration seeds tabs (panes first, then the rest)",
+      v3.tabs.length === 8 &&
+        v3.tabs[0]?.kind === "session" && (v3.tabs[0] as { id: string }).id === "s1" &&
+        (v3.tabs[1] as { id: string }).id === "s3");
+
+    const session = { id: "x", projectId: "p", kind: "claude", name: "x" };
+    const noTabsKey = JSON.stringify({ version: 3, sessions: [session], panes: [], activeSession: null });
+    check("a v3 blob without a tabs key gets seeded",
+      resolveWorkspace(noTabsKey, null).tabs.length === 1);
+
+    const emptyTabs = JSON.stringify({ version: 3, sessions: [session], panes: [], tabs: [], activeSession: null });
+    check("tabs: [] stays empty — closed tabs are not resurrected",
+      resolveWorkspace(emptyTabs, null).tabs.length === 0);
+
+    const dirtyTabs = JSON.stringify({
+      version: 3, sessions: [session], panes: [], activeSession: null,
+      tabs: [
+        { kind: "session", id: "x" },
+        { kind: "session", id: "x" },      // duplicate
+        { kind: "session", id: "dead" },   // entity gone
+        { kind: "empty" },                 // not a tab
+        { kind: "host", serverId: "nope" } // entity gone
+      ],
+    });
+    check("sanitize drops duplicates, dead refs and empties",
+      resolveWorkspace(dirtyTabs, null).tabs.length === 1);
+  }
+
   // ── creation helpers dedup by derived id ──────────────────────────────────
   {
     check("makeServer is deterministic (re-add = same id)",

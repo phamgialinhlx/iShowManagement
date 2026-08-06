@@ -1,4 +1,4 @@
-import type { PaneRef, SessionV3 } from "./workspace-model";
+import type { PaneRef, SessionV3, TabRef } from "./workspace-model";
 
 /**
  * The pane-grid layout presets and the pure cell-assignment rules.
@@ -102,10 +102,12 @@ export function warmSessions<S extends { id: string }>(
  *
  *  1. **An assignment wins.** A cell the operator filled shows that pane,
  *     wherever its session sits in the rail.
- *  2. **Empty cells auto-fill**, from sessions not already placed, **in stable
- *     rail order** — so a fresh grid is useful with no arranging at all. An
- *     `empty`-kind pane blocks auto-fill: it is a tile the operator cleared,
- *     and refilling it would make the clear control appear to do nothing.
+ *  2. **Empty cells auto-fill from the open TABS** — session-kind tabs only, in
+ *     tab-bar order. The tab bar is the single truth of "open": a session with
+ *     no tab exists only in the rail and never appears unasked, and host/files
+ *     tabs are placed by a click, never by auto-fill. An `empty`-kind pane
+ *     blocks auto-fill: it is a tile the operator cleared, and refilling it
+ *     would make the clear control appear to do nothing.
  *  3. **No session appears twice.** Two cells holding one session would mount
  *     its view twice — two Claude panes attached to a single conversation, both
  *     writing to it.
@@ -113,8 +115,8 @@ export function warmSessions<S extends { id: string }>(
  * (A closed session does not hold a cell hostage either, but that is the
  * store's job: `removeSession` nulls any pane pointing at it.)
  *
- * The rail-order part is load-bearing and was once wrong. A grid must not
- * reshuffle when you merely click a pane to focus it — clicking calls
+ * The tab-order part is load-bearing and was once wrong (as rail order). A grid
+ * must not reshuffle when you merely click a pane to focus it — clicking calls
  * `activate()`, which changes `activeSession`, and an earlier version ordered
  * the auto-fill *active-first*. So every click yanked the clicked pane to the
  * top-left and displaced the one that was there, and a restart re-derived
@@ -124,6 +126,7 @@ export function warmSessions<S extends { id: string }>(
  */
 export function layoutPanes(
   panes: readonly (PaneRef | null)[],
+  tabs: readonly TabRef[],
   sessions: readonly Pick<SessionV3, "id">[],
   activeId: string | null,
   layout: GridLayoutId,
@@ -132,10 +135,11 @@ export function layoutPanes(
   const out: (PaneRef | null)[] = Array.from({ length: cells }, (_, i) => panes[i] ?? null);
 
   const shown = new Set(out.flatMap((p) => (p && p.kind === "session" ? [p.id] : [])));
+  const tabIds = tabs.flatMap((t) => (t.kind === "session" ? [t.id] : []));
   const order =
-    isFocus(layout) && activeId
-      ? [activeId, ...sessions.map((s) => s.id).filter((id) => id !== activeId)]
-      : sessions.map((s) => s.id);
+    isFocus(layout) && activeId && tabIds.includes(activeId)
+      ? [activeId, ...tabIds.filter((id) => id !== activeId)]
+      : tabIds;
   const spare = order.filter((id) => !shown.has(id) && sessions.some((s) => s.id === id));
 
   for (let i = 0; i < cells && spare.length; i += 1) {
@@ -167,12 +171,13 @@ export function openTarget(
  */
 export function onScreenSessions(
   panes: readonly (PaneRef | null)[],
+  tabs: readonly TabRef[],
   sessions: readonly Pick<SessionV3, "id">[],
   activeId: string | null,
   layout: GridLayoutId,
 ): Set<string> {
   return new Set(
-    layoutPanes(panes, sessions, activeId, layout).flatMap((p) =>
+    layoutPanes(panes, tabs, sessions, activeId, layout).flatMap((p) =>
       p && p.kind === "session" ? [p.id] : [],
     ),
   );

@@ -561,6 +561,15 @@ stopped working. These are not aspirations; each one is a rule with a test.
   the same `layoutPanes` the workbench uses (`onScreenSessions` in `grid.ts`) — two sources for
   one fact is two chances to drift, and the rail once read the raw `panes` array instead, which
   missed every auto-filled cell and marked orphan entries beyond the visible count.
+- **The tab bar is the single truth of "open", and closing a tab kills nothing.** Tabs
+  (`PersistedV3.tabs`, deduped by `paneRefKey`) are what auto-fill draws from — a session with
+  no tab exists only in the rail; host/files tabs are placed by click, never by auto-fill.
+  Tab ✕ (`closeTab`) frees its cells to `null` (the next open tab takes them) and hands
+  `activeSession` off; the deck's per-cell × stays `{kind:"empty"}`, because nulling a cell
+  whose tab is still open lets auto-fill put the same pane straight back — a control that
+  appears to do nothing. Killing is `removeSession` in the rail, behind a confirm, nowhere
+  else. Old blobs are seeded from panes+sessions **only when the `tabs` key is absent** —
+  seeding on emptiness would resurrect every closed tab at launch. ⌘1-9 follow tab-bar order.
 - **A context menu flips before it clamps.** Right-clicking near the bottom of a file tree put
   half the items below the window edge, unreachable, with nothing indicating they existed —
   Delete was simply gone. Growing *upward* from the cursor keeps the pointer on the menu's edge

@@ -2,6 +2,7 @@ import type { TargetRef } from "./api";
 import {
   makeServer,
   makeProject,
+  paneRefKey,
   serverId,
   type PaneRef,
   type PersistedV3,
@@ -9,6 +10,7 @@ import {
   type ServerId,
   type SessionKind,
   type SessionV3,
+  type TabRef,
 } from "./workspace-model.ts";
 
 /**
@@ -25,7 +27,7 @@ import {
  */
 export type Core = Pick<
   PersistedV3,
-  "servers" | "projects" | "sessions" | "panes" | "activeSession"
+  "servers" | "projects" | "sessions" | "panes" | "tabs" | "activeSession"
 >;
 
 export const EMPTY_CORE: Core = {
@@ -33,8 +35,18 @@ export const EMPTY_CORE: Core = {
   projects: [],
   sessions: [],
   panes: [],
+  tabs: [],
   activeSession: null,
 };
+
+/** Append a tab unless its identity is already open. Creation (`addSession`)
+ *  and placement (`assignPane`) both funnel through this, so "anything on
+ *  screen has a tab" holds by construction, not by call-site discipline. */
+export function ensureTab(ws: Core, ref: TabRef): Core {
+  const key = paneRefKey(ref);
+  if (ws.tabs.some((t) => paneRefKey(t) === key)) return ws;
+  return { ...ws, tabs: [...ws.tabs, ref] };
+}
 
 /** Add a Server for a target, or return the existing one — ids are derived, so
  *  connecting the same host twice never double-creates. */
@@ -67,7 +79,11 @@ export type NewSession = {
  *  a clock/counter, which is not pure) and must already carry the right prefix. */
 export function addSession(ws: Core, session: NewSession): Core {
   const full: SessionV3 = { ...session };
-  return { ...ws, sessions: [...ws.sessions, full], activeSession: session.id };
+  // Creating is opening: the new session gets a tab immediately.
+  return ensureTab(
+    { ...ws, sessions: [...ws.sessions, full], activeSession: session.id },
+    { kind: "session", id: session.id },
+  );
 }
 
 /**
@@ -86,9 +102,10 @@ export function removeSession(ws: Core, id: string): Core {
   if (!ws.sessions.some((s) => s.id === id)) return ws;
   const sessions = ws.sessions.filter((s) => s.id !== id);
   const panes = ws.panes.map((p) => (p && p.kind === "session" && p.id === id ? null : p));
+  const tabs = ws.tabs.filter((t) => !(t.kind === "session" && t.id === id));
   const activeSession =
     ws.activeSession === id ? (sessions[sessions.length - 1]?.id ?? null) : ws.activeSession;
-  return { ...ws, sessions, panes, activeSession };
+  return { ...ws, sessions, panes, tabs, activeSession };
 }
 
 /**
@@ -109,7 +126,9 @@ export function assignPane(ws: Core, index: number, ref: PaneRef | null): Core {
     }
   }
   panes[index] = ref;
-  return { ...ws, panes };
+  const next = { ...ws, panes };
+  // Putting something on screen opens it: the tab appears with the pane.
+  return ref && ref.kind !== "empty" ? ensureTab(next, ref) : next;
 }
 
 /** Clear a tile without touching the session behind it (close pane ≠ kill). */
@@ -118,4 +137,37 @@ export function closePane(ws: Core, index: number): Core {
   const panes = [...ws.panes];
   panes[index] = null;
   return { ...ws, panes };
+}
+
+/** Remove a ref from the tab bar and from every cell holding it. The entity
+ *  behind it is untouched — this is `closeTab`'s body, reused by the remove
+ *  cascades so a deleted project/server cannot leave a dangling files/host tab
+ *  or pane behind. */
+export function stripRef(ws: Core, ref: TabRef): Core {
+  const key = paneRefKey(ref);
+  const tabs = ws.tabs.filter((t) => paneRefKey(t) !== key);
+  const panes = ws.panes.map((p) => (p && paneRefKey(p) === key ? null : p));
+  return { ...ws, tabs, panes };
+}
+
+/**
+ * Close a tab: gone from the bar and from every cell. A freed cell returns to
+ * `null`, not `"empty"` — the closed tab is no longer a fill candidate, so
+ * auto-fill hands the cell to the next open tab rather than putting this one
+ * straight back. The session behind a session tab lives on in the rail;
+ * killing is `removeSession` and nothing else.
+ *
+ * Closing the active session's tab hands `activeSession` to the last remaining
+ * session tab — the rail highlight, title bar and instruments must not keep
+ * pointing at something that is no longer open.
+ */
+export function closeTab(ws: Core, ref: TabRef): Core {
+  const next = stripRef(ws, ref);
+  if (ref.kind === "session" && ws.activeSession === ref.id) {
+    const last = [...next.tabs]
+      .reverse()
+      .find((t): t is Extract<TabRef, { kind: "session" }> => t.kind === "session");
+    return { ...next, activeSession: last?.id ?? null };
+  }
+  return next;
 }

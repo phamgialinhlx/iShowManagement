@@ -4,6 +4,7 @@ import { AnimatePresence } from "motion/react";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Metrics } from "../components/Metrics";
 import { WorkspaceNewSessionLayer, type NewMode } from "../components/WorkspaceNewSession";
+import { TabBar } from "../components/TabBar";
 import { WorkspaceDeck } from "../components/WorkspaceDeck";
 import { WorkspaceRail } from "../components/WorkspaceRail";
 import { WidgetRail, type Active } from "../components/WidgetRail";
@@ -58,10 +59,11 @@ export function Workbench({
   }, [session]);
 
   const servers = useWorkspace((s) => s.servers);
-  const projects = useWorkspace((s) => s.projects);
   const sessions = useWorkspace((s) => s.sessions);
+  const tabs = useWorkspace((s) => s.tabs);
   const activeId = useWorkspace((s) => s.activeSession);
   const revealSession = useWorkspace((s) => s.revealSession);
+  const revealTab = useWorkspace((s) => s.revealTab);
   const grid = useWorkspace((s) => s.grid);
   const setGrid = useWorkspace((s) => s.setGrid);
   const railCollapsed = useWorkspace((s) => s.railCollapsed);
@@ -112,27 +114,6 @@ export function Workbench({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ⌘1-9 follows the rail's visual order — server, then project, then session —
-  // not the flat creation order, because the rail shows no numbers and the only
-  // guessable mapping is top-to-bottom as drawn. Fold state is rail-local and
-  // deliberately ignored.
-  const railOrder = useMemo(() => {
-    const serverRank = new Map(servers.map((sv, i) => [sv.id, i]));
-    const projectRank = new Map(projects.map((p, i) => [p.id, i]));
-    const serverOfProject = new Map(projects.map((p) => [p.id, serverRank.get(p.serverId) ?? 0]));
-    return sessions
-      .map((session, index) => ({ session, index }))
-      .sort(
-        (a, b) =>
-          (serverOfProject.get(a.session.projectId) ?? 0) -
-            (serverOfProject.get(b.session.projectId) ?? 0) ||
-          (projectRank.get(a.session.projectId) ?? 0) -
-            (projectRank.get(b.session.projectId) ?? 0) ||
-          a.index - b.index,
-      )
-      .map((x) => x.session);
-  }, [servers, projects, sessions]);
-
   // Global shortcuts. Pane-scoped ones live in the panes.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -151,18 +132,20 @@ export function Workbench({
         e.preventDefault();
         toggleRail();
       }
+      // ⌘1-9 follows the tab bar's order, exactly as a browser's does — the bar
+      // shows the order, so the mapping is the one thing the operator can see.
       const digit = Number(e.key);
       if (Number.isInteger(digit) && digit >= 1 && digit <= 9) {
-        const target = railOrder[digit - 1];
+        const target = tabs[digit - 1];
         if (target) {
           e.preventDefault();
-          revealSession(target.id);
+          revealTab(target);
         }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [railOrder, revealSession, toggleRail]);
+  }, [tabs, revealTab, toggleRail]);
 
   return (
     <>
@@ -185,7 +168,10 @@ export function Workbench({
           />
 
           <ErrorBoundary label="The workbench">
-            <WorkspaceDeck />
+            <div className="flex min-h-0 flex-1 flex-col">
+              <TabBar />
+              <WorkspaceDeck />
+            </div>
           </ErrorBoundary>
 
           <ErrorBoundary label="Instruments">
