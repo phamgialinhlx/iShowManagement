@@ -495,6 +495,13 @@ export const api = {
   jiraTransition: (key: string, transition: string) =>
     call<void>("jira_transition", { key, transition }),
   jiraComment: (key: string, body: string) => call<void>("jira_comment", { key, body }),
+  /**
+   * Create a task. Assignee and sprint are the *server's* decision — it assigns
+   * to the calling account's own Jira user and discovers the project's active
+   * sprint, so the app never has to know either.
+   */
+  jiraCreate: (project: string, summary: string) =>
+    call<JiraIssue>("jira_create", { project, summary }),
 
   // --- the Claude credential ------------------------------------------------
   //

@@ -142,6 +142,7 @@ pub fn run() {
             auth::jira_transitions,
             auth::jira_transition,
             auth::jira_comment,
+            auth::jira_create,
             settings_window::open_settings,
             lock::lock_status,
             lock::lock_enable,
