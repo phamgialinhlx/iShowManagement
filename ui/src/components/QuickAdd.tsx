@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 
 import { ModelChoice } from "./ModelChoice";
 import { PermissionChoice } from "./PermissionChoice";
+import { ClaudeSessionPicker } from "./ClaudeSessionPicker";
+import type { TargetRef } from "../lib/api";
 
 /**
  * The two questions a new session cannot answer for you.
@@ -32,6 +34,8 @@ export function QuickAdd({
   where,
   inheritedProfile,
   busy,
+  target,
+  folder,
   onCancel,
   onCreate,
 }: {
@@ -41,8 +45,23 @@ export function QuickAdd({
   where: string;
   inheritedProfile?: string;
   busy: boolean;
+  /**
+   * Given together, the folder's previous conversations are offered first.
+   *
+   * Optional because a *terminal* quick-add has nothing to resume — the two
+   * questions below apply to both kinds, the history only to Claude.
+   */
+  target?: TargetRef;
+  folder?: string;
   onCancel: () => void;
-  onCreate: (choice: { skipPermissions: boolean; modelProfile?: string }) => void;
+  onCreate: (choice: {
+    skipPermissions: boolean;
+    modelProfile?: string;
+    /** A previous conversation to `--resume`, or undefined to start fresh. */
+    resume?: string;
+    /** That conversation's title, which becomes the session's name. */
+    name?: string;
+  }) => void;
 }) {
   const [skip, setSkip] = useState(false);
   const [profile, setProfile] = useState<string | null>(inheritedProfile ?? null);
@@ -90,20 +109,48 @@ export function QuickAdd({
 
       <ModelChoice value={profile} onChange={setProfile} disabled={busy} hintWhenEmpty />
 
-      <div className="flex gap-2">
-        <button
-          type="button"
-          className="chip"
-          disabled={busy}
-          onClick={() => onCreate({ skipPermissions: skip, modelProfile: profile ?? undefined })}
-          style={{ flex: "1 1 auto" }}
-        >
-          {busy ? "STARTING…" : "START"}
-        </button>
-        <button type="button" className="chip" disabled={busy} onClick={onCancel}>
-          CANCEL
-        </button>
-      </div>
+      {/*
+        The history sits *below* the two questions and above the buttons,
+        because the questions apply to whichever row is pressed — resuming
+        yesterday's conversation with today's permissions is the normal case,
+        and a picker that acted before they were set would answer them for you.
+
+        `ClaudeSessionPicker` carries its own "New Claude session" button, so
+        when the history is shown that is the way to start fresh and the START
+        button below would be a second one saying the same thing.
+      */}
+      {target && folder ? (
+        <>
+          <div className="max-h-[220px] min-h-0">
+            <ClaudeSessionPicker
+              target={target}
+              folder={folder}
+              busy={busy}
+              onChoose={(resume, name) =>
+                onCreate({ skipPermissions: skip, modelProfile: profile ?? undefined, resume, name })
+              }
+            />
+          </div>
+          <button type="button" className="chip" disabled={busy} onClick={onCancel}>
+            CANCEL
+          </button>
+        </>
+      ) : (
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className="chip"
+            disabled={busy}
+            onClick={() => onCreate({ skipPermissions: skip, modelProfile: profile ?? undefined })}
+            style={{ flex: "1 1 auto" }}
+          >
+            {busy ? "STARTING…" : "START"}
+          </button>
+          <button type="button" className="chip" disabled={busy} onClick={onCancel}>
+            CANCEL
+          </button>
+        </div>
+      )}
     </div>
   );
 }

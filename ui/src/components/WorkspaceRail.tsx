@@ -1,8 +1,11 @@
 import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
+import { useRailWidth } from "../lib/rail-width";
 import { useWorkspace } from "../lib/workspace";
+import { RailGrip } from "./RailGrip";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
+import { QuickAdd } from "./QuickAdd";
 
 /**
  * The session rail, v3 — a **Server → Project → Session** tree.
@@ -19,7 +22,7 @@ import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace
  * server's HOST button opens its host pane; `[+]`/`[✦]` add a terminal/Claude.
  */
 
-const RAIL_WIDTH = 216;
+const RAIL_DEFAULT = 216;
 // Collapsed = fully hidden; the footer's sidebar icon is the one toggle.
 const RAIL_COLLAPSED = 0;
 
@@ -187,6 +190,14 @@ function Chevron({ folded }: { folded: boolean }) {
   );
 }
 
+function CloseIcon() {
+  return (
+    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" aria-hidden="true">
+      <path d="M18 6L6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
 function PlusIcon() {
   return (
     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" aria-hidden="true">
@@ -338,15 +349,48 @@ function ProjectNode({
   const openSession = useWorkspace((s) => s.openSession);
   const addSession = useWorkspace((s) => s.addSession);
   const removeSession = useWorkspace((s) => s.removeSession);
+  const removeProject = useWorkspace((s) => s.removeProject);
+  const target = useWorkspace((s) => s.targetOfProject(project.id));
+  const allServers = useWorkspace((s) => s.servers);
+  // Stated, never assumed: two projects can share a folder name on different
+  // machines, and this control is reached without naming one.
+  const host = allServers.find((sv) => sv.id === project.serverId);
 
   const mine = sessions.filter((s) => s.projectId === project.id);
+  const [confirming, setConfirming] = useState(false);
+  const [adding, setAdding] = useState<"terminal" | "claude" | null>(null);
   const onScreen = new Set(
     panes.flatMap((p) => (p && p.kind === "session" ? [p.id] : [])),
   );
 
-  const add = (kind: "terminal" | "claude") => {
-    const id = addSession(project.id, kind);
+  /**
+   * `+` and `✦` **ask** before creating.
+   *
+   * They used to call `addSession` outright, which decided three things the
+   * operator is supposed to decide: whether to skip permissions, which provider
+   * the credential goes to, and — for Claude — whether this is new work at all
+   * or a continuation of yesterday's. `QuickAdd` and `ClaudeSessionPicker` were
+   * both written for exactly this and were left unwired when the rail was
+   * rebuilt as a Server → Project tree, so the two components existed, worked,
+   * and were reachable from nowhere.
+   */
+  const add = (choice: {
+    skipPermissions: boolean;
+    modelProfile?: string;
+    resume?: string;
+    name?: string;
+  }) => {
+    if (!adding) return;
+    const id = addSession(project.id, adding, {
+      skipPermissions: choice.skipPermissions,
+      modelProfile: choice.modelProfile,
+      resume: choice.resume,
+      // A resumed conversation is named for what it was about; every session in
+      // a folder would otherwise share that folder's name.
+      name: choice.name?.trim() || undefined,
+    });
     openSession(id);
+    setAdding(null);
   };
 
   return (
@@ -378,7 +422,7 @@ function ProjectNode({
         </button>
         <button
           type="button"
-          onClick={() => add("terminal")}
+          onClick={() => setAdding("terminal")}
           aria-label={`New terminal in ${project.label}`}
           title="New terminal"
           className="shrink-0 px-1 opacity-70 hover:opacity-100"
@@ -388,14 +432,71 @@ function ProjectNode({
         </button>
         <button
           type="button"
-          onClick={() => add("claude")}
+          onClick={() => setAdding("claude")}
           aria-label={`New Claude session in ${project.label}`}
           title="New Claude session"
           className="shrink-0 px-1 opacity-70 hover:opacity-100"
         >
           <ClaudeMark />
         </button>
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          aria-label={`Remove ${project.label}`}
+          title="Remove this project"
+          className="shrink-0 px-1 opacity-0 group-hover/prj:opacity-70 hover:!opacity-100"
+          style={{ color: "var(--text-soft)" }}
+        >
+          <CloseIcon />
+        </button>
       </div>
+
+      {adding && (
+        <div className="px-2 pb-2 pl-4">
+          <QuickAdd
+            label={project.label}
+            where={`${project.folder} on ${host ? serverLabel(host) : "this machine"}`}
+            inheritedProfile={mine.find((s) => s.modelProfile)?.modelProfile}
+            busy={false}
+            // Only Claude has a history to offer; a terminal's quick-add keeps
+            // its single START button.
+            target={adding === "claude" ? target : undefined}
+            folder={adding === "claude" ? project.folder : undefined}
+            onCancel={() => setAdding(null)}
+            onCreate={add}
+          />
+        </div>
+      )}
+
+      {/* Same reasoning as the server's: `removeProject` ends every session in
+          it, and each one sends a real kill to the host. The count is the whole
+          message — removing an empty project costs nothing, removing one with
+          two Claude sessions in it ends both. */}
+      {confirming && (
+        <div className="flex flex-col gap-1 py-1 pl-6 pr-2">
+          <span className="micro leading-relaxed" style={{ color: "var(--text-soft)" }}>
+            {mine.length > 0
+              ? `ENDS ${mine.length} SESSION${mine.length === 1 ? "" : "S"} ON THE SERVER`
+              : "REMOVES THIS PROJECT FROM THE LIST"}
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="chip"
+              style={{ color: "rgb(var(--primary))" }}
+              onClick={() => {
+                setConfirming(false);
+                removeProject(project.id);
+              }}
+            >
+              remove it
+            </button>
+            <button type="button" className="chip" onClick={() => setConfirming(false)}>
+              cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Children hang off a vertical guide line, as in the reference. */}
       <AnimatePresence initial={false}>
@@ -448,6 +549,8 @@ function ServerNode({
   const allSessions = useWorkspace((s) => s.sessions);
   const runtime = useWorkspace((s) => s.runtime);
   const openHost = useWorkspace((s) => s.openHost);
+  const removeServer = useWorkspace((s) => s.removeServer);
+  const [confirming, setConfirming] = useState(false);
 
   const projectIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
   const mine = useMemo(
@@ -508,7 +611,53 @@ function ServerNode({
         >
           <PlusIcon />
         </button>
+        {/* Hidden until the row is hovered, like the session's close: a
+            destructive control sitting permanently beside HOST and + would be
+            the easiest thing on the row to hit by accident. */}
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          aria-label={`Remove ${serverLabel(server)}`}
+          title="Remove this server"
+          className="shrink-0 px-1 opacity-0 group-hover/srv:opacity-70 hover:!opacity-100"
+          style={{ color: "var(--text-soft)" }}
+        >
+          <CloseIcon />
+        </button>
       </div>
+
+      {/*
+        Removing a server is not "hide it from the list": `removeServer`
+        cascades to its projects and then to its sessions, and each of those
+        sends a real kill to the host. So the counts are stated before the
+        press — "3 sessions" is the difference between tidying the rail and
+        ending three running conversations, and nothing else on screen says it.
+      */}
+      {confirming && (
+        <div className="mx-1.5 flex flex-col gap-1 px-2.5 py-2">
+          <span className="micro leading-relaxed" style={{ color: "var(--text-soft)" }}>
+            {mine.length > 0
+              ? `ENDS ${mine.length} SESSION${mine.length === 1 ? "" : "S"} AND ${projects.length} PROJECT${projects.length === 1 ? "" : "S"} ON THE SERVER`
+              : "REMOVES THIS SERVER FROM THE LIST"}
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="chip"
+              style={{ color: "rgb(var(--primary))" }}
+              onClick={() => {
+                setConfirming(false);
+                removeServer(server.id);
+              }}
+            >
+              remove it
+            </button>
+            <button type="button" className="chip" onClick={() => setConfirming(false)}>
+              cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {!folded &&
         projects.map((project) => (
@@ -542,6 +691,8 @@ export function WorkspaceRail({
   const collapsed = useWorkspace((s) => s.railCollapsed);
   const runtime = useWorkspace((s) => s.runtime);
 
+  const { width: railWidth, startResize } = useRailWidth("rmux.rail.width", RAIL_DEFAULT);
+
   const [folded, setFolded] = useState<Set<string>>(readFolded);
   const toggleNode = (id: string) =>
     setFolded((prev) => {
@@ -560,11 +711,16 @@ export function WorkspaceRail({
 
   return (
     <motion.aside
-      className="panel flex shrink-0 flex-col overflow-hidden"
-      animate={{ width: collapsed ? RAIL_COLLAPSED : RAIL_WIDTH }}
+      className="panel relative flex shrink-0 flex-col overflow-hidden"
+      animate={{ width: collapsed ? RAIL_COLLAPSED : railWidth }}
+      // The spring is for the collapse toggle. A *drag* must not spring: the
+      // edge would lag the pointer and overshoot on release, which reads as the
+      // rail resisting you. `duration: 0` while dragging keeps it welded to the
+      // cursor; motion re-animates the moment `collapsed` changes instead.
       transition={{ type: "spring", stiffness: 320, damping: 34 }}
-      style={{ width: collapsed ? RAIL_COLLAPSED : RAIL_WIDTH }}
+      style={{ width: collapsed ? RAIL_COLLAPSED : railWidth }}
     >
+      {!collapsed && <RailGrip side="right" onPointerDown={(e) => startResize(e, "left")} />}
       <header className="flex shrink-0 items-center border-b px-3 py-2" style={{ borderColor: "var(--border)" }}>
         <span className="micro">
           SERVERS
