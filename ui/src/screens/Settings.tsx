@@ -10,6 +10,7 @@ import { CoworkPanel } from "../components/CoworkPanel";
 import { AppearancePanel } from "../components/AppearancePanel";
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { EditorPanel } from "../components/EditorPanel";
+import { ShortcutSettings } from "../components/ShortcutSettings";
 import { api, isTauri, type SignedIn } from "../lib/api";
 import { SERVER_KEY } from "../components/SignIn";
 
@@ -35,6 +36,7 @@ type Section =
   | "cowork"
   | "notifications"
   | "editor"
+  | "shortcuts"
   | "appearance"
   | "diagnostics";
 
@@ -45,6 +47,7 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "cowork", label: "COWORK", blurb: "Your team's server, if you use one" },
   { id: "notifications", label: "NOTIFICATIONS", blurb: "When a session wants you" },
   { id: "editor", label: "EDITOR", blurb: "Whether edits save themselves" },
+  { id: "shortcuts", label: "SHORTCUTS", blurb: "Move around without the mouse" },
   { id: "appearance", label: "APPEARANCE", blurb: "Colours, backdrop and interface scale" },
   { id: "diagnostics", label: "DIAGNOSTICS", blurb: "Export the log when something breaks" },
 ];
@@ -142,6 +145,11 @@ export function Settings() {
           {section === "editor" && (
             <ErrorBoundary label="Editor">
               <EditorPanel />
+            </ErrorBoundary>
+          )}
+          {section === "shortcuts" && (
+            <ErrorBoundary label="Shortcuts">
+              <ShortcutSettings />
             </ErrorBoundary>
           )}
           {section === "appearance" && (

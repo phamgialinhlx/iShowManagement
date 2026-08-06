@@ -9,10 +9,14 @@ import { WorkspaceRail } from "../components/WorkspaceRail";
 import { WidgetRail, type Active } from "../components/WidgetRail";
 import { AlertStack } from "../components/AlertStack";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
+import { DECKS, deckId } from "../lib/grid";
 import { useWorkspace } from "../lib/workspace";
+import { startAttentionWatch } from "../lib/attention";
+import { useShortcuts } from "../lib/use-shortcuts";
 import { startStatusWatch } from "../lib/status-watch";
 import { api, isTauri, type LockStatus, type SignedIn } from "../lib/api";
 import { SignIn } from "../components/SignIn";
+import { Dashboard } from "./Dashboard";
 
 /**
  * The workbench.
@@ -35,6 +39,9 @@ export function Workbench({
   // The rail's status for sessions that are not on screen. Started here rather
   // than in a pane, because a pane only exists for a session you can see.
   useEffect(() => startStatusWatch(), []);
+  // One watcher for the whole app: attention is singular, so counting it per
+  // pane would credit every mounted session at once. See `lib/attention.ts`.
+  useEffect(() => startAttentionWatch(), []);
 
   useEffect(() => {
     if (!isTauri() || !session) return;
@@ -53,8 +60,8 @@ export function Workbench({
   const activeId = useWorkspace((s) => s.activeSession);
   const runtime = useWorkspace((s) => s.runtime);
   const activate = useWorkspace((s) => s.activate);
-  const grid = useWorkspace((s) => s.grid);
-  const setGrid = useWorkspace((s) => s.setGrid);
+  const deck = useWorkspace((s) => s.deck);
+  const setDeck = useWorkspace((s) => s.setDeck);
   const railCollapsed = useWorkspace((s) => s.railCollapsed);
   const toggleRail = useWorkspace((s) => s.toggleRail);
   const serverOf = useWorkspace((s) => s.serverOf);
@@ -62,6 +69,11 @@ export function Workbench({
   const targetOf = useWorkspace((s) => s.targetOf);
 
   const [newMode, setNewMode] = useState<NewMode | null>(null);
+  const [dashboard, setDashboard] = useState(false);
+
+  // The keyboard, bound once for the whole workbench. See `use-shortcuts.ts`
+  // for why it is one listener and why it bubbles rather than captures.
+  useShortcuts({ progressOpen: dashboard, onProgress: setDashboard });
 
   const active = sessions.find((s) => s.id === activeId) ?? null;
   const activeProject = active ? projectOf(active.id) : undefined;
@@ -135,6 +147,19 @@ export function Workbench({
       </TitleBar>
 
       <div className="flex h-full w-full flex-col" style={{ paddingTop: TITLE_BAR_HEIGHT }}>
+        {/*
+          **Progress replaces the body; it does not float over it.** Every panel
+          here is translucent by design, so an overlay let the terminal and the
+          rail show straight through the charts — and tinting the sheet to fix
+          that would just make the app opaque, which is the thing the appearance
+          system exists to avoid. The title bar and footer stay, because they
+          carry the way back.
+        */}
+        {dashboard ? (
+          <ErrorBoundary label="Progress">
+            <Dashboard onClose={() => setDashboard(false)} />
+          </ErrorBoundary>
+        ) : (
         <div className="flex min-h-0 flex-1">
           <WorkspaceRail
             onConnectServer={() => setNewMode({ kind: "server" })}
@@ -149,6 +174,7 @@ export function Workbench({
             <WidgetRail session={activeCtx} />
           </ErrorBoundary>
         </div>
+        )}
 
         <footer
           className="flex shrink-0 items-center gap-4 border-t px-3 py-1"
@@ -202,24 +228,40 @@ export function Workbench({
               </button>
             )}
 
+            <button
+              type="button"
+              className="chip"
+              onClick={() => setDashboard((on) => !on)}
+              title="Tasks, time, charts and goals across every session"
+              style={{ color: dashboard ? "var(--text)" : undefined, background: dashboard ? "var(--hover)" : undefined }}
+            >
+              PROGRESS
+            </button>
+
             <div className="flex items-center gap-1">
               <span className="micro">VIEW</span>
-              {[1, 2, 3, 4].map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  className="data px-[5px] text-[10px]"
-                  onClick={() => setGrid(n)}
-                  title={n === 1 ? "One pane at a time" : `${n}×${n} grid`}
-                  style={{
-                    border: "1px solid var(--border)",
-                    color: grid === n ? "var(--text)" : "var(--text-soft)",
-                    background: grid === n ? "var(--hover)" : "transparent",
-                  }}
-                >
-                  {n === 1 ? "1" : `${n}×${n}`}
-                </button>
-              ))}
+              {DECKS.map((d) => {
+                const on = deckId(deck) === d.id;
+                return (
+                  <button
+                    key={d.id}
+                    type="button"
+                    className="data px-[5px] text-[10px]"
+                    onClick={() => setDeck(d.deck)}
+                    title={d.title}
+                    style={{
+                      border: "1px solid var(--border)",
+                      color: on ? "var(--text)" : "var(--text-soft)",
+                      background: on ? "var(--hover)" : "transparent",
+                      // Selection is not carried by tone alone: at 10px a tonal
+                      // step is not a state anyone can see across six chips.
+                      textDecoration: on ? "underline" : "none",
+                    }}
+                  >
+                    {d.label}
+                  </button>
+                );
+              })}
             </div>
 
             {activeTarget && <Metrics target={activeTarget} />}

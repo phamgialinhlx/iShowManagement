@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useWorkspace } from "../lib/workspace";
+import { VIEW_EVENT } from "../lib/shortcuts";
 import type { SessionV3 } from "../lib/workspace-model";
 import { ClaudePanel } from "./ClaudePanel";
 import { TranscriptView } from "./TranscriptView";
@@ -77,6 +78,24 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
   const project = useWorkspace((s) => s.projectOf(session.id));
   const folder = project?.folder ?? "";
   const [view, setView] = useState<View>("claude");
+
+  /**
+   * A keyboard shortcut asking this pane to change view.
+   *
+   * The view stays *here* rather than in the store: it is ephemeral, and
+   * persisting it would restore someone into a transcript they closed days ago.
+   * So the shortcut is a request addressed by session id, and a pane that is
+   * not the addressee ignores it — which is also what stops a chord changing
+   * the view of every tile in a 4×4 at once.
+   */
+  useEffect(() => {
+    const onView = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId: string; view: View }>).detail;
+      if (detail?.sessionId === session.id) setView(detail.view);
+    };
+    window.addEventListener(VIEW_EVENT, onView);
+    return () => window.removeEventListener(VIEW_EVENT, onView);
+  }, [session.id]);
 
   const hasJira = !!session.jiraProject;
   // A view whose target no longer applies falls back to Claude.
