@@ -14,14 +14,6 @@ use rmux_transport::{Target, TargetId};
 use tauri::Manager;
 use tokio::sync::OnceCell;
 
-impl AgentStore {
-    /// Forget a host's provisioning result so the next use re-probes the remote
-    /// rather than trusting a stale install.
-    pub fn forget(&self, id: &TargetId) -> bool {
-        self.by_target.lock().remove(id).is_some()
-    }
-}
-
 /// Provisioning results, one per target.
 #[derive(Default)]
 pub struct AgentStore {
@@ -29,6 +21,20 @@ pub struct AgentStore {
     /// host would otherwise both start an upload, and the second would overwrite
     /// the first's temporary file mid-write.
     by_target: Mutex<HashMap<TargetId, Arc<OnceCell<Installed>>>>,
+}
+
+impl AgentStore {
+    /// Forget a host's provisioning result so the next use re-probes the remote
+    /// rather than trusting a stale install.
+    pub fn forget(&self, id: &TargetId) -> bool {
+        self.by_target.lock().remove(id).is_some()
+    }
+
+    /// Test seam: put a provisioning cell into the cache so a test can assert
+    /// `forget` removes it.
+    pub fn insert_for_test(&self, id: TargetId, cell: Arc<OnceCell<Installed>>) {
+        self.by_target.lock().insert(id, cell);
+    }
 }
 
 /// Ensure the agent is installed on `target`, uploading it if this is the first
