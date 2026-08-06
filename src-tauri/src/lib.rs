@@ -24,6 +24,8 @@ mod auth;
 mod commands;
 mod face_models;
 mod glass;
+#[cfg(target_os = "linux")]
+mod linux_gfx;
 mod lock;
 mod logs;
 mod model_profile;
@@ -86,6 +88,11 @@ pub fn run() {
         Some(path) => tracing::info!(%path, "adopted the login shell's PATH"),
         None => tracing::debug!("PATH left as inherited"),
     }
+
+    // Also before anything else: WebKit reads its environment once, at GTK
+    // init, so the NVIDIA workaround has to land before the builder runs.
+    #[cfg(target_os = "linux")]
+    linux_gfx::apply_workarounds();
 
     tauri::Builder::default()
         // Gives a notification rmux's own icon and name. Driven from Rust (see
@@ -156,6 +163,7 @@ pub fn run() {
             terminal::terminal_open,
             terminal::terminal_attach,
             terminal::terminal_write,
+            terminal::terminal_ack,
             terminal::terminal_resize,
             terminal::terminal_close,
             askpass::answer_prompt,
@@ -203,6 +211,7 @@ pub fn run() {
             claude_login::claude_login_submit,
             claude_login::claude_login_cancel,
             claude::claude_attach,
+            claude::claude_ack,
             claude::claude_state,
             claude::claude_answer,
             claude::claude_send,
