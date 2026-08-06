@@ -17,7 +17,7 @@ mod uplink;
 mod userpath;
 mod tunnels;
 pub mod agent;
-mod claude;
+pub mod claude;
 mod claude_account;
 mod claude_login;
 mod auth;

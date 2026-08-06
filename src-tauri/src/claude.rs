@@ -11,12 +11,6 @@ use rmux_claude::{ClaudeSession, ClaudeState, SessionInfo};
 use rmux_ssh::SshTarget;
 use rmux_term::{TermSize, TerminalEvent};
 use rmux_transport::{LocalTarget, Target, TargetId};
-
-impl ClaudeStore {
-    pub fn evict_target(&self, id: &TargetId) -> bool {
-        self.targets.lock().remove(id).is_some()
-    }
-}
 use serde::Serialize;
 use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
@@ -27,6 +21,18 @@ use crate::terminal::TargetRef;
 pub struct ClaudeStore {
     sessions: Mutex<HashMap<String, Arc<ClaudeSession>>>,
     targets: Mutex<HashMap<TargetId, Arc<dyn Target>>>,
+}
+
+impl ClaudeStore {
+    /// Drop the cached target for `id`, if any. Returns whether an entry was removed.
+    pub fn evict_target(&self, id: &TargetId) -> bool {
+        self.targets.lock().remove(id).is_some()
+    }
+
+    /// Test seam: put a target into the cache so a test can assert eviction removes it.
+    pub fn insert_for_test(&self, id: TargetId, target: Arc<dyn Target>) {
+        self.targets.lock().insert(id, target);
+    }
 }
 
 #[derive(Debug, Serialize)]

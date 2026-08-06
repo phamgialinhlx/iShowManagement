@@ -19,6 +19,19 @@ use rmux_term::{TermSize, Terminal, TerminalEvent};
 use rmux_transport::{
     CommandSpec, LocalTarget, SshHostId, Target, TargetId, local::terminal_env,
 };
+use serde::{Deserialize, Serialize};
+use tauri::State;
+use tauri::ipc::{Channel, InvokeResponseBody, Response};
+
+/// Live terminals and the targets they run on.
+#[derive(Default)]
+pub struct TerminalStore {
+    terminals: Mutex<HashMap<String, Arc<Terminal>>>,
+    /// Held so an SSH target's ControlMaster stays up for the life of the app.
+    /// Dropping it would tear down the multiplexed connection and make the next
+    /// terminal on that host re-authenticate.
+    targets: Mutex<HashMap<TargetId, Arc<dyn Target>>>,
+}
 
 impl TerminalStore {
     /// Drop the cached target for `id`, if any. Returns whether an entry was
@@ -32,19 +45,6 @@ impl TerminalStore {
     pub fn insert_for_test(&self, id: TargetId, target: Arc<dyn Target>) {
         self.targets.lock().insert(id, target);
     }
-}
-use serde::{Deserialize, Serialize};
-use tauri::State;
-use tauri::ipc::{Channel, InvokeResponseBody, Response};
-
-/// Live terminals and the targets they run on.
-#[derive(Default)]
-pub struct TerminalStore {
-    terminals: Mutex<HashMap<String, Arc<Terminal>>>,
-    /// Held so an SSH target's ControlMaster stays up for the life of the app.
-    /// Dropping it would tear down the multiplexed connection and make the next
-    /// terminal on that host re-authenticate.
-    targets: Mutex<HashMap<TargetId, Arc<dyn Target>>>,
 }
 
 /// Which machine to open a terminal on.
