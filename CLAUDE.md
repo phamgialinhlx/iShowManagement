@@ -638,6 +638,28 @@ because `/tui fullscreen` persists, so anyone who ran it once carries the proble
   so it would trade real capability for scrolling. Keeping the real TUI is what guarantees
   parity — it *is* the CLI.
 
+## A decision card needs a cursor, not just numbers
+
+`parse_state` (`crates/rmux-claude/src/screen.rs`) turns Claude's screen into a prompt. It used
+to accept any two numbered lines, so **"1. … 2. … 3. …" in ordinary prose became a decision
+card** — measured on a live session, a six-point security summary rendered as a six-option card
+drawn over the terminal. A test asserted this ("documenting current behaviour, not endorsing
+it") for months.
+
+It went unreported for so long only because a *second* bug hid it: the card computed
+`position: relative` and was clipped to a 12px sliver, which was reported as a black bar. Fixing
+the position exposed the misdetection underneath.
+
+- **The signal is the selection caret, not the frame.** The code's own suggested mitigation —
+  require the box-drawing frame — is wrong: Claude's **trust prompt is not framed**, it uses a
+  horizontal rule, so a frame check would stop detecting the one dialog that blocks a session
+  from ever starting. Both real captures carry `❯` on the highlighted option, because that is
+  how the operator knows what Enter will pick. Prose has no cursor.
+- **A frame is still accepted as an alternative**, so a repaint landing mid-frame — options
+  drawn, caret not yet — does not flicker the card out.
+- **Synthetic fixtures must draw a caret.** Three tests wrote `  1. Yes` with no marker, which
+  is not a screen Claude ever produces; they encoded the bug into the suite.
+
 ## rmux is a backend, and the browser is not part of it
 
 There is **no in-app browser**, and that is settled rather than pending. rmux's window is
@@ -931,6 +953,80 @@ app, never in front of it, so an unreachable server delays a footer label and no
 - **Every xterm host must load `WebglAddon`.** Without it xterm falls back to the DOM
   renderer, and scrolling or dragging over a constantly-redrawing TUI is visibly slow. The
   Claude pane shipped without it and that was the lag.
+- **An IME is not simulable, and `ime-check.ts` is the proof.** It fires the composition
+  events macOS was *assumed* to fire, passes 4/4 against a real xterm, and the app stayed
+  broken for weeks underneath it. Marked text is produced by the input method **above the
+  DOM**; a script cannot make one. The only thing that worked was recording the real events
+  from the running app while a person typed. Three separate faults came out of two minutes of
+  that, and none of them matched the simulation:
+
+  1. **macOS Vietnamese has *two* modes and fires completely different events in each.** One
+     recording had **no composition events at all** — the accent arrives as
+     `insertReplacementText`, which xterm has no handler for, so the base letter went out and
+     every accent was dropped (`ee ee ee` → `e e e`). The next recording used compositions
+     throughout. Handle both or half of Vietnamese is broken.
+  2. **xterm parks a NBSP in its textarea and never clears it** — measured, the value grew to
+     `"jt mẹ mày…đang gõ "` across one sentence. `compositionstart` records
+     `start = value.length`, counting that NBSP, but the IME inserts *before* it, so the
+     finalising slice begins one character late and **every word loses its first letter**
+     (`Tiếng Việt` → `iếng iệt`). Clearing the textarea at `compositionstart` fixes it;
+     clearing at any other time moves the ground under the same offsets.
+  3. **xterm flushes marked text as it changes.** On the wire `Tiếng` left as `"Ti"` then
+     `"ê"`, two sends, mid-word — so the tone key that came next had nothing left to modify
+     and landed literally (`Tiêngs`). A terminal cannot unsend, so `onData` is **gated shut
+     for the duration of a composition**. Its *partial* states are the fault; its committed
+     one is correct, so the gate reopens in the capture phase at `compositionend` and xterm's
+     own final send passes through. **Do not send the committed word yourself** — that was
+     tried and doubled everything (`TiêngsêngsViệtViệt`).
+
+  `lib/ime-replace.ts` is all three. Anything that changes typing must be checked against a
+  real IME by a person, because nothing else can produce these events.
+- **A recorder that posts per event is not free.** The instrument that found the above fired
+  an HTTP POST on every `keydown`, `beforeinput`, `input`, `compositionupdate` and wire write
+  — a dozen round trips per keystroke — and typing became visibly laggy. That was read as a
+  regression in the fix. Measure with it, then take it out, and say which build has it.
+- **Never put padding on the element `FitAddon` measures.** It reads
+  `getComputedStyle(host).height`, and under `box-sizing: border-box` — which Tailwind sets
+  globally — the resolved `height` is the *padding* box. The addon does subtract padding, but
+  it reads it from `.xterm`, because it assumes the padding is on the terminal element rather
+  than on the parent. So `p-2` on the host handed `fit()` 16px it did not own and never took
+  back, and it asked for **one row more than the pane could hold**: measured at 25 rows ×
+  19.5px = 487.5px into 476px of content, with `.xterm`, `.xterm-viewport`, `.xterm-screen`
+  and the canvas all hanging 4px past the pane edge.
+
+  The overshoot is real, measured and fixed. **It was not, however, the "black bar along the
+  bottom of the Claude pane" that was reported** — that band survived this fix and nine more
+  after it, because it was never in the terminal at all. See the `.corner` rule in
+  `signal-room.css`: it was Claude's *decision card*, defeated by a cascade collision, laid
+  out below the pane and clipped by `overflow-hidden` to a 12px sliver. Ten fixes aimed at
+  xterm — viewport backgrounds, three scrollbar rules, this padding, the GPU renderer, native
+  glass — could not have worked.
+
+  **Two lessons, and the second is the expensive one.**
+
+  `document.elementsFromPoint` plus `getComputedStyle().backgroundColor` is blind to
+  scrollbars, pseudo-elements and renderer-drawn content. A probe built on it reported
+  "nothing paints here" for nine rounds and was believed over the operator looking straight at
+  the thing. When measurement and observation disagree, stop reading properties and paint the
+  candidates.
+
+  But painting then gave a result that was *true and completely misleading*: every layer from
+  `.xterm-screen` up through `.panel`, the grid cell and `body` was given a distinct colour,
+  and the band claimed none of them. That read as "nothing in the DOM paints this" and sent
+  the search to native glass and the compositor. It actually meant **"you are painting the
+  wrong subtree"** — the card is a *sibling* of the terminal, so it was never in the chain
+  being coloured. A list of suspects chosen in advance cannot find a culprit that is not on
+  it, and every round of narrowing made the list more confidently wrong.
+
+  What worked in one round: dump the rects of **every child of the pane**, enumerated rather
+  than named, and read which box the strip falls in. Prefer enumeration to a hypothesis list
+  whenever something has already survived more than two fixes.
+
+  The padding goes on a wrapper *inside* the `relative` pane — not on the pane itself, whose
+  padding box positions the absolute overlays. `ui/blackbar-check.ts` builds the real DOM
+  chain, fits, and fails on the old structure; `?fixed` builds the corrected one. Its first
+  version never called `fit()` and so measured an unfitted 80×24 terminal, which is how the
+  first two guesses got made — **a terminal harness that does not fit measures nothing.**
 - **Select mode** (`ui/src/lib/mouse-modes.ts`) writes the mouse-reporting reset sequences
   *into xterm*, not to the program — mouse tracking is state in this terminal, so turning it
   off locally makes drags select again without the program knowing. The modes are tracked
