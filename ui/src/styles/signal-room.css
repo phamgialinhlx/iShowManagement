@@ -51,7 +51,13 @@
 
   --font-display: "SFU Futura", "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-body: var(--font-display);
-  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  /*
+   * Consolas and Cascadia Mono before the generic: `ui-monospace` resolves to
+   * nothing on Windows and the two faces after it are macOS-only, so the tail
+   * fell through to `monospace` — Courier New there, a thin serif at the wrong
+   * weight for a terminal. Kept in step with `MONO_TAIL` in `lib/fonts.ts`.
+   */
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
 
   /*
    * User-tunable material knobs (Settings > Appearance).

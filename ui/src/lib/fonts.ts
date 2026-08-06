@@ -42,11 +42,27 @@ export type FontDef = {
 
 // The same generic tails the shipped tokens carry (`signal-room.css`), so an
 // unbundled face still lands on a sensible native fallback.
-const MONO_TAIL = `ui-monospace, "SF Mono", Menlo, monospace`;
+//
+// **Consolas and Cascadia Mono are in the tail for Windows**, and their absence
+// was not cosmetic: `ui-monospace` resolves to nothing there, and `SF Mono` and
+// `Menlo` are macOS faces, so the whole tail fell through to the generic
+// `monospace` — which on Windows is **Courier New**, a thin serif face at the
+// wrong weight for a terminal. Every stack ends in this, so it was the fallback
+// behind all six mono options, not just the system one.
+const MONO_TAIL = `ui-monospace, "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace`;
 const UI_TAIL = `ui-sans-serif, system-ui, sans-serif`;
 
 export const DEFAULT_UI_FONT = "sfu-futura";
 export const DEFAULT_MONO_FONT = "ibm-plex-mono";
+
+/** What the machine's own monospace face is actually called, for the label. */
+function systemMonoLabel(): string {
+  const platform =
+    typeof navigator === "undefined" ? "" : navigator.platform || navigator.userAgent;
+  if (/mac/i.test(platform)) return "SF Mono / Menlo";
+  if (/win/i.test(platform)) return "Consolas";
+  return "System Mono";
+}
 
 export const MONO_FONTS: FontDef[] = [
   { id: "ibm-plex-mono", label: "IBM Plex Mono", role: "mono", provider: "fontsource", stack: `"IBM Plex Mono", ${MONO_TAIL}` },
@@ -57,7 +73,17 @@ export const MONO_FONTS: FontDef[] = [
   // the Zed source tree; the "Zed" hint in the label is what makes it findable.
   { id: "lilex", label: "Lilex · Zed", role: "mono", provider: "bundled", stack: `"Lilex", ${MONO_TAIL}` },
   // No bundled bytes — resolves to whatever the OS calls its monospace face.
-  { id: "system-mono", label: "SF Mono / Menlo", role: "mono", provider: "system", stack: MONO_TAIL },
+  // The label names the face the operator will actually get, so it has to be
+  // read at runtime: "SF Mono / Menlo" is a promise Windows cannot keep, and a
+  // picker offering a font the machine does not have is the "control that
+  // cannot work" rule in miniature.
+  {
+    id: "system-mono",
+    label: systemMonoLabel(),
+    role: "mono",
+    provider: "system",
+    stack: MONO_TAIL,
+  },
 ];
 
 export const UI_FONTS: FontDef[] = [
