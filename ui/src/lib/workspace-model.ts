@@ -48,6 +48,7 @@ export type Project = {
 };
 
 export type SessionKind = "terminal" | "claude";
+export type SessionId = string;
 
 /** Runtime attention state. Claude-only in v1 (a terminal is always `idle`). */
 export type SessionStatus = "waiting" | "working" | "idle";

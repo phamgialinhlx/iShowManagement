@@ -6,6 +6,7 @@ import {
   removeSession,
   removeProjectCore,
   removeServerCore,
+  detachSessionCore,
   assignPane,
   closePane,
   type Core,
@@ -67,6 +68,20 @@ export function run(log: (line: string) => void): boolean {
     check("the other pane is untouched", ws.panes[0]?.kind === "session" && (ws.panes[0] as { id: string }).id === "claude-1");
     check("active hands off to the survivor", ws.activeSession === "claude-1");
     check("removing an unknown id is a no-op", removeSession(ws, "nope") === ws);
+  }
+
+  // ── Detaching a session: panes clear, the session stays, no kill ────────────
+  {
+    let { ws } = seed();
+    ws = assignPane(ws, 0, { kind: "session", id: "claude-1" });
+    ws = assignPane(ws, 1, { kind: "session", id: "term-1" });
+    ws = detachSessionCore(ws, "claude-1");
+
+    check("detach clears the session's panes", ws.panes[0] === null);
+    check("detach leaves other panes alone", ws.panes[1]?.kind === "session");
+    check("the session stays (detach is not a kill)", ws.sessions.some((s) => s.id === "claude-1"));
+    check("activeSession is untouched", ws.activeSession === "term-1");
+    check("detaching an unknown id is a no-op", detachSessionCore(ws, "nope") === ws);
   }
 
   // ── Pane placement: a session lives in exactly one tile ───────────────────

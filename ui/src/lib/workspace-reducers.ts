@@ -7,6 +7,7 @@ import {
   type PersistedV3,
   type ProjectId,
   type ServerId,
+  type SessionId,
   type SessionKind,
   type SessionV3,
 } from "./workspace-model.ts";
@@ -117,6 +118,20 @@ export function closePane(ws: Core, index: number): Core {
   if (index < 0 || index >= ws.panes.length) return ws;
   const panes = [...ws.panes];
   panes[index] = null;
+  return { ...ws, panes };
+}
+
+/**
+ * Detach a Session — the **structural** half of the store's `detachSession`.
+ *
+ * Unlike `removeSession`, this does **not** drop the session and never sends a
+ * kill: detaching means "stop showing it, leave it running on the server". The
+ * panes pointing at it are cleared (the tiles become empty), and the session
+ * stays in `sessions` so the rail keeps a row to re-attach from.
+ */
+export function detachSessionCore(ws: Core, id: SessionId): Core {
+  if (!ws.sessions.some((s) => s.id === id)) return ws;
+  const panes = ws.panes.map((p) => (p && p.kind === "session" && p.id === id ? null : p));
   return { ...ws, panes };
 }
 
