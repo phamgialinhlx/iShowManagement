@@ -91,21 +91,71 @@ export async function copySelection(xterm: Xterm): Promise<boolean> {
 /**
  * Wire the shortcuts xterm does not provide.
  *
- * Only select-all. Copy and paste are xterm's own — see the note at the top of
- * this file; handling them here is what made paste arrive twice.
+ * **Copy on macOS is still xterm's own**, and must stay that way — the webview's
+ * Edit menu routes Cmd-C into the platform's `copy` event, and adding a second
+ * implementation on the keydown is what made paste arrive twice. Nothing below
+ * touches the macOS path.
+ *
+ * ## Why Ctrl+C needed handling, when Cmd-C never did
+ *
+ * Windows has no application Edit menu to route the key, and — the part that
+ * actually decides it — **xterm treats Ctrl+C as SIGINT and calls
+ * `preventDefault()`**, so the browser never generates a `copy` event at all.
+ * Cmd-C is not a terminal control key, so it is never intercepted and the native
+ * path runs untouched. That asymmetry is the whole bug: right-click › Copy
+ * works, because the context menu *does* raise a `copy` event, while the key
+ * that everyone reaches for first silently does nothing.
+ *
+ * It bites hardest in the Claude pane. Its TUI turns on mouse reporting, so
+ * selecting takes a Shift-drag most people never discover; having gone to that
+ * trouble, Ctrl+C then throwing the selection away is a poor reward.
  */
 export function attachClipboard(xterm: Xterm): void {
+  const platform = navigator.platform.toUpperCase();
+  const isMac = platform.includes("MAC");
+  const isWindows = platform.includes("WIN");
+
   xterm.attachCustomKeyEventHandler((event) => {
     if (event.type !== "keydown") return true;
 
-    const isMac = navigator.platform.toUpperCase().includes("MAC");
-    // Plain Ctrl+C must stay SIGINT on every platform, so the modifier for
-    // terminal-local shortcuts is Cmd on macOS and Ctrl+Shift elsewhere.
+    const key = event.key.toLowerCase();
+
+    // **Ctrl+C copies a selection and interrupts when there is none** — the
+    // Windows Terminal and VS Code rule, which is what a Windows operator
+    // expects and what they reported missing.
+    //
+    // Interrupting must not become unreachable: a stale selection from ten
+    // minutes ago cannot be allowed to swallow the key that stops a runaway
+    // process. So the selection is **cleared once the copy lands**, and the
+    // very next Ctrl+C is an ordinary SIGINT. Worst case is pressing it twice,
+    // which is recoverable; a terminal you cannot interrupt is not.
+    if (isWindows && event.ctrlKey && !event.shiftKey && !event.altKey && key === "c") {
+      if (!xterm.hasSelection()) return true;
+
+      void copySelection(xterm)
+        .then(() => xterm.clearSelection())
+        // Leave the selection alone if the clipboard refused, so the operator
+        // can try again or use the header button rather than silently losing it.
+        .catch(() => {});
+      return false;
+    }
+
+    // Plain Ctrl+C stays SIGINT everywhere else, so terminal-local shortcuts
+    // take Cmd on macOS and Ctrl+Shift elsewhere.
     const combo = isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && event.shiftKey;
     if (!combo) return true;
 
-    if (event.key.toLowerCase() === "a") {
+    if (key === "a") {
       xterm.selectAll();
+      return false;
+    }
+
+    // Ctrl+Shift+C is the long-standing terminal convention, and on Linux it is
+    // the *only* copy binding — there is no Edit menu there either. Deliberately
+    // not extended to Cmd-C on macOS: that already works through the menu, and
+    // a second implementation of it is the bug this file was written about.
+    if (!isMac && key === "c") {
+      void copySelection(xterm).catch(() => {});
       return false;
     }
 
