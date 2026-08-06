@@ -25,7 +25,35 @@
  * `"Mod+Alt+ArrowLeft"` rather than a parsed record: it is what a person would
  * write, it survives `JSON.parse` without a schema, and an unknown one is
  * inert rather than a crash. `Mod` means ⌘ on macOS and Ctrl elsewhere, so one
- * default set is correct on both without a platform branch at every call site.
+ * *spelling* covers both platforms at every call site.
+ *
+ * ## `Mod` unifies the modifier, not its consequence — and the defaults differ
+ *
+ * One default set was assumed to follow from that, and it does not. ⌘ is free in
+ * a terminal: xterm encodes nothing for a ⌘ chord, which is why `useShortcuts`
+ * can listen in the bubble phase and say "the terminal acts first, we only take
+ * what it does not use". Off macOS `Mod` is **Ctrl**, and Ctrl chords are
+ * precisely the ones a terminal claims. `preventDefault` on the bubble is far
+ * too late — xterm wrote to the pty from its own handler frames earlier — so a
+ * colliding default does not lose, it fires **both**.
+ *
+ * Measured against a real xterm (`shortcut-terminal-check.ts`), eight of the ten
+ * macOS defaults put bytes on the wire when `Mod` is Ctrl:
+ *
+ *     Mod+3              → \e          ESC — cancels Claude's prompt
+ *     Mod+4              → \x1c        FS — the quit character, SIGQUIT
+ *     Mod+T              → \x14        ^T
+ *     Mod+P              → \x10        ^P — previous command in every shell
+ *     Mod+Alt+Arrow ×4   → \e[1;7A..D
+ *
+ * So the defaults are per-platform. Off macOS they are `Mod+Shift+…`, which is
+ * the Windows/Linux terminal convention (Windows Terminal, VS Code, GNOME
+ * Terminal) for exactly this reason — measured free, all of it.
+ *
+ * **The grid moves on letters off macOS, not arrows.** There is no free arrow
+ * chord at all: xterm encodes every modifier combination of an arrow key
+ * (`\e[1;3D` `\e[1;4D` `\e[1;6D` `\e[1;7D` were all measured taken). `H/J/K/L`
+ * is the one directional set a terminal user already reads as a direction.
  */
 
 export type ActionId =
@@ -62,8 +90,15 @@ export const ACTIONS: readonly Action[] = [
   { id: "progress", label: "Progress", hint: "Open or close the Progress page" },
 ];
 
+const KEY = "rmux.shortcuts";
+
+export type Bindings = Record<ActionId, string>;
+
+export const isMac = (): boolean =>
+  typeof navigator !== "undefined" && /mac/i.test(navigator.platform || navigator.userAgent);
+
 /**
- * The defaults, chosen around what is already taken.
+ * The macOS defaults, chosen around what is already taken *there*.
  *
  * `Mod+1..4` for views because the numbers are free in both a shell and
  * Claude's TUI, and because "the first tab" is what a number key means
@@ -74,7 +109,7 @@ export const ACTIONS: readonly Action[] = [
  * Deliberately avoided: ⌘W, ⌘Q, ⌘N, ⌘M — macOS binds those in the app menu, so
  * a shortcut here would either lose or, worse, win and close the window.
  */
-export const DEFAULTS: Record<ActionId, string> = {
+const MAC_DEFAULTS: Record<ActionId, string> = {
   "view.claude": "Mod+1",
   "view.files": "Mod+2",
   "view.transcript": "Mod+3",
@@ -87,12 +122,40 @@ export const DEFAULTS: Record<ActionId, string> = {
   progress: "Mod+P",
 };
 
-const KEY = "rmux.shortcuts";
+/**
+ * Everywhere `Mod` is Ctrl — so every chord here was measured free of the
+ * terminal, and none of the macOS set is.
+ *
+ * `Mod+Shift+…` throughout: it is what Windows Terminal, VS Code and GNOME
+ * Terminal use, for this exact reason. The digits keep their macOS meaning
+ * (1–4 are still the four views) so the two platforms differ by one modifier
+ * rather than by a different vocabulary.
+ *
+ * The grid moves on `H/J/K/L` because **no arrow chord is free** — see the
+ * module note. Reading them as left/down/up/right is a stretch for anyone who
+ * has never used vim, which is why the settings list spells every binding out;
+ * an arrow that also jumps a word in the shell underneath is worse.
+ */
+const TERMINAL_SAFE_DEFAULTS: Record<ActionId, string> = {
+  "view.claude": "Mod+Shift+1",
+  "view.files": "Mod+Shift+2",
+  "view.transcript": "Mod+Shift+3",
+  "view.jira": "Mod+Shift+4",
+  "session.terminal": "Mod+Shift+T",
+  "pane.left": "Mod+Shift+H",
+  "pane.right": "Mod+Shift+L",
+  "pane.up": "Mod+Shift+K",
+  "pane.down": "Mod+Shift+J",
+  progress: "Mod+Shift+P",
+};
 
-export type Bindings = Record<ActionId, string>;
-
-export const isMac = (): boolean =>
-  typeof navigator !== "undefined" && /mac/i.test(navigator.platform || navigator.userAgent);
+/**
+ * Resolved once at load: the platform cannot change under a running window, and
+ * a function here would mean every call site re-deciding.
+ */
+export const DEFAULTS: Record<ActionId, string> = isMac()
+  ? MAC_DEFAULTS
+  : TERMINAL_SAFE_DEFAULTS;
 
 /**
  * The canonical form of a key combination.
@@ -140,6 +203,72 @@ export function accelOf(e: KeyboardEvent): string {
 export function hasModifier(binding: string): boolean {
   const norm = normalise(binding);
   return /(^|\+)(Mod|Ctrl|Alt)\+/.test(norm);
+}
+
+/**
+ * Keys xterm encodes under *any* modifier combination.
+ *
+ * Arrows and the navigation cluster are sent as `CSI 1 ; <mods> <letter>`, so
+ * unlike a letter there is no modifier that frees them — measured, `Alt+←`,
+ * `Alt+Shift+←`, `Ctrl+Shift+←` and `Ctrl+Alt+←` all put bytes on the wire.
+ */
+const ALWAYS_ENCODED = new Set([
+  "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+  "Home", "End", "PageUp", "PageDown", "Insert", "Delete",
+  "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+  // Measured, and the reason `Shift` is not a blanket escape hatch:
+  // `Ctrl+Shift+Enter` still sends `\r` and `Ctrl+Shift+Tab` still sends
+  // `\e[Z`. Shift lifts a *letter* out of the control-code table; it does
+  // nothing for a key that has its own encoding.
+  "Enter", "Tab", "Escape", "Backspace", " ",
+]);
+
+/** Ctrl+<digit> that maps to a control code. `Ctrl+1`, `Ctrl+9` and `Ctrl+0` do not. */
+const CTRL_DIGITS = new Set(["2", "3", "4", "5", "6", "7", "8"]);
+
+/**
+ * Would this chord *also* be delivered to the terminal?
+ *
+ * The silent-failure guard for the rebind form. A binding that collides does not
+ * merely lose to the terminal — `useShortcuts` listens on the bubble, by which
+ * point xterm has already written to the pty, so **both** happen: `Ctrl+P`
+ * recalls the previous command *and* opens Progress. Nothing on screen would say
+ * so, which is exactly the class of failure this module exists to prevent.
+ *
+ * Conservative by construction: anything not known to be free is reported as
+ * taken. A false warning costs a chord; a false all-clear costs a key in every
+ * terminal, permanently. `shortcut-terminal-check.ts` asserts this agrees with a
+ * real xterm across a grid of chords, so the two cannot drift apart quietly.
+ */
+export function reachesTerminal(binding: string): boolean {
+  const parts = normalise(binding).split("+");
+  const key = parts.pop() ?? "";
+  if (!key) return false;
+  const mods = new Set(parts);
+
+  const mac = isMac();
+  // ⌘ is not a terminal modifier — xterm encodes nothing for it. That is the
+  // whole reason the macOS defaults can use bare `Mod`.
+  const ctrl = mods.has("Ctrl") || (!mac && mods.has("Mod"));
+  const alt = mods.has("Alt");
+  // Checked *before* the key, so a ⌘-only chord stays free whatever it is held
+  // with. This gate is why the macOS defaults can use bare `Mod` at all.
+  if (!ctrl && !alt) return false;
+
+  if (ALWAYS_ENCODED.has(key)) return true;
+  // Alt is meta: xterm prefixes ESC and sends the key through.
+  if (alt) return true;
+
+  // Ctrl only. Shift lifts a letter or digit clear of the control-code table —
+  // which is why `Ctrl+Shift+…` is the terminal convention on these platforms.
+  if (mods.has("Shift")) return false;
+  if (key.length === 1) {
+    if (/[a-z]/i.test(key)) return true;
+    if (CTRL_DIGITS.has(key)) return true;
+    return ["[", "]", "\\", "^", "_", "/"].includes(key);
+  }
+  // Anything unrecognised: assume taken, per the conservative rule above.
+  return true;
 }
 
 /** Human spelling for a label: `⌘⌥←` on macOS, `Ctrl+Alt+Left` elsewhere. */
