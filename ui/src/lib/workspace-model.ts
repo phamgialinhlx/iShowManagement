@@ -74,11 +74,15 @@ export type SessionV3 = {
   contextWindow?: number;
 };
 
-/** What a grid tile points at. A session is one kind of pane, not the only kind. */
+/** What a grid tile points at. A session is one kind of pane, not the only kind.
+ *  `empty` is a tile cleared **on purpose**: auto-fill must not reuse it —
+ *  clearing to `null` would let the layout put the same session straight back,
+ *  and a clear control that appears to do nothing is worse than none. */
 export type PaneRef =
   | { kind: "session"; id: string }
   | { kind: "host"; serverId: ServerId }
-  | { kind: "files"; projectId: ProjectId };
+  | { kind: "files"; projectId: ProjectId }
+  | { kind: "empty" };
 
 export type PersistedV3 = {
   version: 3;

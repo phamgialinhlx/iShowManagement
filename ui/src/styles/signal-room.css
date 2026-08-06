@@ -1039,3 +1039,19 @@ body[data-hidden="true"] * {
     animation: none;
   }
 }
+
+/*
+ * The tile-clear control (WorkspaceDeck). Visible only while the pointer is
+ * over its tile — sixteen permanent × buttons is noise, and the control's
+ * outcome is the tile itself turning EMPTY, so it needs no resting presence.
+ */
+.pane-clear {
+  color: var(--text-faint);
+  opacity: 0;
+}
+.panel:hover > .pane-clear {
+  opacity: 1;
+}
+.pane-clear:hover {
+  color: var(--text);
+}

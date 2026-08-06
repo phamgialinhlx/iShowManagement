@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
 import { useWorkspace } from "../lib/workspace";
+import { onScreenSessions } from "../lib/grid";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
 
 /**
@@ -14,9 +15,12 @@ import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace
  * the same status marks, now only on Claude sessions (a terminal is neutral in
  * v1; see ADR-001).
  *
- * The create/open verbs map one interaction to each node (ADR-002): click a
- * session opens/focuses its pane; click a project opens its files pane; the
- * server's HOST button opens its host pane; `[+]`/`[✦]` add a terminal/Claude.
+ * The create/open verbs map one interaction to each node (ADR-002), and the
+ * mapping is uniform: **clicking a name opens the thing it names** — a session
+ * opens/focuses its pane, a project opens its files pane, a server opens its
+ * host pane — and the chevron (alone) folds. `[+]`/`[✦]` add a terminal/Claude.
+ * Three sibling rows answering one gesture three different ways was the old
+ * shape, and it read as three controls to memorise.
  */
 
 const RAIL_WIDTH = 216;
@@ -195,16 +199,6 @@ function PlusIcon() {
   );
 }
 
-/** Folder glyph — the explicit "open this project's files" affordance, because
- *  the uppercase label reads as a section header, not a button. Rule 3. */
-function FolderIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
-      <path d="M3 6v13h18V8h-9l-2-2H3z" />
-    </svg>
-  );
-}
-
 function SessionRow({
   session,
   active,
@@ -334,15 +328,17 @@ function ProjectNode({
   const sessions = useWorkspace((s) => s.sessions);
   const active = useWorkspace((s) => s.activeSession);
   const panes = useWorkspace((s) => s.panes);
+  const grid = useWorkspace((s) => s.grid);
   const openFiles = useWorkspace((s) => s.openFiles);
   const openSession = useWorkspace((s) => s.openSession);
   const addSession = useWorkspace((s) => s.addSession);
   const removeSession = useWorkspace((s) => s.removeSession);
 
   const mine = sessions.filter((s) => s.projectId === project.id);
-  const onScreen = new Set(
-    panes.flatMap((p) => (p && p.kind === "session" ? [p.id] : [])),
-  );
+  // Derived with the same `layoutPanes` the deck uses — the raw `panes` array
+  // both misses auto-filled cells (the common case) and keeps orphan entries
+  // beyond the visible cell count, so reading it directly marked the wrong rows.
+  const onScreen = onScreenSessions(panes, sessions, active, grid);
 
   const add = (kind: "terminal" | "claude") => {
     const id = addSession(project.id, kind);
@@ -351,8 +347,8 @@ function ProjectNode({
 
   return (
     <div>
-      {/* Group header — the "▾ TMUX" band: caret, an uppercase label, then the
-          verbs: open files (folder), new terminal (+), new Claude (✦). */}
+      {/* Group header — the "▾ TMUX" band: caret, an uppercase label (click =
+          open files), then the verbs: new terminal (+), new Claude (✦). */}
       <div className="group/prj flex items-center gap-1.5 py-[5px] pl-4 pr-2">
         <button type="button" className="shrink-0" onClick={onToggle} aria-expanded={!folded} title={project.folder}>
           <Chevron folded={folded} />
@@ -365,16 +361,6 @@ function ProjectNode({
           title={`${project.folder}\nOpen files`}
         >
           {project.label}
-        </button>
-        <button
-          type="button"
-          onClick={() => openFiles(project.id)}
-          aria-label={`Open files in ${project.label}`}
-          title="Open files"
-          className="shrink-0 px-1 opacity-70 hover:opacity-100"
-          style={{ color: "var(--text-soft)" }}
-        >
-          <FolderIcon />
         </button>
         <button
           type="button"
@@ -485,18 +471,10 @@ function ServerNode({
           type="button"
           className="data min-w-0 flex-1 truncate text-left text-[12px]"
           style={{ color: "var(--text)", fontWeight: 700 }}
-          onClick={onToggle}
-          title={`${serverLabel(server)}\nClick to ${folded ? "expand" : "collapse"}`}
+          onClick={() => openHost(server.id)}
+          title={`${serverLabel(server)}\nHost: processes, ports, metrics`}
         >
           {serverLabel(server)}
-        </button>
-        <button
-          type="button"
-          className="chip shrink-0"
-          onClick={() => openHost(server.id)}
-          title="Host: processes, ports, metrics"
-        >
-          HOST
         </button>
         <button
           type="button"

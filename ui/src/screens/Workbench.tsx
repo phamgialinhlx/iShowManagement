@@ -9,6 +9,7 @@ import { WorkspaceRail } from "../components/WorkspaceRail";
 import { WidgetRail, type Active } from "../components/WidgetRail";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
 import { useWorkspace } from "../lib/workspace";
+import { GRID_LAYOUT_IDS, type GridLayoutId } from "../lib/grid";
 import { startStatusWatch } from "../lib/status-watch";
 import { api, isTauri, type LockStatus, type SignedIn } from "../lib/api";
 import { SignIn } from "../components/SignIn";
@@ -21,6 +22,15 @@ import { SignIn } from "../components/SignIn";
  * app's job is not "edit this folder" — it is "keep several pieces of work
  * moving across several machines, and tell me which one needs me".
  */
+
+const VIEW_TITLES: Record<GridLayoutId, string> = {
+  "1x1": "One pane at a time",
+  "1x2": "Two panes side by side",
+  "1x3": "Three panes side by side",
+  "2x2": "2×2 grid",
+  "3x3": "3×3 grid",
+  "4x4": "4×4 grid",
+};
 export function Workbench({
   session,
   onSession,
@@ -48,9 +58,10 @@ export function Workbench({
   }, [session]);
 
   const servers = useWorkspace((s) => s.servers);
+  const projects = useWorkspace((s) => s.projects);
   const sessions = useWorkspace((s) => s.sessions);
   const activeId = useWorkspace((s) => s.activeSession);
-  const activate = useWorkspace((s) => s.activate);
+  const revealSession = useWorkspace((s) => s.revealSession);
   const grid = useWorkspace((s) => s.grid);
   const setGrid = useWorkspace((s) => s.setGrid);
   const railCollapsed = useWorkspace((s) => s.railCollapsed);
@@ -101,28 +112,57 @@ export function Workbench({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ⌘1-9 follows the rail's visual order — server, then project, then session —
+  // not the flat creation order, because the rail shows no numbers and the only
+  // guessable mapping is top-to-bottom as drawn. Fold state is rail-local and
+  // deliberately ignored.
+  const railOrder = useMemo(() => {
+    const serverRank = new Map(servers.map((sv, i) => [sv.id, i]));
+    const projectRank = new Map(projects.map((p, i) => [p.id, i]));
+    const serverOfProject = new Map(projects.map((p) => [p.id, serverRank.get(p.serverId) ?? 0]));
+    return sessions
+      .map((session, index) => ({ session, index }))
+      .sort(
+        (a, b) =>
+          (serverOfProject.get(a.session.projectId) ?? 0) -
+            (serverOfProject.get(b.session.projectId) ?? 0) ||
+          (projectRank.get(a.session.projectId) ?? 0) -
+            (projectRank.get(b.session.projectId) ?? 0) ||
+          a.index - b.index,
+      )
+      .map((x) => x.session);
+  }, [servers, projects, sessions]);
+
   // Global shortcuts. Pane-scoped ones live in the panes.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
+      // A ctrl-chord typed into a terminal belongs to the program in it —
+      // Ctrl+B is tmux's prefix, Ctrl+N is readline's next-history. ⌘-chords
+      // never reach a shell, so on a Mac they stay app shortcuts everywhere.
+      if (e.ctrlKey && !e.metaKey && (e.target as HTMLElement | null)?.closest?.(".xterm")) return;
 
       if (e.key.toLowerCase() === "n") {
         e.preventDefault();
         setNewMode({ kind: "server" });
       }
+      if (e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        toggleRail();
+      }
       const digit = Number(e.key);
       if (Number.isInteger(digit) && digit >= 1 && digit <= 9) {
-        const target = sessions[digit - 1];
+        const target = railOrder[digit - 1];
         if (target) {
           e.preventDefault();
-          activate(target.id);
+          revealSession(target.id);
         }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [sessions, activate]);
+  }, [railOrder, revealSession, toggleRail]);
 
   return (
     <>
@@ -198,7 +238,7 @@ export function Workbench({
                 type="button"
                 className="chip"
                 style={{ color: "rgb(var(--primary))" }}
-                onClick={() => activate(waitingIds[0]!)}
+                onClick={() => revealSession(waitingIds[0]!)}
                 title="Go to the session waiting on you"
               >
                 {waitingIds.length} waiting
@@ -207,20 +247,20 @@ export function Workbench({
 
             <div className="flex items-center gap-1">
               <span className="micro">VIEW</span>
-              {[1, 2, 3, 4].map((n) => (
+              {GRID_LAYOUT_IDS.map((id) => (
                 <button
-                  key={n}
+                  key={id}
                   type="button"
                   className="data px-[5px] text-[10px]"
-                  onClick={() => setGrid(n)}
-                  title={n === 1 ? "One pane at a time" : `${n}×${n} grid`}
+                  onClick={() => setGrid(id)}
+                  title={VIEW_TITLES[id]}
                   style={{
                     border: "1px solid var(--border)",
-                    color: grid === n ? "var(--text)" : "var(--text-soft)",
-                    background: grid === n ? "var(--hover)" : "transparent",
+                    color: grid === id ? "var(--text)" : "var(--text-soft)",
+                    background: grid === id ? "var(--hover)" : "transparent",
                   }}
                 >
-                  {n === 1 ? "1" : `${n}×${n}`}
+                  {id === "1x1" ? "1" : id.replace("x", "×")}
                 </button>
               ))}
             </div>

@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 
 import { useWorkspace } from "../lib/workspace";
-import { layoutPanes, warmSessions } from "../lib/grid";
+import { gridDims, isFocus, layoutPanes, warmSessions } from "../lib/grid";
 import { reattachName, type PaneRef, type SessionV3 } from "../lib/workspace-model";
 import { ClaudeSessionPane } from "./ClaudeSessionPane";
 import { TerminalView } from "./Terminal";
@@ -15,12 +15,13 @@ import { FilesPane } from "./FilesPane";
  * TUI or a shell), a Server's host panel, or a Project's files. Replaces
  * `SessionDeck`, whose cells could only hold sessions.
  *
- * Focus mode (1×1) shows a single tile; 2×2 / 3×3 / 4×4 tile several. Clicking a
- * tile focuses it, so the rail's "open into the focused tile" verb has a target.
+ * Focus mode (1×1) shows a single tile; the other presets (1×2, 1×3, 2×2, 3×3,
+ * 4×4) tile several. Clicking a tile focuses it, so the rail's "open into the
+ * focused tile" verb has a target.
  */
 
 function paneKey(ref: PaneRef | null, index: number): string {
-  if (!ref) return `empty-${index}`;
+  if (!ref || ref.kind === "empty") return `empty-${index}`;
   if (ref.kind === "session") return `session:${ref.id}`;
   if (ref.kind === "host") return `host:${ref.serverId}`;
   return `files:${ref.projectId}`;
@@ -75,7 +76,9 @@ function Pane({ pane }: { pane: PaneRef }) {
     return session ? <SessionPane session={session} /> : <PaneMissing what="session" />;
   }
   if (pane.kind === "host") return <HostPane serverId={pane.serverId} />;
-  return <FilesPane projectId={pane.projectId} />;
+  if (pane.kind === "files") return <FilesPane projectId={pane.projectId} />;
+  // kind "empty" — the deck renders the placeholder itself; nothing mounts here.
+  return null;
 }
 
 /** How many sessions stay mounted in focus mode. Each warm pane holds an xterm
@@ -92,6 +95,7 @@ export function WorkspaceDeck() {
   const focusedCell = useWorkspace((s) => s.focusedCell);
   const focusCell = useWorkspace((s) => s.focusCell);
   const activate = useWorkspace((s) => s.activate);
+  const assignPane = useWorkspace((s) => s.assignPane);
 
   const cells = useMemo(
     () => layoutPanes(panes, sessions, active, grid),
@@ -100,28 +104,35 @@ export function WorkspaceDeck() {
 
   // The focus-mode warm set. The visible pane is prepended so an explicitly
   // assigned cell 0 that differs from the active session is always mounted.
-  const only = cells[0] ?? null;
-  const visibleSession = grid === 1 && only?.kind === "session" ? only.id : null;
+  // An explicitly cleared tile counts as nothing open — focus mode must show
+  // its "pick a session" state, never a blank pane.
+  const first = cells[0] ?? null;
+  const only = first && first.kind === "empty" ? null : first;
+  const visibleSession = isFocus(grid) && only?.kind === "session" ? only.id : null;
   const warm = useMemo(() => {
-    if (grid !== 1) return [];
+    if (!isFocus(grid)) return [];
     const order = visibleSession ? [visibleSession, ...recent] : recent;
     return warmSessions(active, order, sessions, KEEP_WARM);
   }, [grid, visibleSession, active, recent, sessions]);
 
-  if (grid >= 2) {
+  if (!isFocus(grid)) {
+    const { rows, cols } = gridDims(grid);
     return (
       <div
         className="grid min-h-0 flex-1 gap-[1px]"
         style={{
-          gridTemplateColumns: `repeat(${grid}, minmax(0, 1fr))`,
-          gridAutoRows: "minmax(0, 1fr)",
+          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+          gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
         }}
       >
         {cells.map((pane, index) => (
           <div
             key={paneKey(pane, index)}
             className="panel relative flex min-h-0 flex-col overflow-hidden"
-            onMouseDownCapture={() => {
+            onMouseDownCapture={(e) => {
+              // The clear control must not focus-and-activate the tile it is
+              // clearing (capture runs parent-first, so the guard lives here).
+              if ((e.target as HTMLElement).closest("[data-pane-clear]")) return;
               focusCell(index);
               if (pane?.kind === "session") activate(pane.id);
             }}
@@ -140,8 +151,31 @@ export function WorkspaceDeck() {
               contain: "layout paint",
             }}
           >
-            {pane ? (
-              <Pane pane={pane} />
+            {pane && pane.kind !== "empty" ? (
+              <>
+                <Pane pane={pane} />
+                <button
+                  type="button"
+                  data-pane-clear
+                  aria-label="Clear this tile"
+                  title="Clear this tile (does not end the session)"
+                  className="pane-clear absolute right-1 top-1 z-10"
+                  onClick={() => assignPane(index, { kind: "empty" })}
+                >
+                  <svg
+                    width="11"
+                    height="11"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="square"
+                    aria-hidden="true"
+                  >
+                    <path d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                </button>
+              </>
             ) : (
               <div className="grid h-full place-items-center">
                 <span className="micro" style={{ color: "var(--text-faint)" }}>

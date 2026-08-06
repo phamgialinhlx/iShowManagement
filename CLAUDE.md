@@ -558,7 +558,9 @@ stopped working. These are not aspirations; each one is a rule with a test.
 - **The rail marks every session on screen, not just the focused one.** In a grid the operator
   is looking at four of eight and nothing said which four, so "is that one visible or do I need
   to go and find it?" could only be answered by looking away and counting panes. Derived with
-  the same `gridLayout` the workbench uses — two sources for one fact is two chances to drift.
+  the same `layoutPanes` the workbench uses (`onScreenSessions` in `grid.ts`) — two sources for
+  one fact is two chances to drift, and the rail once read the raw `panes` array instead, which
+  missed every auto-filled cell and marked orphan entries beyond the visible count.
 - **A context menu flips before it clamps.** Right-clicking near the bottom of a file tree put
   half the items below the window edge, unreachable, with nothing indicating they existed —
   Delete was simply gone. Growing *upward* from the cursor keeps the pointer on the menu's edge

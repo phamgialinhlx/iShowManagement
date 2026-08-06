@@ -26,6 +26,7 @@ import {
   type SessionStatus,
   type SessionV3,
 } from "./workspace-model.ts";
+import { isFocus, layoutPanes, openTarget, parseGridLayout, type GridLayoutId } from "./grid";
 import {
   addProject as rAddProject,
   addServer as rAddServer,
@@ -83,7 +84,7 @@ type State = Core & {
   openOrder: Record<ProjectId, BufferKey[]>;
   activeBuffer: Record<ProjectId, BufferKey | null>;
 
-  grid: number;
+  grid: GridLayoutId;
   focusedCell: number | null;
   railCollapsed: boolean;
   /** Session ids in most-recently-activated order. Runtime only — it feeds the
@@ -138,7 +139,7 @@ type State = Core & {
   activate: (id: string) => void;
 
   // ── panes / grid ───────────────────────────────────────────────────────────
-  setGrid: (n: number) => void;
+  setGrid: (layout: GridLayoutId) => void;
   focusCell: (index: number | null) => void;
   assignPane: (index: number, ref: PaneRef | null) => void;
   closePane: (index: number) => void;
@@ -146,6 +147,8 @@ type State = Core & {
   openSession: (id: string) => void;
   openHost: (serverId: ServerId) => void;
   openFiles: (projectId: ProjectId) => void;
+  /** Activate a session *and* make sure it is on screen — the "go to it" verb. */
+  revealSession: (id: string) => void;
 
   // ── runtime handles ──────────────────────────────────────────────────────
   setLive: (id: string, handle: string) => void;
@@ -233,8 +236,12 @@ const coreOf = (s: State): Core => ({
 });
 
 /** The cell a rail "open" should fill: cell 0 in focus mode (the only visible
- *  one), else the focused cell, else cell 0. */
-const openCell = (s: State): number => (s.grid === 1 ? 0 : (s.focusedCell ?? 0));
+ *  one), else the focused cell, else the first empty tile (`openTarget`) — so
+ *  repeated opens stop bulldozing the top-left cell. */
+const openCell = (s: State): number =>
+  isFocus(s.grid)
+    ? 0
+    : openTarget(layoutPanes(s.panes, s.sessions, s.activeSession, s.grid), s.focusedCell);
 
 export const useWorkspace = create<State>((set, get) => ({
   servers: restored.servers,
@@ -257,7 +264,8 @@ export const useWorkspace = create<State>((set, get) => ({
   openOrder: {},
   activeBuffer: {},
 
-  grid: Number(storage?.getItem("rmux.grid")) || 1,
+  // The key used to hold a bare digit meaning N×N; `parseGridLayout` reads both.
+  grid: parseGridLayout(storage?.getItem("rmux.grid") ?? null),
   focusedCell: null,
   railCollapsed: false,
   recentSessions: [],
@@ -460,10 +468,10 @@ export const useWorkspace = create<State>((set, get) => ({
   },
 
   // ── panes / grid ───────────────────────────────────────────────────────────
-  setGrid: (n) => {
-    storage?.setItem("rmux.grid", String(n));
+  setGrid: (layout) => {
+    storage?.setItem("rmux.grid", layout);
     // A cell selected under the old layout may not exist under the new one.
-    set({ grid: n, focusedCell: null });
+    set({ grid: layout, focusedCell: null });
   },
   focusCell: (index) => set({ focusedCell: index }),
   assignPane: (index, ref) => {
@@ -483,6 +491,24 @@ export const useWorkspace = create<State>((set, get) => ({
   },
   openHost: (serverId) => get().assignPane(openCell(get()), { kind: "host", serverId }),
   openFiles: (projectId) => get().assignPane(openCell(get()), { kind: "files", projectId }),
+
+  // "Go to this session." Bare `activate` only moves highlights: in focus mode
+  // an assigned pane 0 wins the cell, and a grid is deliberately stable — so
+  // the waiting chip and the ⌘digits, which used to call it, appeared to do
+  // nothing. If the session is already on screen this just points at its cell;
+  // otherwise it is opened into the usual target cell.
+  revealSession: (id) => {
+    const s = get();
+    if (!s.sessions.some((x) => x.id === id)) return;
+    const cells = layoutPanes(s.panes, s.sessions, s.activeSession, s.grid);
+    const index = cells.findIndex((p) => p?.kind === "session" && p.id === id);
+    s.activate(id);
+    if (index >= 0) {
+      if (!isFocus(s.grid)) s.focusCell(index);
+      return;
+    }
+    s.assignPane(isFocus(s.grid) ? 0 : openTarget(cells, s.focusedCell), { kind: "session", id });
+  },
 
   // ── runtime handles ──────────────────────────────────────────────────────
   setLive: (id, handle) => set((s) => ({ live: { ...s.live, [id]: handle } })),
