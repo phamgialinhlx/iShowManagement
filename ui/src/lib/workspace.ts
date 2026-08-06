@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { api, isTauri, type TargetRef } from "./api";
 import { bufferKey, type Buffer, type BufferKey } from "./buffers";
+import { deckId, isFocusDeck, parseDeck, type Deck } from "./grid";
 import {
   autosaveDecision,
   autosaveEnabled,
@@ -83,7 +84,7 @@ type State = Core & {
   openOrder: Record<ProjectId, BufferKey[]>;
   activeBuffer: Record<ProjectId, BufferKey | null>;
 
-  grid: number;
+  deck: Deck;
   focusedCell: number | null;
   railCollapsed: boolean;
 
@@ -135,7 +136,7 @@ type State = Core & {
   activate: (id: string) => void;
 
   // ── panes / grid ───────────────────────────────────────────────────────────
-  setGrid: (n: number) => void;
+  setDeck: (deck: Deck) => void;
   focusCell: (index: number | null) => void;
   assignPane: (index: number, ref: PaneRef | null) => void;
   closePane: (index: number) => void;
@@ -231,7 +232,7 @@ const coreOf = (s: State): Core => ({
 
 /** The cell a rail "open" should fill: cell 0 in focus mode (the only visible
  *  one), else the focused cell, else cell 0. */
-const openCell = (s: State): number => (s.grid === 1 ? 0 : (s.focusedCell ?? 0));
+const openCell = (s: State): number => (isFocusDeck(s.deck) ? 0 : (s.focusedCell ?? 0));
 
 export const useWorkspace = create<State>((set, get) => ({
   servers: restored.servers,
@@ -254,7 +255,10 @@ export const useWorkspace = create<State>((set, get) => ({
   openOrder: {},
   activeBuffer: {},
 
-  grid: Number(storage?.getItem("rmux.grid")) || 1,
+  // `rmux.deck` is the new key; `rmux.grid` is the old bare number every
+  // existing install still has. Reading both means an upgrade keeps the
+  // layout instead of silently dropping everyone into focus mode.
+  deck: parseDeck(storage?.getItem("rmux.deck") ?? storage?.getItem("rmux.grid")),
   focusedCell: null,
   railCollapsed: false,
 
@@ -449,10 +453,10 @@ export const useWorkspace = create<State>((set, get) => ({
   },
 
   // ── panes / grid ───────────────────────────────────────────────────────────
-  setGrid: (n) => {
-    storage?.setItem("rmux.grid", String(n));
+  setDeck: (deck) => {
+    storage?.setItem("rmux.deck", deckId(deck));
     // A cell selected under the old layout may not exist under the new one.
-    set({ grid: n, focusedCell: null });
+    set({ deck, focusedCell: null });
   },
   focusCell: (index) => set({ focusedCell: index }),
   assignPane: (index, ref) => {

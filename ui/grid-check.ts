@@ -1,4 +1,8 @@
-import { gridLayout, layoutPanes } from "./src/lib/grid";
+import { DECKS, deckCells, deckId, gridLayout, layoutPanes, parseDeck } from "./src/lib/grid";
+
+/** Square decks, so the existing cases read as they did when `grid` was a number. */
+const SQ1 = { cols: 1, rows: 1 };
+const SQ2 = { cols: 2, rows: 2 };
 import type { PaneRef } from "./src/lib/workspace-model";
 
 /**
@@ -98,37 +102,65 @@ const pcell = (cells: (PaneRef | null)[]) =>
 
 check(
   "a 2x2 pane layout is independent of the active session",
-  JSON.stringify(pcell(layoutPanes([], eight, "a", 2))) ===
-    JSON.stringify(pcell(layoutPanes([], eight, "d", 2))),
+  JSON.stringify(pcell(layoutPanes([], eight, "a", SQ2))) ===
+    JSON.stringify(pcell(layoutPanes([], eight, "d", SQ2))),
 );
 check(
   "clicking (activating) the bottom-right pane does not move it",
   (() => {
-    const before = layoutPanes([], eight, "a", 2);
+    const before = layoutPanes([], eight, "a", SQ2);
     const clicked = before[3];
     const active = clicked && clicked.kind === "session" ? clicked.id : null;
-    return JSON.stringify(pcell(before)) === JSON.stringify(pcell(layoutPanes([], eight, active, 2)));
+    return JSON.stringify(pcell(before)) === JSON.stringify(pcell(layoutPanes([], eight, active, SQ2)));
   })(),
 );
 check(
   "focus mode (1x1) shows the active session in its one cell",
   (() => {
-    const c = layoutPanes([], eight, "c", 1)[0];
+    const c = layoutPanes([], eight, "c", SQ1)[0];
     return !!c && c.kind === "session" && c.id === "c";
   })(),
 );
 check(
   "an explicit host pane holds its cell; the rest auto-fill in rail order",
-  JSON.stringify(pcell(layoutPanes([{ kind: "host", serverId: "s1" }], eight, "d", 2))) ===
+  JSON.stringify(pcell(layoutPanes([{ kind: "host", serverId: "s1" }], eight, "d", SQ2))) ===
     JSON.stringify(["host", "a", "b", "c"]),
 );
 check(
   "layoutPanes never shows a session twice",
   (() => {
-    const cells = layoutPanes([{ kind: "session", id: "h" }], eight, null, 2);
+    const cells = layoutPanes([{ kind: "session", id: "h" }], eight, null, SQ2);
     const sids = cells.flatMap((c) => (c && c.kind === "session" ? [c.id] : []));
     return new Set(sids).size === sids.length && sids.includes("h");
   })(),
 );
+
+// ── wide decks ───────────────────────────────────────────────────────────────
+//
+// A wide screen wants panes *side by side at full height*. That shape was
+// unreachable while a deck was a single number `n` meaning n x n, and it is the
+// shape a terminal actually benefits from: extra width buys a terminal little,
+// extra height buys it rows.
+
+check("1x2 is two cells, not four", deckCells({ cols: 2, rows: 1 }) === 2);
+check("1x4 is four cells in one row", deckCells({ cols: 4, rows: 1 }) === 4);
+check(
+  "1x4 and 2x2 both hold four panes but are different decks",
+  deckCells({ cols: 4, rows: 1 }) === deckCells({ cols: 2, rows: 2 }) &&
+    deckId({ cols: 4, rows: 1 }) !== deckId({ cols: 2, rows: 2 }),
+);
+check(
+  "a wide deck fills left to right in rail order",
+  JSON.stringify(pcell(layoutPanes([], eight, "d", { cols: 4, rows: 1 }))) ===
+    JSON.stringify(["a", "b", "c", "d"]),
+);
+check(
+  "every offered deck round-trips through its stored id",
+  DECKS.every((d) => deckId(parseDeck(d.id)) === d.id),
+);
+// The old key held a bare number. Dropping that support would reset every
+// existing install to focus mode on upgrade, which reads as losing your layout.
+check("the old bare number still parses as a square", deckCells(parseDeck("3")) === 9);
+check("an unknown stored value falls back to focus rather than throwing", deckCells(parseDeck("nonsense")) === 1);
 
 console.log(failures === 0 ? "\nall grid checks passed" : `\n${failures} grid check(s) FAILED`);
