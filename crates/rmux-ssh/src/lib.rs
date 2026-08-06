@@ -62,6 +62,89 @@ fn is_transport_failure(status: i32) -> bool {
 }
 
 
+/// How many times to establish a connection before giving up.
+///
+/// Three, not more. A `ProxyCommand` that is genuinely broken fails the same way
+/// every time, and turning one visible error into ten seconds of silence is a
+/// worse experience than the error.
+const CONNECT_ATTEMPTS: usize = 3;
+
+/// Pause between attempts.
+///
+/// Long enough for a proxy that lost a race to release whatever it was
+/// contending for, short enough that a *real* failure still surfaces quickly:
+/// two retries add under a second and a half before the operator sees anything.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// Is this failure worth another attempt?
+///
+/// ## Why a retry is warranted at all
+///
+/// A `ProxyCommand` host connects through a helper process — `cloudflared`, a
+/// bastion, an `aws ssm` wrapper — and when that helper dies before a socket
+/// exists, OpenSSH reports the peer it never got:
+///
+/// ```text
+/// Connection closed by UNKNOWN port 65535
+/// ```
+///
+/// `UNKNOWN port 65535` is the tell: there was no peer address, so the failure
+/// happened in the proxy rather than on the far host. Some of these are
+/// genuinely transient — the helper is warming up, refreshing a token, or
+/// declining one of several connections opened at the same instant. On Windows
+/// rmux opens several at once by necessity, because there is no `ControlMaster`
+/// to share, which is why this shows up there and not on macOS.
+///
+/// ## What must never be retried, and why it matters more than the retry
+///
+/// **Authentication failures.** `ssh` already makes two or three password
+/// attempts of its own inside a single connection, so retrying multiplies them.
+/// Measured today against a real host: repeated failed logins from rmux got this
+/// machine banned mid-session, and a `fail2ban` ban reads afterwards as "the
+/// server is down" — a far more confusing failure than the one being papered
+/// over. A wrong password is also not going to become right by asking again.
+///
+/// **Host-key problems** are refusals, not blips: retrying a changed host key
+/// would hammer a host precisely when the honest answer is that something is
+/// wrong.
+///
+/// So the rule is an allow-list of transport symptoms, *and* a veto on anything
+/// that names a credential or a key.
+fn is_worth_retrying(stderr: &str) -> bool {
+    let reason = stderr.to_ascii_lowercase();
+
+    // The veto comes first: a credential failure that also happens to mention a
+    // closed connection must not slip through on the allow-list below.
+    let refusal = [
+        "permission denied",
+        "authentication failed",
+        "too many authentication failures",
+        "host key verification failed",
+        "remote host identification has changed",
+        "no supported authentication methods",
+        "administratively prohibited",
+    ];
+    if refusal.iter().any(|r| reason.contains(r)) {
+        return false;
+    }
+
+    // A proxy that died, or a connection that never completed. `port 65535` is
+    // listed explicitly because it is the signature of a ProxyCommand failure
+    // even when the wording around it changes between OpenSSH releases.
+    let transient = [
+        "port 65535",
+        "connection closed",
+        "connection reset",
+        "connection refused",
+        "connection timed out",
+        "timed out",
+        "broken pipe",
+        "kex_exchange_identification",
+        "banner exchange",
+    ];
+    transient.iter().any(|t| reason.contains(t))
+}
+
 /// Turn ssh's stderr into something that names the fix.
 ///
 /// One case is worth singling out. rmux rides every channel over a single
@@ -121,7 +204,34 @@ impl SshTarget {
 
         // `uname -s` over the freshly established master. Anything we cannot
         // identify is `Other`, which only costs us the /proc metrics fast path.
-        let probe = self.exec(&CommandSpec::new("uname").arg("-s").tty(Tty::None)).await?;
+        //
+        // **Retried when the transport itself failed**, because a `ProxyCommand`
+        // host can refuse the first connection and accept the next — see
+        // [`is_worth_retrying`] for exactly which failures qualify and why an
+        // authentication failure emphatically does not. The probe is a read-only
+        // `uname`, so re-running it cannot do anything twice; that is why the
+        // retry lives here rather than around `exec` in general, where a caller
+        // may be writing a file.
+        let mut probe = self.exec(&CommandSpec::new("uname").arg("-s").tty(Tty::None)).await?;
+
+        for attempt in 2..=CONNECT_ATTEMPTS {
+            if !is_transport_failure(probe.status) || !is_worth_retrying(&probe.stderr) {
+                break;
+            }
+            // Logged, not swallowed. A retry that hides the reason turns "the
+            // proxy is flaky" into "it sometimes takes a moment", and the next
+            // person to look has nothing to go on — which is precisely the state
+            // this arrived in, with a log that recorded the app starting and
+            // nothing about the connection that failed.
+            tracing::warn!(
+                host = %self.host.alias,
+                attempt,
+                reason = %mux::summarise_stderr(&probe.stderr),
+                "connection failed in the transport; retrying"
+            );
+            tokio::time::sleep(RETRY_AFTER).await;
+            probe = self.exec(&CommandSpec::new("uname").arg("-s").tty(Tty::None)).await?;
+        }
 
         // **A failed `uname` is the Windows signal, not an error.** OpenSSH for
         // Windows hands the command to `cmd.exe` unless `DefaultShell` says
@@ -144,6 +254,14 @@ impl SshTarget {
             // `cmd.exe` failing to find `uname` is a *remote* exit code, so the
             // real Windows signal is any non-zero status other than this one.
             if is_transport_failure(probe.status) {
+                // The operator gets this on screen; the log gets it too, because
+                // "it says it cannot connect" is all anyone can report from
+                // another machine otherwise.
+                tracing::warn!(
+                    host = %self.host.alias,
+                    reason = %mux::summarise_stderr(&probe.stderr),
+                    "could not reach the host"
+                );
                 anyhow::bail!("could not reach {}{}", self.host.alias, explain(&probe.stderr));
             }
 
@@ -320,16 +438,73 @@ mod tests {
     }
 
 
-    /// The bug: **a Linux host that ssh could not reach was reported as
-    /// "not POSIX", with advice to install Git for Windows on it.**
+    /// The failure this retry exists for, in OpenSSH's own words.
+    #[test]
+    fn a_dead_proxy_command_is_retried() {
+        // `UNKNOWN port 65535` means there was never a peer socket, so the
+        // failure happened in the ProxyCommand rather than on the far host.
+        assert!(is_worth_retrying("Connection closed by UNKNOWN port 65535"));
+        assert!(is_worth_retrying(
+            "/bin/sh: line 0: exec: cloudflared: not found\nConnection closed by UNKNOWN port 65535"
+        ));
+        // The wording around the port has changed between OpenSSH releases; the
+        // port has not.
+        assert!(is_worth_retrying("kex_exchange_identification: Connection closed by remote host"));
+        assert!(is_worth_retrying("Connection timed out during banner exchange"));
+    }
+
+    /// **The half that matters most.**
     ///
-    /// `connect` reads a non-zero `uname -s` as the Windows signal, which is
-    /// right when the non-zero came from `cmd.exe`. It is wrong when it came
-    /// from ssh itself — 255 means ssh never reached a remote shell at all, so
-    /// there is nothing to conclude about what that shell is.
-    ///
-    /// This pins the classification rather than the message, because the
-    /// classification is the part that sent the operator to the wrong machine.
+    /// `ssh` already makes two or three password attempts inside one connection.
+    /// Retrying multiplies them, and measured against a real host today, repeated
+    /// failed logins from rmux got the client banned mid-session — which reads
+    /// afterwards as "the server is down", a worse and much more confusing
+    /// failure than the one a retry would have papered over.
+    #[test]
+    fn a_rejected_credential_is_never_retried() {
+        assert!(!is_worth_retrying("root@host: Permission denied (publickey,password)."));
+        assert!(!is_worth_retrying("Too many authentication failures"));
+        assert!(!is_worth_retrying("No supported authentication methods available"));
+
+        // A refusal is not a blip. Retrying a changed host key would hammer a
+        // host at exactly the moment the honest answer is "something is wrong".
+        assert!(!is_worth_retrying("Host key verification failed."));
+        assert!(!is_worth_retrying(
+            "@@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@"
+        ));
+
+        // sshd's MaxSessions counter being full is a real limit, not a race;
+        // `explain` already tells the operator how to raise it.
+        assert!(!is_worth_retrying(
+            "channel 3: open failed: administratively prohibited: open failed"
+        ));
+    }
+
+    #[test]
+    fn the_veto_beats_the_allow_list() {
+        // A credential failure that also mentions a closed connection must not
+        // slip through because one word matched. Order of evaluation is the
+        // whole guarantee here.
+        assert!(!is_worth_retrying(
+            "Connection closed by 10.0.0.1 port 22\nPermission denied (publickey)."
+        ));
+    }
+
+    #[test]
+    fn an_unrecognised_failure_is_left_alone() {
+        // Silence is not evidence of a transient fault, and retrying everything
+        // turns one clear error into several seconds of nothing.
+        assert!(!is_worth_retrying(""));
+        assert!(!is_worth_retrying("ssh: Could not resolve hostname devbox"));
+    }
+
+    #[test]
+    fn the_retry_budget_stays_small() {
+        // Three attempts, ~600ms apart: under a second and a half of extra wait
+        // before a genuine failure reaches the operator.
+        assert_eq!(CONNECT_ATTEMPTS, 3);
+        assert!(RETRY_AFTER.as_millis() * (CONNECT_ATTEMPTS as u128 - 1) < 2_000);
+    }
 
     #[test]
     fn a_full_channel_counter_is_not_reported_as_a_permissions_problem() {
@@ -346,6 +521,16 @@ mod tests {
         assert!(explain("   ").contains("without saying why"));
     }
 
+    /// The bug: **a Linux host that ssh could not reach was reported as
+    /// "not POSIX", with advice to install Git for Windows on it.**
+    ///
+    /// `connect` reads a non-zero `uname -s` as the Windows signal, which is
+    /// right when the non-zero came from `cmd.exe`. It is wrong when it came
+    /// from ssh itself — 255 means ssh never reached a remote shell at all, so
+    /// there is nothing to conclude about what that shell is.
+    ///
+    /// This pins the classification rather than the message, because the
+    /// classification is the part that sent the operator to the wrong machine.
     #[test]
     fn sshs_own_failure_is_not_a_verdict_on_the_remote_shell() {
         assert_eq!(SSH_FAILURE, 255, "OpenSSH reserves 255 for its own failures");
