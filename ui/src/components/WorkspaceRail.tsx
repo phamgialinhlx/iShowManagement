@@ -357,6 +357,7 @@ function SessionRow({
   const [editing, setEditing] = useState(false);
   const [menu, setMenu] = useState<RailMenuTarget | null>(null);
   const rename = useWorkspace((s) => s.renameSession);
+  const detachSession = useWorkspace((s) => s.detachSession);
   const status = useWorkspace((s) => s.statusOf(session.id));
 
   // A child row: the tree line supplies the left edge, so selection is a filled
@@ -448,12 +449,13 @@ function SessionRow({
       ) : (
         <button
           type="button"
-          aria-label={`Close ${session.name}`}
+          title="Detach — leave running on server"
+          aria-label={`Detach ${session.name}`}
           className="absolute right-2 top-[9px] opacity-0 group-hover:opacity-100"
           style={{ color: "var(--text-faint)" }}
           onClick={(e) => {
             e.stopPropagation();
-            setConfirming(true);
+            detachSession(session.id);
           }}
         >
           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" aria-hidden="true">
@@ -472,6 +474,14 @@ function SessionRow({
               onClick={() => {
                 setMenu(null);
                 setEditing(true);
+              }}
+            />
+            <hr className="hairline my-1" />
+            <RailMenuItem
+              label="Detach"
+              onClick={() => {
+                setMenu(null);
+                detachSession(session.id);
               }}
             />
             <RailMenuItem label="Close session" destructive onClick={() => setConfirming(true)} />
