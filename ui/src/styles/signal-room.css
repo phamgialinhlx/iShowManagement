@@ -427,6 +427,35 @@ textarea,
 }
 
 /*
+ * ...and every other layer that can carry one.
+ *
+ * `.xterm-viewport` above is the one that was actually found painting; these are
+ * defensive, so a future xterm release cannot reintroduce an opaque background
+ * somewhere new in the same subtree. `fit()` floors to whole rows, so there is
+ * always a remainder of up to one cell below the last row, and anything opaque
+ * around the canvas shows through it.
+ *
+ * **This is not the fix for the black bar that was reported, and neither was
+ * anything else tried against it.** It was added believing it was, and it
+ * changed nothing. Nor did three scrollbar rules — `overflow-x: hidden` on the
+ * viewport, then on `.xterm-scrollable-element`, then hiding
+ * `.scrollbar.horizontal` — each announced as the answer and each verified to be
+ * served without moving the band. They have been removed; only this rule stays,
+ * because it is correct on its own terms.
+ *
+ * **The band was never in the terminal.** It was Claude's decision card, laid
+ * out below the pane by a cascade collision and clipped to a 12px sliver — see
+ * the `.corner` rule below for the whole account. Nothing in this subtree was
+ * ever involved, which is why ten fixes aimed at it all failed.
+ */
+.xterm,
+.xterm .xterm-screen,
+.xterm .xterm-scroll-area,
+.xterm .xterm-decoration-overlay {
+  background-color: transparent !important;
+}
+
+/*
  * Floating windows and menus sit closer to opaque so stacked surfaces stay
  * legible — and they blur nothing either, for the reason `.panel` explains.
  *
@@ -704,8 +733,42 @@ textarea,
 
 /* ------------------------------------------------------------------ motifs */
 
-/* Corner L-bracket. The single most recognisable mark in the language. */
-.corner {
+/*
+ * Corner L-bracket. The single most recognisable mark in the language.
+ *
+ * **The `:not()` is the whole black-bar bug, and it is not cosmetic.**
+ * `.corner` needs a positioning context for its `::after`, but this file is
+ * *unlayered* while Tailwind's utilities live in `@layer utilities` — and an
+ * unlayered rule beats a layered one whatever the source order. So
+ * `class="window corner absolute bottom-3"` computed `position: relative`, and
+ * Tailwind's `absolute` never applied.
+ *
+ * Under relative positioning `bottom`/`left` shift a box from where it already
+ * is instead of pinning it. Claude's decision card is `absolute inset-x-3
+ * bottom-3` inside a pane whose terminal wrapper is `h-full`, so its static
+ * position was *below the pane*: measured 241px tall starting at y=705.5 with
+ * the pane ending at 717.5, shifted 12px up and 12px right by the offsets that
+ * were supposed to pin it. The grid cell is `overflow-hidden`, so all that ever
+ * showed was its top 12px — a dark band across the bottom of the pane, painted
+ * `--app-panel` at `--glass-pct` (94%), which composites to exactly the
+ * rgb(22,13,23) measured off the screen.
+ *
+ * It was read as a transparency fault for a day and a half. Everything about it
+ * pointed the wrong way: it appeared only in *some* sessions (the card exists
+ * only while Claude is waiting on an answer), moved when the window was resized,
+ * and came and went when switching sessions. Ten fixes aimed at xterm — viewport
+ * backgrounds, three scrollbar rules, `FitAddon` padding, the GPU renderer,
+ * native glass — could not have worked: nothing in the terminal was ever
+ * involved. The paint test that finally cornered it showed the band claiming
+ * none of fourteen element backgrounds, which was true and misleading: the card
+ * is a *sibling* of the terminal, so it was never in the chain being painted.
+ * What found it: a probe reporting the rects of *every child of the pane*
+ * rather than a list of suspects chosen in advance. One round.
+ *
+ * A positioning utility now wins, and `::after` still has a positioned ancestor
+ * either way — `absolute`, `fixed` and `sticky` are all positioned.
+ */
+.corner:not(.absolute):not(.fixed):not(.sticky) {
   position: relative;
 }
 
