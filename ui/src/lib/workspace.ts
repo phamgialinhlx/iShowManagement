@@ -33,6 +33,8 @@ import {
   addSession as rAddSession,
   assignPane as rAssignPane,
   closePane as rClosePane,
+  removeProjectCore as rRemoveProjectCore,
+  removeServerCore as rRemoveServerCore,
   removeSession as rRemoveSession,
   type Core,
 } from "./workspace-reducers.ts";
@@ -341,14 +343,20 @@ export const useWorkspace = create<State>((set, get) => ({
       );
       const { [id]: _o, ...openOrder } = s.openOrder;
       const { [id]: _a, ...activeBuffer } = s.activeBuffer;
-      return { projects: s.projects.filter((p) => p.id !== id), buffers, openOrder, activeBuffer };
+      // Stored open-file lists must go too, or a removed project's paths leak
+      // back into the persisted blob through `persist`'s "preserved from the
+      // stored map" path.
+      const { [id]: _op, ...openPaths } = s.openPaths;
+      const { [id]: _ap, ...activePath } = s.activePath;
+      const ws = rRemoveProjectCore(coreOf(s), id);
+      return { ...ws, buffers, openOrder, activeBuffer, openPaths, activePath };
     });
     schedulePersist(get);
   },
 
   removeServer: (id) => {
     for (const p of get().projects.filter((x) => x.serverId === id)) get().removeProject(p.id);
-    set((s) => ({ servers: s.servers.filter((sv) => sv.id !== id) }));
+    set((s) => ({ ...rRemoveServerCore(coreOf(s), id) }));
     schedulePersist(get);
   },
 

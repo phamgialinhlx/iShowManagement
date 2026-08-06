@@ -1,11 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
 import { useRailWidth } from "../lib/rail-width";
 import { useWorkspace } from "../lib/workspace";
 import { RailGrip } from "./RailGrip";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
-import { QuickAdd } from "./QuickAdd";
+import { isClaudeSession } from "../lib/workspace-model";
+import type { RunningSession } from "../lib/api";
+import { api } from "../lib/api";
 
 /**
  * The session rail, v3 — a **Server → Project → Session** tree.
@@ -216,22 +218,162 @@ function FolderIcon() {
   );
 }
 
+export type RailMenuTarget = { x: number; y: number };
+
+/** One item in a rail context menu. `destructive` reads red (rule 0). */
+function RailMenuItem({
+  label,
+  onClick,
+  destructive,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  destructive?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="data flex w-full items-center px-3 py-[5px] text-left text-[11px]"
+      style={{
+        color: disabled
+          ? "var(--text-faint)"
+          : destructive
+            ? "rgb(var(--primary))"
+            : "var(--text)",
+      }}
+      onMouseEnter={(e) => {
+        if (!disabled) e.currentTarget.style.background = "var(--hover)";
+      }}
+      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+    >
+      <span className="truncate">{label}</span>
+    </button>
+  );
+}
+
+/**
+ * A right-click context menu for the rail — the same gesture and shape as the
+ * file tree's `TreeMenu`, minus the file actions.
+ *
+ * **Flip before clamp** (the CLAUDE.md rule): the menu is rendered invisible at
+ * the cursor for one frame, measured, and moved up into view if it would fall
+ * past the window edge — clamping only when there is no room above. The scale is
+ * *measured* (`rect.height / offsetHeight`) rather than assumed, because `zoom`
+ * on `#root` puts `getBoundingClientRect` and the written `top` in different
+ * units.
+ */
+function RailMenu({
+  target,
+  onClose,
+  children,
+}: {
+  target: RailMenuTarget;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [placed, setPlaced] = useState({ x: target.x, y: target.y });
+  const [measured, setMeasured] = useState(false);
+
+  // Dismiss on outside click or Escape, like every context menu.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest("[data-rail-menu]")) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  // A placement function in its own stable callback so the layout effect and the
+  // observer share it. Content swaps (menu ↔ confirm/rename) change the height,
+  // and the observer re-measures on those — same "re-run when the menu's own
+  // height changes" rule as `TreeMenu`, but without depending on a render-prop.
+  const place = () => {
+    const el = menuRef.current;
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const scale = el.offsetHeight > 0 ? rect.height / el.offsetHeight : 1;
+    const margin = 8;
+
+    let x = target.x;
+    let y = target.y;
+
+    const overflowY = rect.bottom - (window.innerHeight - margin);
+    if (overflowY > 0) {
+      const height = rect.height / scale;
+      const above = (target.y * scale - margin) / scale;
+      y = height <= above ? target.y - height : Math.max(margin / scale, y - overflowY / scale);
+    }
+
+    const overflowX = rect.right - (window.innerWidth - margin);
+    if (overflowX > 0) {
+      const width = rect.width / scale;
+      x = Math.max(margin / scale, target.x - width);
+    }
+
+    setPlaced({ x, y });
+    setMeasured(true);
+  };
+
+  useLayoutEffect(() => {
+    place();
+    const el = menuRef.current;
+    if (!el) return;
+    const observer = new MutationObserver(() => place());
+    observer.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target.x, target.y]);
+
+  return (
+    <div
+      ref={menuRef}
+      data-rail-menu
+      className="menu fixed z-[80] min-w-[170px] p-1"
+      style={{
+        left: placed.x,
+        top: placed.y,
+        visibility: measured ? "visible" : "hidden",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function SessionRow({
   session,
   active,
   onScreen,
   onOpen,
   onKill,
+  onImport,
 }: {
   session: SessionV3;
   active: boolean;
   onScreen: boolean;
   onOpen: () => void;
   onKill: () => void;
+  /** Open the "Attach to running session…" picker for this server. */
+  onImport: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [menu, setMenu] = useState<RailMenuTarget | null>(null);
   const rename = useWorkspace((s) => s.renameSession);
+  const detachSession = useWorkspace((s) => s.detachSession);
   const status = useWorkspace((s) => s.statusOf(session.id));
 
   // A child row: the tree line supplies the left edge, so selection is a filled
@@ -243,7 +385,14 @@ function SessionRow({
       : undefined;
 
   return (
-    <div className="group relative" style={surface}>
+    <div
+      className="group relative"
+      style={surface}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
+    >
       {editing ? (
         <div className="flex items-center gap-2 px-3 py-[6px] pl-3">
           {session.kind === "claude" ? (
@@ -316,18 +465,51 @@ function SessionRow({
       ) : (
         <button
           type="button"
-          aria-label={`Close ${session.name}`}
+          title="Detach — leave running on server"
+          aria-label={`Detach ${session.name}`}
           className="absolute right-2 top-[9px] opacity-0 group-hover:opacity-100"
           style={{ color: "var(--text-faint)" }}
           onClick={(e) => {
             e.stopPropagation();
-            setConfirming(true);
+            detachSession(session.id);
           }}
         >
           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" aria-hidden="true">
             <path d="M18 6L6 18M6 6l12 12" />
           </svg>
         </button>
+      )}
+
+      {/* The same right-click menu as the project row: rename (into the existing
+          inline edit) and close (into the existing confirm). */}
+      {menu && (
+        <RailMenu target={menu} onClose={() => setMenu(null)}>
+          <div className="flex flex-col">
+            <RailMenuItem
+              label="Rename"
+              onClick={() => {
+                setMenu(null);
+                setEditing(true);
+              }}
+            />
+            <hr className="hairline my-1" />
+            <RailMenuItem
+              label="Detach"
+              onClick={() => {
+                setMenu(null);
+                detachSession(session.id);
+              }}
+            />
+            <RailMenuItem
+              label="Import session…"
+              onClick={() => {
+                setMenu(null);
+                onImport();
+              }}
+            />
+            <RailMenuItem label="Close session" destructive onClick={() => setConfirming(true)} />
+          </div>
+        </RailMenu>
       )}
     </div>
   );
@@ -337,10 +519,14 @@ function ProjectNode({
   project,
   folded,
   onToggle,
+  onImport,
 }: {
   project: Project;
   folded: boolean;
   onToggle: () => void;
+  /** Open the "Attach to running session…" picker, so an imported session can
+   *  be brought back without hunting for the server-card menu. */
+  onImport: () => void;
 }) {
   const sessions = useWorkspace((s) => s.sessions);
   const active = useWorkspace((s) => s.activeSession);
@@ -349,99 +535,93 @@ function ProjectNode({
   const openSession = useWorkspace((s) => s.openSession);
   const addSession = useWorkspace((s) => s.addSession);
   const removeSession = useWorkspace((s) => s.removeSession);
+  const renameProject = useWorkspace((s) => s.renameProject);
   const removeProject = useWorkspace((s) => s.removeProject);
-  const target = useWorkspace((s) => s.targetOfProject(project.id));
-  const allServers = useWorkspace((s) => s.servers);
-  // Stated, never assumed: two projects can share a folder name on different
-  // machines, and this control is reached without naming one.
-  const host = allServers.find((sv) => sv.id === project.serverId);
+
+  const [menu, setMenu] = useState<RailMenuTarget | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const mine = sessions.filter((s) => s.projectId === project.id);
-  const [confirming, setConfirming] = useState(false);
-  const [adding, setAdding] = useState(false);
   const onScreen = new Set(
     panes.flatMap((p) => (p && p.kind === "session" ? [p.id] : [])),
   );
 
-  /**
-   * `+` and `✦` **ask** before creating.
-   *
-   * They used to call `addSession` outright, which decided three things the
-   * operator is supposed to decide: whether to skip permissions, which provider
-   * the credential goes to, and — for Claude — whether this is new work at all
-   * or a continuation of yesterday's. `QuickAdd` and `ClaudeSessionPicker` were
-   * both written for exactly this and were left unwired when the rail was
-   * rebuilt as a Server → Project tree, so the two components existed, worked,
-   * and were reachable from nowhere.
-   */
-  const add = (choice: {
-    skipPermissions: boolean;
-    modelProfile?: string;
-    resume?: string;
-    name?: string;
-  }) => {
-    const id = addSession(project.id, "claude", {
-      skipPermissions: choice.skipPermissions,
-      modelProfile: choice.modelProfile,
-      resume: choice.resume,
-      // A resumed conversation is named for what it was about; every session in
-      // a folder would otherwise share that folder's name.
-      name: choice.name?.trim() || undefined,
-    });
+  const add = (kind: "terminal" | "claude") => {
+    const id = addSession(project.id, kind);
     openSession(id);
-    setAdding(false);
   };
 
   return (
     <div>
       {/* Group header — the "▾ TMUX" band: caret, an uppercase label, then the
-          verbs: open files (folder), new terminal (+), new Claude (✦). */}
-      <div className="group/prj flex items-center gap-1.5 py-[5px] pl-4 pr-2">
+          verbs: open files (folder), new terminal (+), new Claude (✦).
+          Right-clicking anywhere on the band opens the project menu (rename,
+          remove) — the same gesture as the file tree. */}
+      <div
+        className="group/prj flex items-center gap-1.5 py-[5px] pl-4 pr-2"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
         <button type="button" className="shrink-0" onClick={onToggle} aria-expanded={!folded} title={project.folder}>
           <Chevron folded={folded} />
         </button>
-        <button
-          type="button"
-          className="data min-w-0 flex-1 truncate text-left text-[10px]"
-          style={{ color: "var(--text-soft)", fontWeight: 600, letterSpacing: "0.09em", textTransform: "uppercase" }}
-          onClick={() => openFiles(project.id)}
-          title={`${project.folder}\nOpen files`}
-        >
-          {project.label}
-        </button>
+        {renaming ? (
+          <input
+            autoFocus
+            defaultValue={project.label}
+            aria-label="Project name"
+            className="data inset min-w-0 flex-1 px-1 py-[1px] text-[10px] outline-none"
+            style={{ border: "1px solid var(--border-strong)", color: "var(--text)", textTransform: "uppercase" }}
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={(e) => {
+              renameProject(project.id, e.currentTarget.value);
+              setRenaming(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") {
+                e.currentTarget.value = project.label;
+                e.currentTarget.blur();
+              }
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            className="data min-w-0 flex-1 truncate text-left text-[10px]"
+            style={{ color: project.running ? "var(--text-faint)" : "var(--text-soft)", fontWeight: 600, letterSpacing: "0.09em", textTransform: "uppercase" }}
+            onClick={() => openFiles(project.id)}
+            title={project.running ? "Adopted running sessions on this host" : `${project.folder}\nOpen files\nRight-click for project actions`}
+          >
+            {project.label}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => openFiles(project.id)}
           aria-label={`Open files in ${project.label}`}
-          title="Open files"
+          title={project.running ? "Adopted running sessions on this host" : "Open files"}
           className="shrink-0 px-1 opacity-70 hover:opacity-100"
           style={{ color: "var(--text-soft)" }}
         >
           <FolderIcon />
         </button>
-        {/* A **terminal** glyph, not a `+`.
-            The plus sat next to the Claude mark and read as a generic "add", so
-            the two verbs looked like one control with a preference — and it was
-            routed through `QuickAdd`, which asks the two questions that only
-            make sense for Claude (skip permissions, which provider). A shell has
-            neither, so the panel made `+` look like a second way to start a
-            Claude session. It creates a terminal directly now, and says so. */}
         <button
           type="button"
-          onClick={() => {
-            const id = addSession(project.id, "terminal");
-            openSession(id);
-          }}
+          onClick={() => add("terminal")}
           aria-label={`New terminal in ${project.label}`}
           title="New terminal"
           className="shrink-0 px-1 opacity-70 hover:opacity-100"
           style={{ color: "var(--text-soft)" }}
         >
-          <TerminalMark color="currentColor" />
+          <PlusIcon />
         </button>
         <button
           type="button"
-          onClick={() => setAdding(true)}
+          onClick={() => add("claude")}
           aria-label={`New Claude session in ${project.label}`}
           title="New Claude session"
           className="shrink-0 px-1 opacity-70 hover:opacity-100"
@@ -460,81 +640,78 @@ function ProjectNode({
         </button>
       </div>
 
-      {adding && (
-        /*
-         * A modal, not an inline panel.
-         *
-         * It was rendered inside the project row, which put a conversation
-         * picker and two settings into a 216px column — and pushed every
-         * session below it down the rail while open. The app already opens
-         * "Connect a server" and "New project" this way, so an inline third
-         * shape was a second convention for the same act.
-         *
-         * The earlier reasoning against a modal still stands where it applies:
-         * a dialog that appears *on its own* over the workbench steals the
-         * keystrokes of whoever is typing in a terminal. This one is opened by
-         * a deliberate click, which is the case that rule was never about.
-         */
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.12 }}
-          className="fixed inset-0 z-[95] grid place-items-start justify-center pt-[9vh]"
-          style={{ background: "color-mix(in srgb, var(--app-bg) 62%, transparent)" }}
-          // Clicking the backdrop dismisses; clicking the panel must not, or
-          // every press inside the form would close it.
-          onClick={() => setAdding(false)}
-        >
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.14, ease: [0.2, 0.9, 0.3, 1] }}
-            className="window w-[min(560px,92vw)]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <QuickAdd
-              label={project.label}
-              where={`${project.folder} on ${host ? serverLabel(host) : "this machine"}`}
-              inheritedProfile={mine.find((s) => s.modelProfile)?.modelProfile}
-              busy={false}
-              target={target}
-              folder={project.folder}
-              onCancel={() => setAdding(false)}
-              onCreate={add}
-            />
-          </motion.div>
-        </motion.div>
-      )}
-
-      {/* Same reasoning as the server's: `removeProject` ends every session in
-          it, and each one sends a real kill to the host. The count is the whole
-          message — removing an empty project costs nothing, removing one with
-          two Claude sessions in it ends both. */}
-      {confirming && (
-        <div className="flex flex-col gap-1 py-1 pl-6 pr-2">
-          <span className="micro leading-relaxed" style={{ color: "var(--text-soft)" }}>
-            {mine.length > 0
-              ? `ENDS ${mine.length} SESSION${mine.length === 1 ? "" : "S"} ON THE SERVER`
-              : "REMOVES THIS PROJECT FROM THE LIST"}
-          </span>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              className="chip"
-              style={{ color: "rgb(var(--primary))" }}
+      {/* Project actions: the verbs the inline icons cover, plus rename and
+          remove. Rename swaps into an inline input; remove confirms in place,
+          naming the folder and the consequence. */}
+      {menu && (
+        <RailMenu target={menu} onClose={() => setMenu(null)}>
+          <div className="flex flex-col">
+            <RailMenuItem
+              label="Open files"
               onClick={() => {
-                setConfirming(false);
-                removeProject(project.id);
+                setMenu(null);
+                openFiles(project.id);
               }}
-            >
-              remove it
-            </button>
-            <button type="button" className="chip" onClick={() => setConfirming(false)}>
-              cancel
-            </button>
+            />
+            <RailMenuItem
+              label="New terminal"
+              onClick={() => {
+                setMenu(null);
+                add("terminal");
+              }}
+            />
+            <RailMenuItem
+              label="New Claude"
+              onClick={() => {
+                setMenu(null);
+                add("claude");
+              }}
+            />
+            <RailMenuItem
+              label="Import session…"
+              onClick={() => {
+                setMenu(null);
+                onImport();
+              }}
+            />
+            <hr className="hairline my-1" />
+            {confirming ? (
+              <div className="flex flex-col gap-2 p-2">
+                <p className="data text-[11px]">
+                  Remove <span style={{ color: "rgb(var(--primary))" }}>{project.label}</span>?
+                </p>
+                <p className="micro">its sessions will be ended on the server</p>
+                <div className="flex gap-2">
+                  <button
+                    className="btn btn-primary flex-1"
+                    type="button"
+                    onClick={() => {
+                      setMenu(null);
+                      setConfirming(false);
+                      removeProject(project.id);
+                    }}
+                  >
+                    Remove
+                  </button>
+                  <button className="btn" type="button" onClick={() => setConfirming(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <RailMenuItem
+                  label="Rename"
+                  onClick={() => {
+                    setMenu(null);
+                    setRenaming(true);
+                  }}
+                />
+                <RailMenuItem label="Remove project" destructive onClick={() => setConfirming(true)} />
+              </>
+            )}
           </div>
-        </div>
+        </RailMenu>
       )}
 
       {/* Children hang off a vertical guide line, as in the reference. */}
@@ -556,6 +733,7 @@ function ProjectNode({
                 onScreen={onScreen.has(session.id)}
                 onOpen={() => openSession(session.id)}
                 onKill={() => removeSession(session.id)}
+                onImport={onImport}
               />
             ))}
           </motion.div>
@@ -589,7 +767,6 @@ function ServerNode({
   const runtime = useWorkspace((s) => s.runtime);
   const openHost = useWorkspace((s) => s.openHost);
   const removeServer = useWorkspace((s) => s.removeServer);
-  const [confirming, setConfirming] = useState(false);
 
   const projectIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
   const mine = useMemo(
@@ -609,6 +786,23 @@ function ServerNode({
     return waiting ? "waiting" : "idle";
   }, [mine, runtime]);
 
+  const [menu, setMenu] = useState<RailMenuTarget | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  const [sessions, setSessions] = useState<RunningSession[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const adoptServerSession = useWorkspace((s) => s.adoptServerSession);
+
+  useEffect(() => {
+    if (!attaching) return;
+    setLoading(true);
+    api.serverSessions(server.target)
+      .then((s) => { setSessions(s); setError(null); })
+      .catch(() => setError("couldn't reach host"))
+      .finally(() => setLoading(false));
+  }, [attaching, server.target]);
+
   return (
     <div className="mb-1">
       {/* Server card — accent bar, status dot, bold name; the HOST / + verbs. */}
@@ -617,6 +811,10 @@ function ServerNode({
         style={{
           background: "color-mix(in srgb, var(--text) 6%, transparent)",
           boxShadow: "inset 3px 0 0 var(--text-soft)",
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
         }}
       >
         <button type="button" className="shrink-0" onClick={onToggle} aria-expanded={!folded}>
@@ -650,51 +848,96 @@ function ServerNode({
         >
           <PlusIcon />
         </button>
-        {/* Hidden until the row is hovered, like the session's close: a
-            destructive control sitting permanently beside HOST and + would be
-            the easiest thing on the row to hit by accident. */}
-        <button
-          type="button"
-          onClick={() => setConfirming(true)}
-          aria-label={`Remove ${serverLabel(server)}`}
-          title="Remove this server"
-          className="shrink-0 px-1 opacity-0 group-hover/srv:opacity-70 hover:!opacity-100"
-          style={{ color: "var(--text-soft)" }}
-        >
-          <CloseIcon />
-        </button>
       </div>
 
-      {/*
-        Removing a server is not "hide it from the list": `removeServer`
-        cascades to its projects and then to its sessions, and each of those
-        sends a real kill to the host. So the counts are stated before the
-        press — "3 sessions" is the difference between tidying the rail and
-        ending three running conversations, and nothing else on screen says it.
-      */}
-      {confirming && (
-        <div className="mx-1.5 flex flex-col gap-1 px-2.5 py-2">
-          <span className="micro leading-relaxed" style={{ color: "var(--text-soft)" }}>
-            {mine.length > 0
-              ? `ENDS ${mine.length} SESSION${mine.length === 1 ? "" : "S"} AND ${projects.length} PROJECT${projects.length === 1 ? "" : "S"} ON THE SERVER`
-              : "REMOVES THIS SERVER FROM THE LIST"}
-          </span>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              className="chip"
-              style={{ color: "rgb(var(--primary))" }}
+      {menu && (
+        <RailMenu target={menu} onClose={() => setMenu(null)}>
+          <div className="flex flex-col">
+            <RailMenuItem
+              label="Disconnect"
               onClick={() => {
-                setConfirming(false);
-                removeServer(server.id);
+                setMenu(null);
+                api.serverDisconnect(server.target);
               }}
-            >
-              remove it
-            </button>
-            <button type="button" className="chip" onClick={() => setConfirming(false)}>
-              cancel
+            />
+            <RailMenuItem
+              label="Attach to running session…"
+              onClick={() => {
+                setMenu(null);
+                setAttaching(true);
+              }}
+            />
+            <hr className="hairline my-1" />
+            {confirming ? (
+              <div className="flex flex-col gap-2 p-2">
+                <p className="data text-[11px]">
+                  Remove <span style={{ color: "rgb(var(--primary))" }}>{serverLabel(server)}</span>?
+                </p>
+                <p className="micro">its sessions will be ended on the server</p>
+                <div className="flex gap-2">
+                  <button
+                    className="btn btn-primary flex-1"
+                    type="button"
+                    onClick={() => {
+                      setMenu(null);
+                      setConfirming(false);
+                      removeServer(server.id);
+                    }}
+                  >
+                    Remove
+                  </button>
+                  <button className="btn" type="button" onClick={() => setConfirming(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <RailMenuItem label="Remove server" destructive onClick={() => setConfirming(true)} />
+            )}
+          </div>
+        </RailMenu>
+      )}
+
+      {/* Task 6: the attach-to-running picker consumes `attaching`. */}
+      {attaching && (
+        <div className="mx-1.5 mb-1 rounded-none border p-2" style={{ borderColor: "var(--border)" }}>
+          <div className="flex items-center justify-between px-1 pb-1">
+            <span className="micro">RUNNING SESSIONS ON HOST</span>
+            <button type="button" className="chip" onClick={() => setAttaching(false)}>
+              close
             </button>
           </div>
+          {sessions.length === 0 && !loading && !error ? (
+            <p className="micro px-1" style={{ color: "var(--text-faint)" }}>
+              none running
+            </p>
+          ) : error ? (
+            <p className="micro px-1" style={{ color: "var(--text-faint)" }}>
+              {error}
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-px">
+              {sessions.map((s) => (
+                <li key={s.name}>
+                  <button
+                    type="button"
+                    className="data w-full px-1 py-[4px] text-left text-[11px]"
+                    onClick={() => {
+                      // `s.name` is the real daemon key; the alias is display
+                      // only, so `adoptServerSession` always gets the key.
+                      adoptServerSession(server.id, s.name, isClaudeSession(s.command) ? "claude" : "terminal");
+                      setAttaching(false);
+                    }}
+                  >
+                    <span className="truncate">{s.alias ?? s.name}</span>
+                    <span className="micro" style={{ color: "var(--text-faint)" }}>
+                      {s.attached ? " · attached" : " · idle"} · {s.ageSeconds}s
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
@@ -705,6 +948,10 @@ function ServerNode({
             project={project}
             folded={foldedNodes.has(project.id)}
             onToggle={() => onToggleProject(project.id)}
+            onImport={() => {
+              setMenu(null);
+              setAttaching(true);
+            }}
           />
         ))}
       {!folded && projects.length === 0 && (
