@@ -31,45 +31,69 @@
 - Test: `src-tauri/tests/server_disconnect.rs` (new integration test, compiled only when a Tauri test harness exists — see below)
 
 **Interfaces:**
-- Produces: `pub async fn server_disconnect<R: tauri::Runtime>(store: State<'_, ServerStore>, terminal: State<'_, TerminalStore>, claude: State<'_, ClaudeStore>, agent: State<'_, crate::agent::AgentStore>, target: TargetRef) -> Result<(), String>`
-- Consumes: `TerminalStore.targets` (`src-tauri/src/terminal.rs:28-34`), `ClaudeStore.targets` (`src-tauri/src/claude.rs:20-24`), `AgentStore.by_target` (`src-tauri/src/agent.rs:18-24`), `TargetRef::id()` (`src-tauri/src/terminal.rs:49-60`).
+- Produces: `pub async fn server_disconnect<R: tauri::Runtime>(terminal: State<'_, TerminalStore>, claude: State<'_, ClaudeStore>, agent: State<'_, crate::agent::AgentStore>, target: TargetRef) -> Result<(), String>`
+- Consumes: `TerminalStore::evict_target` / `ClaudeStore::evict_target` accessors (see below), `AgentStore` accessor, `TargetRef::id()` (`src-tauri/src/terminal.rs:49-60`).
+
+**Note — private store fields.** The `targets`/`by_target` fields on `TerminalStore` (`src-tauri/src/terminal.rs:33`), `ClaudeStore` (`src-tauri/src/claude.rs:23`) and `AgentStore` (`src-tauri/src/agent.rs:23`) are **private**, so `server.rs` cannot touch them directly. Add crate-visible accessor methods on each store (same file, next to the store):
+
+- `TerminalStore`: `pub(crate) fn evict_target(&self, id: &TargetId) -> bool` — `self.targets.lock().remove(id).is_some()`.
+- `ClaudeStore`: `pub(crate) fn evict_target(&self, id: &TargetId) -> bool` — same shape.
+- `AgentStore`: `pub(crate) fn forget(&self, id: &TargetId) -> bool` — `self.by_target.lock().remove(id).is_some()`.
+
+Then `server_disconnect` calls those accessors instead of reaching into the fields. `TargetRef` and `TargetId` are already `pub(crate)` in `crate::terminal` — reuse them.
 
 - [ ] **Step 1: Write the failing unit test**
 
-The `Arc<dyn Target>` maps are private to their stores, so the test asserts the observable behaviour: after `server_disconnect`, a `resolve_target` for that target must **re-create** the connection (i.e. the target is no longer cached). Use a `ServerStore` with a `resolve` that records cache hits. Add `src-tauri/tests/server_disconnect.rs`:
+The eviction is a store-accessor concern. Test each accessor's observable effect:
+after `evict_target(id)`, a `resolve` for that id must **not** hit the cache (the
+entry is gone). Add `src-tauri/tests/server_disconnect.rs`:
 
 ```rust
-//! `server_disconnect` must evict the cached target so the ControlMaster drops
-//! and the next use reconnects. Tested against the store maps directly.
+//! `evict_target` / `forget` must drop a cached target so the ControlMaster
+//! closes and the next resolve reconnects. Tested against the store maps.
 
 use std::sync::Arc;
-use parking_lot::Mutex;
-use std::collections::HashMap;
 use rmux_transport::{Target, TargetId};
+use rmux_transport::local::LocalTarget;
 
-// A stub target that counts how many instances exist.
-#[derive(Default)]
-struct CountingTarget { count: Arc<std::sync::atomic::AtomicUsize> }
-impl CountingTarget {
-    fn new(count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Self { count }
-    }
+// This is an integration test in its own crate, so the store comes from the
+// `rmux` library crate. The `TerminalStore` / `ClaudeStore` / `AgentStore`
+// types are `pub`; the accessors must be `pub` too for the test to reach them
+// (see the note below — this forces option 1).
+use rmux::terminal::TerminalStore;
+
+// LocalTarget is a cheap real target that needs no network to construct, and
+// evicting it proves the map entry is gone without an SSH round trip.
+
+#[test]
+fn evict_target_removes_entry() {
+    // The store starts empty: evicting an absent id is a no-op (returns false).
+    let store = TerminalStore::default();
+    let id = TargetId::Local;
+    assert_eq!(store.evict_target(&id), false);
+
+    // Insert a target, evict it, and assert the entry is gone.
+    store.insert_for_test(TargetId::Local, Arc::new(LocalTarget::new()));
+    assert_eq!(store.evict_target(&id), true);
+    assert_eq!(store.evict_target(&id), false); // already gone — no-op
 }
-// (implement rmux_transport::Target for CountingTarget — see the existing
-//  SshTarget / LocalTarget impls for the required methods; a minimal impl that
-//  returns canned values for everything is fine for this test)
-
-// The real eviction logic lives in src-tauri/src/server.rs as a free function
-// so it can be tested without booting Tauri:
-//   pub fn evict(id: &TargetId, stores: &mut [&mut HashMap<TargetId, Arc<dyn Target>>]) -> bool
-// which removes `id` from every map and returns whether anything was removed.
 ```
+
+**Note on `insert_for_test`:** to insert a target into the private map from an
+integration test (a separate crate, so `#[cfg(test)]` items are NOT visible),
+add a plain `pub fn insert_for_test(&self, id: TargetId, target: Arc<dyn Target>)`
+on `TerminalStore` that pushes into the map. It is small, only used by tests,
+and always compiled — acceptable for the store's own test seam. Same for the
+accessors: because the integration test calls `store.evict_target(...)`, the
+accessors must be `pub`, not `pub(crate)` — this forces option 1 from above.
+`TargetRef`/`TargetId` are `pub(crate)` in `crate::terminal`, which the command
+can use; the integration test needs `TargetId` which is `pub` in
+`rmux_transport`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p rmux --test server_disconnect`
-Expected: FAIL — `evict` is not defined.
+Expected: FAIL — `evict_target` is not defined.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -79,29 +103,12 @@ Create `src-tauri/src/server.rs`:
 //! Server-level IPC: disconnecting a server (drop the SSH connection) and
 //! listing sessions already running on it.
 
-use std::sync::Arc;
-use parking_lot::Mutex;
-use std::collections::HashMap;
-use rmux_transport::{Target, TargetId};
+use rmux_transport::TargetId;
 use tauri::State;
 
 use crate::agent::AgentStore;
 use crate::claude::ClaudeStore;
 use crate::terminal::{TargetRef, TerminalStore};
-
-/// Remove `id` from every target map. Returns whether any entry was dropped.
-/// Dropping the last `Arc<SshTarget>` tears down the ControlMaster (mux.rs),
-/// closing the multiplexed SSH connection — sessions on the host keep running.
-pub fn evict(
-    id: &TargetId,
-    terminal: &Mutex<HashMap<TargetId, Arc<dyn Target>>>,
-    claude: &Mutex<HashMap<TargetId, Arc<dyn Target>>>,
-) -> bool {
-    let mut removed = false;
-    if terminal.lock().remove(id).is_some() { removed = true; }
-    if claude.lock().remove(id).is_some() { removed = true; }
-    removed
-}
 
 /// Disconnect a server: drop the cached SSH target(s) so the ControlMaster
 /// closes. Sessions keep running on the host. A `LocalTarget` is a no-op.
@@ -113,13 +120,55 @@ pub async fn server_disconnect(
     target: TargetRef,
 ) -> Result<(), String> {
     let id = target.id();
-    // AgentStore holds `OnceCell<Installed>`, keyed by TargetId — forget it so a
-    // later use re-probes rather than trusting a stale install.
-    agent.by_target.lock().remove(&id);
-    evict(&id, &terminal.targets, &claude.targets);
+    // Forget the provisioning cache so a later use re-probes rather than
+    // trusting a stale install, then drop the SSH targets from both stores.
+    agent.forget(&id);
+    terminal.evict_target(&id);
+    claude.evict_target(&id);
     Ok(())
 }
 ```
+
+**Step 3 also adds the store accessors** (in their own files, next to each store):
+
+In `src-tauri/src/terminal.rs`, inside `impl TerminalStore`:
+
+```rust
+/// Drop the cached target for `id`, if any. Returns whether an entry was
+/// removed. Dropping the last `Arc<SshTarget>` tears down the ControlMaster,
+/// closing the multiplexed SSH connection — sessions keep running on the host.
+pub fn evict_target(&self, id: &TargetId) -> bool {
+    self.targets.lock().remove(id).is_some()
+}
+
+/// Test seam: put a target into the cache so a test can assert eviction removes it.
+pub fn insert_for_test(&self, id: TargetId, target: Arc<dyn Target>) {
+    self.targets.lock().insert(id, target);
+}
+```
+
+In `src-tauri/src/claude.rs`, inside `impl ClaudeStore`:
+
+```rust
+pub fn evict_target(&self, id: &TargetId) -> bool {
+    self.targets.lock().remove(id).is_some()
+}
+```
+
+In `src-tauri/src/agent.rs`, inside `impl AgentStore`:
+
+```rust
+/// Forget a host's provisioning result so the next use re-probes the remote
+/// rather than trusting a stale install.
+pub fn forget(&self, id: &TargetId) -> bool {
+    self.by_target.lock().remove(id).is_some()
+}
+```
+
+These are `pub` (not `pub(crate)`) because the integration test in
+`src-tauri/tests/server_disconnect.rs` is a separate crate and calls them
+directly. `insert_for_test` is small and always compiled — it is the store's
+own test seam. Add `use rmux_transport::TargetId;` where each accessor lives.
 
 **Note:** the `AgentStore.by_target` field is `Mutex<HashMap<TargetId, Arc<OnceCell<Installed>>>>`. `targets` fields on `TerminalStore`/`ClaudeStore` are `Mutex<HashMap<TargetId, Arc<dyn Target>>>`. `TargetRef` and its `id()` live in `crate::terminal` (they are `pub(crate)` — if the command needs them `pub`, promote them in the same commit).
 
