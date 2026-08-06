@@ -7,6 +7,7 @@ import { WorkspaceNewSessionLayer, type NewMode } from "../components/WorkspaceN
 import { WorkspaceDeck } from "../components/WorkspaceDeck";
 import { WorkspaceRail } from "../components/WorkspaceRail";
 import { WidgetRail, type Active } from "../components/WidgetRail";
+import { AlertStack } from "../components/AlertStack";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
 import { useWorkspace } from "../lib/workspace";
 import { startStatusWatch } from "../lib/status-watch";
@@ -234,7 +235,8 @@ export function Workbench({
             </button>
           </div>
         </footer>
-      </div>
+            <AlertStack />
+</div>
 
       <ErrorBoundary label="New" onReset={() => setNewMode(null)}>
         <WorkspaceNewSessionLayer mode={newMode} onClose={() => setNewMode(null)} />

@@ -28,6 +28,7 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
   const host = useWorkspace((s) => s.serverOf(sessionId)?.target.host);
   const configure = useWorkspace((s) => s.configureSession);
   const setModelProfile = useWorkspace((s) => s.setModelProfile);
+  const setFullscreen = useWorkspace((s) => s.setFullscreen);
 
   const [profiles, setProfiles] = useState<JiraProfile[] | null>(null);
   const [profile, setProfile] = useState("");
@@ -127,6 +128,48 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
           <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
             Takes effect the next time this session's Claude starts — restart the Claude tab to
             switch provider. Profiles are managed under Settings › Models.
+          </span>
+        </div>
+
+        {/*
+          **Moved here out of the Claude tab's header.**
+
+          It restarts the conversation to take effect, and in that header it sat
+          a stray click from INTERRUPT — a control with a real cost, at the
+          busiest point in the app, reached mid-run. It is also decided once per
+          session rather than adjusted while working, which is what this tab is
+          for.
+
+          Inline is the default and should stay it: fullscreen moves Claude to
+          the alternate screen and takes the mouse, so selection, Cmd-C and
+          native scrolling all stop working — the three symptoms that made this
+          pane close to unusable before. The label says what is lost rather than
+          naming the mode, because "fullscreen" does not tell anyone that.
+        */}
+        <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+          <span className="micro">CLAUDE RENDERING</span>
+          <div className="flex gap-2">
+            {([false, true] as const).map((mode) => (
+              <button
+                key={String(mode)}
+                type="button"
+                className="chip"
+                onClick={() => session && setFullscreen(session.id, mode)}
+                style={{
+                  flex: "1 1 0",
+                  color: !!session?.fullscreen === mode ? "var(--text)" : "var(--text-faint)",
+                  background: !!session?.fullscreen === mode ? "var(--hover)" : "transparent",
+                  textDecoration: !!session?.fullscreen === mode ? "underline" : "none",
+                }}
+              >
+                {mode ? "FULLSCREEN TUI" : "INLINE"}
+              </button>
+            ))}
+          </div>
+          <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+            Inline keeps selection, Cmd-C and native scrolling. Claude's fullscreen TUI takes the
+            mouse, so all three stop working — choose it only for its in-TUI scrolling or /focus.
+            Takes effect the next time this session's Claude starts.
           </span>
         </div>
 

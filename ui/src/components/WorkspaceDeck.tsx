@@ -117,7 +117,15 @@ export function WorkspaceDeck() {
                     ? "1px solid color-mix(in srgb, var(--text) 45%, transparent)"
                     : "1px solid transparent",
               outlineOffset: -1,
-              background: pane ? undefined : "var(--app-bg)",
+              // **An empty cell is a panel, not a hole.** This carried
+              // `background: var(--app-bg)` — the app's *opaque* base — while
+              // every filled cell is a translucent `.panel`. Over the desktop,
+              // or under native glass, that is a solid black rectangle in the
+              // middle of a translucent window, and it reads as exactly the
+              // rendering fault it looks like. The `.panel` class on this
+              // element already paints it, so there is nothing to substitute:
+              // dropping the override lets it track the tint, the glass overlay
+              // and everything else the appearance settings move.
             }}
           >
             {pane ? (
