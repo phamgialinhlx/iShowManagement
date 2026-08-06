@@ -5,6 +5,7 @@ import type { SessionV3 } from "../lib/workspace-model";
 import { ClaudePanel } from "./ClaudePanel";
 import { TranscriptView } from "./TranscriptView";
 import { JiraPanel } from "./JiraPanel";
+import { FilesPane } from "./FilesPane";
 
 /**
  * A Claude session pane: the live TUI is the pane. **Transcript** and **Jira**
@@ -19,7 +20,7 @@ import { JiraPanel } from "./JiraPanel";
  * mount on demand and unmount when hidden, so their polling stops when they are
  * not on screen (the "a widget switched off must not run" rule).
  */
-type View = "claude" | "transcript" | "jira";
+type View = "claude" | "transcript" | "jira" | "files";
 
 /** Rule 3: inline SVG, Lucide-style, square caps — no glyph font, no emoji. */
 function Icon({ d, size = 14 }: { d: string; size?: number }) {
@@ -65,6 +66,7 @@ function IconButton({
 }
 
 const TRANSCRIPT_PATH = "M4 6h16M4 10h16M4 14h10M4 18h7"; // stacked lines = a transcript
+const FOLDER_PATH = "M3 6v13h18V8h-9l-2-2H3z"; // folder = this project's files
 const BOARD_PATH = "M4 4h16v16H4zM10 4v16M16 4v16"; // kanban columns = Jira
 const BACK_PATH = "M15 5l-7 7 7 7"; // ← return to the conversation
 
@@ -75,15 +77,22 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
   const [view, setView] = useState<View>("claude");
 
   const hasJira = !!session.jiraProject;
-  // A saved Jira view that no longer applies falls back to Claude.
-  const active: View = view === "jira" && !hasJira ? "claude" : view;
+  // A view whose target no longer applies falls back to Claude.
+  const active: View =
+    (view === "jira" && !hasJira) || (view === "files" && !project) ? "claude" : view;
 
-  // The transcript (and Jira) entry points, living on Claude's status line.
+  // Entry points living on Claude's status line: transcript, this project's
+  // files, and Jira. Each opens a sub-view with a `←` back to the conversation.
   const headerActions = (
     <>
       <IconButton label="Open the transcript" onClick={() => setView("transcript")}>
         <Icon d={TRANSCRIPT_PATH} />
       </IconButton>
+      {project && (
+        <IconButton label={`Open files · ${folder}`} onClick={() => setView("files")}>
+          <Icon d={FOLDER_PATH} />
+        </IconButton>
+      )}
       {hasJira && (
         <IconButton label={`Jira · ${session.jiraProject}`} onClick={() => setView("jira")}>
           <Icon d={BOARD_PATH} />
@@ -113,6 +122,12 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
         {active === "transcript" && (
           <BackView label="TRANSCRIPT" onBack={() => setView("claude")}>
             <TranscriptView target={target} folder={folder} resume={session.resume} />
+          </BackView>
+        )}
+
+        {active === "files" && project && (
+          <BackView label={`FILES · ${folder}`} onBack={() => setView("claude")}>
+            <FilesPane projectId={project.id} />
           </BackView>
         )}
 
