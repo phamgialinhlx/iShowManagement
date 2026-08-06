@@ -30,6 +30,7 @@ mod lock;
 mod logs;
 mod model_profile;
 mod services;
+mod server;
 mod settings_window;
 mod ssh_keys;
 mod theme;
@@ -217,6 +218,7 @@ pub fn run() {
             claude::claude_list_all_sessions,
             claude::claude_transcript,
             claude::claude_end_session,
+            server::server_disconnect,
             claude_account::claude_account_status,
             claude_account::claude_account_save,
             claude_account::claude_account_forget,

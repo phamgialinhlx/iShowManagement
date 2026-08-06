@@ -14,6 +14,14 @@ use rmux_transport::{Target, TargetId};
 use tauri::Manager;
 use tokio::sync::OnceCell;
 
+impl AgentStore {
+    /// Forget a host's provisioning result so the next use re-probes the remote
+    /// rather than trusting a stale install.
+    pub fn forget(&self, id: &TargetId) -> bool {
+        self.by_target.lock().remove(id).is_some()
+    }
+}
+
 /// Provisioning results, one per target.
 #[derive(Default)]
 pub struct AgentStore {
