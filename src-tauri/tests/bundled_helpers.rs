@@ -20,6 +20,65 @@
 
 use serde_json::Value;
 
+/// Every staged agent must be built from the *current* version.
+///
+/// The agents are produced by `scripts/build-agents.sh`, which is a separate
+/// step nothing runs for you — so a version bump leaves last week's binaries
+/// sitting in `agents/` looking perfectly fine. `provision::ensure` compares the
+/// uploaded agent's own `version` against the client's `CARGO_PKG_VERSION` and
+/// refuses on a mismatch, so the result is that **every remote session fails**
+/// with "the uploaded agent reported 0.1.6, expected 0.2.7" — a message that
+/// reads like a corrupted upload rather than a build step nobody ran.
+///
+/// That shipped. The reasoning that produced it was "the merge changed no agent
+/// code, so the agents do not need rebuilding", which is true of the code and
+/// false of the *version* — it is compiled in through `env!`.
+///
+/// The check is byte-presence rather than executing them: three of the four are
+/// cross-compiled for Linux and cannot run on the machine doing the building,
+/// and a guard that only covers the one native binary would miss exactly the
+/// ones that go to hosts. A binary built at 0.1.6 does not contain "0.2.7".
+///
+/// Absence is not a failure, per this file's convention: these are build
+/// outputs, and a test that fails on a clean checkout is one people learn to
+/// ignore. It fails only when a *stale* binary is present, which is the case
+/// that reaches users.
+#[test]
+fn every_staged_agent_carries_the_current_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agents");
+
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return; // never built here
+    };
+
+    let mut checked = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("rmux-agent") {
+            continue; // PLACEHOLDER.txt and anything else
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+
+        let needle = version.as_bytes();
+        let present = bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            present,
+            "{name} does not contain {version:?}, so it was built from an older \
+             version and every host will refuse it. Re-run scripts/build-agents.sh \
+             (it needs zig + cargo-zigbuild) and rebuild the bundle."
+        );
+        checked += 1;
+    }
+
+    // A directory holding only `PLACEHOLDER.txt` would otherwise pass silently
+    // while shipping no agent at all.
+    if dir.join("rmux-agent.exe").exists() || dir.join("rmux-agent").exists() {
+        assert!(checked > 0, "agents/ has a host agent but nothing was checked");
+    }
+}
+
 fn conf() -> Value {
     let raw = include_str!("../tauri.conf.json");
     serde_json::from_str(raw).expect("tauri.conf.json must be valid JSON")

@@ -306,10 +306,12 @@ export function ClaudePanel({
       // Canvas/DOM fallback is automatic; slower, but it renders.
     }
 
-    // Copy and paste are xterm's own; this only adds select-all. Claude's TUI
-    // turns on mouse reporting, so a plain drag goes to Claude rather than
-    // selecting — hold Option to select, then ⌘C.
-    attachClipboard(xterm);
+    // Copy and paste are xterm's own; this adds select-all, and off macOS the
+    // Ctrl+C rule. Claude's TUI turns on mouse reporting, so a plain drag goes
+    // to Claude rather than selecting — hold Option (macOS) or **Shift**
+    // (Windows/Linux) to select, or use SELECT in the header. Returns a
+    // disposer; see the note in Terminal.tsx.
+    const clipboard = attachClipboard(xterm);
 
     // Vietnamese and every other IME that rewrites what it already typed.
     // macOS Telex fires no composition events at all — it inserts the plain
@@ -517,6 +519,7 @@ export function ClaudePanel({
     return () => {
       disposed = true;
       observer.disconnect();
+      clipboard();
       ime.dispose();
       settle.dispose();
       window.removeEventListener("storage", onAppearance);

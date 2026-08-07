@@ -170,6 +170,66 @@ setTimeout(async () => {
   pressCtrlC();
   await new Promise((r) => setTimeout(r, 120));
   say(`ctrl+c with no selection sends SIGINT: ${sent.includes("\x03")} (${JSON.stringify(sent)})`);
+
+  // --- Ctrl+C while focus is NOT on the terminal ----------------------------
+  //
+  // `attachCustomKeyEventHandler` only fires for keys delivered to xterm's
+  // textarea, so once focus moves — a header button, the padding around the
+  // rows — the key lands on `document` and the terminal never hears it. Right-
+  // click › Copy keeps working the whole time, because the native menu raises a
+  // `copy` event xterm answers regardless of focus. That asymmetry is what gets
+  // reported as "the mouse can copy and the keyboard cannot".
+  const outside = document.createElement("button");
+  outside.textContent = "elsewhere";
+  document.body.append(outside);
+
+  const pressCtrlCOutside = () => {
+    outside.focus();
+    outside.dispatchEvent(keyEvent({ ctrlKey: true }));
+  };
+
+  term.selectAll();
+  copied = "";
+  sent = "";
+  pressCtrlCOutside();
+  await new Promise((r) => setTimeout(r, 150));
+  say(
+    `ctrl+c with focus off the terminal: copied ${copied.length} chars, sent ${JSON.stringify(sent)}` +
+      (isWindows ? "" : " (fallback is non-mac only; no copy expected here)"),
+  );
+  if (isWindows) {
+    say(`  copied the selection anyway: ${copied.length > 0}`);
+    say(`  did not send an interrupt: ${!sent.includes("\x03")}`);
+  }
+
+  // And it must not fire when there is nothing selected, or a keystroke aimed
+  // at nothing would start swallowing interrupts from outside the pane.
+  term.clearSelection();
+  copied = "";
+  pressCtrlCOutside();
+  await new Promise((r) => setTimeout(r, 150));
+  say(`  stays out of the way with no selection: ${copied.length === 0}`);
+
+  // A real DOM selection belongs to the browser's own copy — taking it here
+  // would copy the terminal instead of the words under the cursor.
+  const prose = document.createElement("p");
+  prose.textContent = "ordinary prose the operator highlighted";
+  prose.style.userSelect = "text";
+  document.body.append(prose);
+  const range = document.createRange();
+  range.selectNodeContents(prose);
+  window.getSelection()?.removeAllRanges();
+  window.getSelection()?.addRange(range);
+
+  term.selectAll();
+  copied = "";
+  pressCtrlCOutside();
+  await new Promise((r) => setTimeout(r, 150));
+  say(`  yields to a real DOM selection: ${copied.length === 0}`);
+  window.getSelection()?.removeAllRanges();
+  outside.remove();
+  prose.remove();
+
   tap.dispose();
 
   // --- select mode: does disabling reporting locally actually stop it? ------

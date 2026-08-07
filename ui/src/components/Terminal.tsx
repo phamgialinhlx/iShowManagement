@@ -128,7 +128,10 @@ export function TerminalView({
       // Canvas/DOM fallback is automatic.
     }
 
-    attachClipboard(xterm);
+    // Returns a disposer: it also installs a window-level fallback for Ctrl+C
+    // arriving while focus is off the terminal, which must come off with the
+    // pane or every closed tab leaves a listener holding a dead xterm.
+    const clipboard = attachClipboard(xterm);
 
     // Same IME path as the Claude pane — see `lib/ime-replace.ts`. A shell
     // prompt has the same problem: the letter is already on the wire, so a
@@ -325,6 +328,7 @@ export function TerminalView({
     return () => {
       disposed = true;
       observer.disconnect();
+      clipboard();
       ime.dispose();
       settle.dispose();
       window.removeEventListener("storage", onAppearance);
