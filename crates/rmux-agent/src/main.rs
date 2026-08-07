@@ -3,6 +3,9 @@
 //! ```text
 //! rmux-agent attach --session api --cwd /srv/api   # create or reattach
 //! rmux-agent daemon                                 # the host (started on demand)
+//! rmux-agent kill api                               # end a session for good
+//! rmux-agent alias api webapp                       # map a display alias to a session
+//! rmux-agent list                                   # what is running
 //! rmux-agent version
 //! ```
 //!
@@ -68,6 +71,22 @@ async fn main() -> ExitCode {
             }
         }
 
+        "alias" => {
+            let key = args.get(1).cloned().unwrap_or_default();
+            let alias = args.get(2).cloned().unwrap_or_default();
+            if key.is_empty() || alias.is_empty() {
+                eprintln!("rmux-agent: alias needs a session name and an alias");
+                return ExitCode::FAILURE;
+            }
+            match attach::alias(&key, &alias).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("rmux-agent: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
         // Reads `KEY=VALUE` lines from stdin. Never takes them as arguments —
         // see `attach::set_env`.
         "setenv" => {
@@ -98,14 +117,16 @@ async fn main() -> ExitCode {
         // What is this daemon running? Printed as one NUL-free line per
         // session so a caller can split on newlines and tabs — the same
         // reasoning as `rmux-fs`, except a session name is ours and cannot
-        // contain either.
+        // contain either. The alias column is a display name mapped to the key
+        // by `alias`; a dash means none.
         "list" => {
             match attach::list().await {
                 Ok(sessions) => {
                     for s in sessions {
                         println!(
-                            "{}\t{}\t{}\t{}\t{}",
+                            "{}\t{}\t{}\t{}\t{}\t{}",
                             s.name,
+                            s.alias.as_deref().unwrap_or("-"),
                             s.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
                             s.age_seconds,
                             if s.attached { "attached" } else { "detached" },
@@ -126,7 +147,7 @@ async fn main() -> ExitCode {
         }
 
         _ => {
-            eprintln!("usage: rmux-agent <attach|daemon|kill|list|setenv|version> [--session NAME] [--cwd DIR]");
+            eprintln!("usage: rmux-agent <attach|daemon|kill|alias|list|setenv|version> [--session NAME] [--cwd DIR]");
             ExitCode::FAILURE
         }
     }

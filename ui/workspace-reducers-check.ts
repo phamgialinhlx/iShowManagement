@@ -11,7 +11,7 @@ import {
   closePane,
   type Core,
 } from "./src/lib/workspace-reducers.ts";
-import { serverId } from "./src/lib/workspace-model.ts";
+import { isClaudeSession, reattachName, serverId } from "./src/lib/workspace-model.ts";
 
 /**
  * The invariants the workspace store's pure transitions must keep. The Zustand
@@ -156,6 +156,24 @@ export function run(log: (line: string) => void): boolean {
     check("projects stay (the store cascades removeProject first)",
       removed.projects.some((p) => p.id === pid));
     check("removing an unknown server is a no-op", removeServerCore(ws, "nope") === ws);
+  }
+
+  // ── Session-kind detection off the daemon's `command`, not the name ────────
+  {
+    check("a claude login command is Claude", isClaudeSession("claude --resume abc"));
+    check("a bare claude command is Claude", isClaudeSession("claude"));
+    check("a shell is not Claude", !isClaudeSession("bash"));
+    check("an absent command is not Claude", !isClaudeSession(undefined));
+    check("a null command is not Claude", !isClaudeSession(null));
+  }
+
+  // ── Reattach names: the daemon key a Session attaches by ───────────────────
+  {
+    const term = { id: "term-1", kind: "terminal" as const };
+    const claude = { id: "session-x", kind: "claude" as const };
+    check("a terminal reattaches verbatim", reattachName(term) === "term-1");
+    check("a claude session reattaches with the claude- prefix",
+      reattachName(claude) === "claude-session-x");
   }
 
   log("");

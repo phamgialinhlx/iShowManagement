@@ -221,6 +221,7 @@ pub fn run() {
             claude::claude_end_session,
             server::server_disconnect,
             server::server_sessions,
+            server::server_alias,
 
             claude_account::claude_account_status,
             claude_account::claude_account_save,

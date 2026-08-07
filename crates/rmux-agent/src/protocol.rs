@@ -30,6 +30,7 @@ const KIND_KILL: u8 = 4;
 const KIND_SET_ENV: u8 = 5;
 const KIND_LIST: u8 = 6;
 const KIND_SESSIONS: u8 = 7;
+const KIND_ALIAS: u8 = 8;
 
 /// What an attaching client asks for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +104,16 @@ pub enum Frame {
     List,
     /// Daemon → client: everything it is running.
     Sessions(Vec<SessionSummary>),
+    /// Client → daemon: map a display alias to a live session key.
+    ///
+    /// Renaming a session must not touch the `by_name` key — that is the attach
+    /// identity, and re-keying it would disturb an attached client or another
+    /// PC that still holds the old name. An alias is additive: the key stays
+    /// `term-…`, `agent list` reports the alias, and reattaching by the alias
+    /// resolves back to the key. Terminals only; the daemon enforces the
+    /// collision rule (an alias may not shadow a live session's key or another
+    /// alias).
+    Alias { key: String, alias: String },
 }
 
 /// One session, as the daemon sees it.
@@ -115,6 +126,9 @@ pub enum Frame {
 pub struct SessionSummary {
     /// The name rmux reattaches by — `term-…` or `claude-…`.
     pub name: String,
+    /// A display alias mapped to this session, if one was set by a rename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     /// The shell's pid on the host, so the operator can find it in `ps`.
     pub pid: Option<u32>,
     /// Seconds since it was created. Age is what identifies a leak: a shell
@@ -170,6 +184,10 @@ impl Frame {
                 KIND_SET_ENV,
                 serde_json::to_vec(env).expect("an env map is always serialisable"),
             ),
+            Frame::Alias { key, alias } => (
+                KIND_ALIAS,
+                serde_json::to_vec(&(key, alias)).expect("an alias pair is always serialisable"),
+            ),
         };
 
         let mut out = Vec::with_capacity(5 + payload.len());
@@ -219,6 +237,10 @@ impl Frame {
             KIND_SET_ENV => Frame::SetEnv(serde_json::from_slice(payload)?),
             KIND_LIST => Frame::List,
             KIND_SESSIONS => Frame::Sessions(serde_json::from_slice(payload)?),
+            KIND_ALIAS => {
+                let (key, alias) = serde_json::from_slice(payload)?;
+                Frame::Alias { key, alias }
+            }
             other => anyhow::bail!("unknown frame kind {other}"),
         };
 
@@ -252,6 +274,7 @@ mod tests {
             Frame::Exited { code: 3 },
             Frame::Kill { session: "api".into() },
             Frame::SetEnv([("A".to_owned(), "b".to_owned())].into_iter().collect()),
+            Frame::Alias { key: "term-x".into(), alias: "webapp".into() },
         ] {
             let encoded = frame.encode();
             let (decoded, used) = Frame::decode(&encoded).unwrap().unwrap();

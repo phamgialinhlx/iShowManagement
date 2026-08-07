@@ -75,6 +75,8 @@ export type TargetRef = {
 /** A session the agent is running on a host, as `agent list` reports it. */
 export type RunningSession = {
   name: string;
+  /** A display alias mapped to this session by a rename, if any. */
+  alias: string | null;
   pid: number | null;
   ageSeconds: number;
   attached: boolean;
@@ -671,6 +673,10 @@ export const api = {
   serverDisconnect: (target: TargetRef) => call<void>("server_disconnect", { target }),
   /** Sessions the agent is running on a host — including ones another PC started. */
   serverSessions: (target: TargetRef) => call<RunningSession[]>("server_sessions", { target }),
+  /** Map a display alias to a running terminal session so `agent list` shows the
+   *  friendly name and reattach-by-alias works. Terminals only. */
+  serverAlias: (target: TargetRef, key: string, alias: string) =>
+    call<void>("server_alias", { target, key, alias }),
 
   claudeSessions: (target: TargetRef, folder: string) =>
     call<ClaudeSessionInfo[]>("claude_list_sessions", { target, folder }),

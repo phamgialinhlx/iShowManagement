@@ -320,8 +320,9 @@ export const useWorkspace = create<State>((set, get) => ({
 
   addSession: (projectId, kind, opts) => {
     const id = mintSessionId(kind);
-    const project = get().projects.find((p) => p.id === projectId);
-    const name = opts?.name?.trim() || (kind === "claude" ? (project?.label ?? "claude") : "shell");
+    // A Claude session's rail name is the stable minted id (`session-…`) — the
+    // reattach identity — never the project label or the auto-adopted title.
+    const name = opts?.name?.trim() || (kind === "claude" ? id : "shell");
     // `opts` first, then the authoritative fields — so a computed `name` and the
     // real id/kind/projectId win over anything the caller passed loosely.
     const ws = rAddSession(coreOf(get()), { ...opts, id, projectId, kind, name });
@@ -331,10 +332,18 @@ export const useWorkspace = create<State>((set, get) => ({
   },
 
   adoptServerSession: (serverId, name, kind) => {
+    // `name` is the real daemon key (`term-…` / `claude-…`). The picker hands
+    // it over verbatim even when it displayed an alias; the alias is display
+    // only. A row keyed by this exact key already exists → return to it.
+    const existing = get().sessions.find((x) => x.id === name);
+    if (existing) {
+      get().openSession(name);
+      return;
+    }
     const base = kind === "claude" ? name.replace(/^claude-/, "") : name;
-    const existing = get().sessions.find((x) => x.id === base);
-    if (existing && existing.hostName === name) {
-      get().openSession(base);
+    const sameHost = get().sessions.find((x) => x.hostName === name);
+    if (sameHost) {
+      get().openSession(sameHost.id);
       return;
     }
     // A locally-created session already holds this id — do not hijack it. Mint a
@@ -434,22 +443,56 @@ export const useWorkspace = create<State>((set, get) => ({
   },
 
   renameSession: (id, name) => {
-    set((s) => ({
-      sessions: s.sessions.map((x) =>
-        // `renamed` latches: Claude's own title is ignored from here on.
-        x.id === id ? { ...x, name: name.trim() || x.name, renamed: true } : x,
-      ),
-    }));
-    schedulePersist(get);
+    const alias = name.trim();
+    const s = get().sessions.find((x) => x.id === id);
+    if (!s || !alias || s.name === alias) return;
+
+    // Every rename writes the local label + latches `renamed`; a running
+    // terminal additionally registers the alias on the server so the import
+    // picker shows the friendly name and reattach-by-alias resolves to the
+    // same shell. The daemon key (`hostName`/`id`) never changes, so an open
+    // pane keeps streaming and an attached client is undisturbed.
+    const local = () => {
+      set((st) => ({
+        sessions: st.sessions.map((x) =>
+          x.id === id ? { ...x, name: alias, renamed: true } : x,
+        ),
+      }));
+      schedulePersist(get);
+    };
+
+    if (s.kind === "terminal" && isTauri()) {
+      void (async () => {
+        const target = get().targetOf(id);
+        const key = s.hostName ?? s.id; // the stable daemon key, never changes
+        try {
+          await api.serverAlias(target, key, alias);
+          local();
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          // No such running session (never opened, or already gone) — a local
+          // rename alone is right; the next open creates the session under the
+          // new name.
+          if (msg.includes("no running session")) {
+            local();
+            return;
+          }
+          // A collision or provisioning failure — report inline, leave the row
+          // untouched (every mutating control reports its outcome).
+          get().setSessionError(id, msg);
+        }
+      })();
+      return;
+    }
+    // Claude, or a terminal with no agent: local display rename only.
+    local();
   },
 
-  adoptClaudeTitle: (id, title) => {
-    const clean = title.trim();
-    if (!clean) return;
-    const current = get().sessions.find((x) => x.id === id);
-    if (!current || current.renamed || current.name === clean) return;
-    set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? { ...x, name: clean } : x)) }));
-    schedulePersist(get);
+  adoptClaudeTitle: (_id, _title) => {
+    // The Claude rail name is the stable minted id (`session-…`), never the
+    // auto-adopted transcript title — reattach identity is the id, not the
+    // title, so nothing here mutates the persisted row. `ClaudePanel` still
+    // calls this; it is now inert.
   },
 
   renameProject: (id, label) => {

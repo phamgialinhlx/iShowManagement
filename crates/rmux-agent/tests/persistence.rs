@@ -50,6 +50,24 @@ impl Sandbox {
             .spawn()
             .expect("failed to run rmux-agent")
     }
+
+    /// Map a display alias to a session, exactly as rmux's `server_alias` does.
+    fn alias(&self, key: &str, alias: &str) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_rmux-agent"))
+            .args(["alias", key, alias])
+            .env("HOME", &self.home)
+            .output()
+            .expect("failed to run rmux-agent alias")
+    }
+
+    /// `agent list`, as the import picker's `server_sessions` runs it.
+    fn list(&self) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_rmux-agent"))
+            .arg("list")
+            .env("HOME", &self.home)
+            .output()
+            .expect("failed to run rmux-agent list")
+    }
 }
 
 impl Drop for Sandbox {
@@ -191,6 +209,63 @@ fn sessions_persist_across_disconnection() {
     assert!(
         !leak.contains("LEAKED:[alpha]"),
         "state leaked between two differently-named sessions:\n{leak}"
+    );
+
+    // --- an alias makes the import picker show a rename, and attach resolves it -
+    // `work` is still running under the daemon (its client was killed earlier and
+    // never killed the shell). Rename it via the alias command — the exact wire
+    // path rmux's `server_alias` uses.
+    let alias_out = sandbox.alias("work", "renamed");
+    assert!(
+        alias_out.status.success(),
+        "alias failed: {}",
+        String::from_utf8_lossy(&alias_out.stderr)
+    );
+
+    // The daemon's list now reports the alias in the second column, so the import
+    // picker can show the friendly name without ever touching the key.
+    let list_out = sandbox.list();
+    let listing = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        listing.lines().any(|l| l.split('\t').next() == Some("work")
+            && l.split('\t').nth(1) == Some("renamed")),
+        "agent list did not report the alias. saw:\n{listing}"
+    );
+
+    // Attach by the alias: the daemon resolves alias -> key, so this reaches the
+    // SAME shell — the marker set long ago is still there.
+    let mut by_alias = sandbox.attach("renamed");
+    {
+        let stdin = by_alias.stdin.as_mut().unwrap();
+        stdin.write_all(b"echo ALIAS-RECALLED:$MARKER\n").unwrap();
+        stdin.flush().unwrap();
+    }
+    // Match the *expanded value*, not the bare label: the echoed command text
+    // (`echo ALIAS-RECALLED:$MARKER`) appears in the replayed scrollback before
+    // the shell runs it, so a label-only needle would return on the echo.
+    let via_alias = read_until(
+        &mut by_alias,
+        "ALIAS-RECALLED:survived-the-disconnect",
+        std::time::Duration::from_secs(10),
+    );
+    let _ = by_alias.kill();
+    let _ = by_alias.wait();
+
+    assert!(
+        via_alias.contains("ALIAS-RECALLED:survived-the-disconnect"),
+        "attach-by-alias did not reach the renamed shell. saw:\n{via_alias}"
+    );
+
+    // A collision is refused: you cannot shadow a live session's key.
+    let clash = sandbox.alias("work", "alpha");
+    assert!(
+        !clash.status.success(),
+        "aliasing a live session's key must be refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&clash.stderr).contains("already exists"),
+        "the refusal should say why. saw: {}",
+        String::from_utf8_lossy(&clash.stderr)
     );
 }
 

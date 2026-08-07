@@ -50,6 +50,10 @@ struct Session {
 #[derive(Default)]
 struct Sessions {
     by_name: HashMap<String, Session>,
+    /// Display alias → real session key. A rename only adds an alias; the key
+    /// never changes, so an attached client's stream and any other PC holding
+    /// the old name are undisturbed.
+    aliases: HashMap<String, String>,
     /// Environment applied to sessions created from now on.
     ///
     /// **In memory only, deliberately.** It holds credentials, and the whole
@@ -68,6 +72,52 @@ struct Sessions {
 /// is no legitimate empty value among the variables sent this way — an empty
 /// base URL or token is indistinguishable from an unset one to Claude Code — so
 /// empty is free to mean "unset", and it keeps the wire format unchanged.
+/// Resolve a session name to its real `by_name` key. A plain key passes
+/// through; an alias maps to its key.
+fn resolve_key(guard: &Sessions, name: &str) -> String {
+    guard
+        .aliases
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| name.to_owned())
+}
+
+/// Map a display alias to a live session key.
+///
+/// Refused when the alias would shadow a **live** session's key or another
+/// alias (a dead entry is fine — it will be replaced on the next attach), or
+/// when it would break the tab/newline-separated `list` wire format. `alias ==
+/// key` is a no-op success.
+fn set_alias(guard: &mut Sessions, key: &str, alias: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!alias.is_empty(), "an alias cannot be empty");
+    anyhow::ensure!(
+        !alias.contains(['\0', '\n', '\t']),
+        "an alias cannot contain NUL, newline, or tab"
+    );
+    if alias == key {
+        return Ok(());
+    }
+    // An alias may not shadow a live session's key or another alias.
+    let key_live = guard
+        .by_name
+        .get(alias)
+        .is_some_and(|s| s.terminal.exit_code().is_none());
+    let alias_live = guard.aliases.contains_key(alias);
+    anyhow::ensure!(
+        !key_live && !alias_live,
+        "a session or alias named {alias} already exists"
+    );
+    anyhow::ensure!(
+        guard
+            .by_name
+            .get(key)
+            .is_some_and(|s| s.terminal.exit_code().is_none()),
+        "no running session named {key}"
+    );
+    guard.aliases.insert(alias.to_owned(), key.to_owned());
+    Ok(())
+}
+
 fn merge_env(
     into: &mut std::collections::BTreeMap<String, String>,
     from: std::collections::BTreeMap<String, String>,
@@ -172,6 +222,20 @@ where
                     }
                     return Ok(());
                 }
+                // Also answered here, before any attach: the alias client closes
+                // immediately (like kill), and the verdict must reach it before
+                // the socket goes away.
+                Frame::Alias { key, alias } => {
+                    let res = set_alias(&mut sessions.lock(), &key, &alias);
+                    let msg = match &res {
+                        Ok(()) => "aliased".to_owned(),
+                        Err(e) => e.to_string(),
+                    };
+                    writer.write_all(&Frame::Data(msg.into_bytes()).encode()).await?;
+                    writer.flush().await?;
+                    res?;
+                    return Ok(());
+                }
                 other => anyhow::bail!("expected Hello, got {other:?}"),
             }
         }
@@ -255,6 +319,15 @@ where
                     Frame::SetEnv(env) => {
                         merge_env(&mut sessions.lock().env, env);
                     }
+                    Frame::Alias { key, alias } => {
+                        // Same rule as the handshake arm, but without a reply:
+                        // the writer is owned by the output task above, and a
+                        // fully-attached client renaming is the unusual case
+                        // anyway (the alias CLI never attaches, so it reaches
+                        // the handshake arm). Applying the alias keeps output
+                        // and input flowing to the same terminal either way.
+                        set_alias(&mut sessions.lock(), &key, &alias)?;
+                    }
                     // A client has no business announcing these.
                     Frame::Hello(_) | Frame::Exited { .. } | Frame::Sessions(_) => {}
                     // Answered only during the handshake, where it cannot be
@@ -291,13 +364,18 @@ fn open_or_attach(
 ) -> anyhow::Result<(Arc<Terminal>, bool)> {
     let mut guard = sessions.lock();
 
-    if let Some(existing) = guard.by_name.get(&hello.session) {
+    // The session is looked up (and created) under its canonical key. An alias
+    // resolves to the key so reattaching by a renamed name returns the same
+    // shell; the key itself never changes.
+    let name = resolve_key(&guard, &hello.session);
+
+    if let Some(existing) = guard.by_name.get(&name) {
         // A shell that has exited should not be reattached to — start a new one
         // under the same name rather than handing back a dead terminal.
         if existing.terminal.exit_code().is_none() {
             return Ok((Arc::clone(&existing.terminal), false));
         }
-        guard.by_name.remove(&hello.session);
+        guard.by_name.remove(&name);
     }
 
     let mut spec = match (&hello.program, &hello.login_command) {
@@ -326,7 +404,7 @@ fn open_or_attach(
     let terminal = Arc::new(Terminal::spawn(&command, cwd, size)?);
 
     guard.by_name.insert(
-        hello.session.clone(),
+        name,
         Session {
             terminal: Arc::clone(&terminal),
             started: std::time::Instant::now(),
@@ -357,12 +435,19 @@ fn summarise(sessions: &Arc<Mutex<Sessions>>) -> Vec<crate::protocol::SessionSum
         // still says — reporting it would send the operator to kill a pid that
         // the OS may have reused.
         .filter(|(_, session)| session.terminal.exit_code().is_none())
-        .map(|(name, session)| crate::protocol::SessionSummary {
-            name: name.clone(),
-            pid: session.terminal.pid(),
-            age_seconds: session.started.elapsed().as_secs(),
-            attached: session.attached.load(Ordering::Relaxed) > 0,
-            command: session.command.clone(),
+        .map(|(name, session)| {
+            let alias = guard
+                .aliases
+                .iter()
+                .find_map(|(a, k)| (k == name).then_some(a.clone()));
+            crate::protocol::SessionSummary {
+                name: name.clone(),
+                alias,
+                pid: session.terminal.pid(),
+                age_seconds: session.started.elapsed().as_secs(),
+                attached: session.attached.load(Ordering::Relaxed) > 0,
+                command: session.command.clone(),
+            }
         })
         .collect();
 
@@ -619,5 +704,191 @@ mod tests {
         assert_ne!(a.id(), b.id());
         let _ = a.kill();
         let _ = b.kill();
+    }
+
+    /// Attaching by an alias reaches the same shell as the key it maps to.
+    ///
+    /// This is the whole point of the alias feature: a rename must not change
+    /// the daemon key, so reattaching by the friendly name returns the original
+    /// running shell rather than starting a second one under the alias.
+    #[test]
+    fn attach_by_alias_reaches_the_same_shell() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        let size = TermSize { cols: 80, rows: 24 };
+        let make = |session: &str| Hello {
+            session: session.into(),
+            cwd: None,
+            program: Some("sh".into()),
+            args: vec!["-c".into(), "sleep 30".into()],
+            login_command: None,
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        };
+
+        let (first, created) = open_or_attach(&sessions, &make("term-abc"), size).unwrap();
+        assert!(created);
+
+        set_alias(&mut sessions.lock(), "term-abc", "webapp").unwrap();
+
+        // Reattach by the alias — must hand back the same terminal, not spawn.
+        let (second, created_again) = open_or_attach(&sessions, &make("webapp"), size).unwrap();
+        assert!(!created_again);
+        assert_eq!(first.id(), second.id());
+
+        // The canonical key is untouched, and no entry under the alias was made.
+        assert!(sessions.lock().by_name.contains_key("term-abc"));
+        assert!(!sessions.lock().by_name.contains_key("webapp"));
+
+        // The alias resolves, and the summary reports it.
+        assert_eq!(resolve_key(&sessions.lock(), "webapp"), "term-abc");
+        assert_eq!(resolve_key(&sessions.lock(), "term-abc"), "term-abc");
+
+        let summary = summarise(&sessions);
+        let mine = summary.iter().find(|s| s.name == "term-abc").unwrap();
+        assert_eq!(mine.alias.as_deref(), Some("webapp"));
+
+        let _ = first.kill();
+    }
+
+    #[test]
+    fn an_alias_cannot_shadow_a_live_session_or_another_alias() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        let size = TermSize { cols: 80, rows: 24 };
+        let make = |session: &str| Hello {
+            session: session.into(),
+            cwd: None,
+            program: Some("sh".into()),
+            args: vec!["-c".into(), "sleep 30".into()],
+            login_command: None,
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        };
+
+        open_or_attach(&sessions, &make("a"), size).unwrap();
+        open_or_attach(&sessions, &make("b"), size).unwrap();
+
+        // Alias to a live session's key is refused.
+        set_alias(&mut sessions.lock(), "a", "b").unwrap_err();
+        // Alias to an alias that already exists is refused.
+        set_alias(&mut sessions.lock(), "a", "friendly").unwrap();
+        set_alias(&mut sessions.lock(), "b", "friendly").unwrap_err();
+
+        // A dead session's name is free to alias (it will be replaced on attach).
+        let dead = Hello {
+            session: "c".into(),
+            cwd: None,
+            program: Some("sh".into()),
+            args: vec!["-c".into(), "exit 0".into()],
+            login_command: None,
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        };
+        let (dead_term, _) = open_or_attach(&sessions, &dead, size).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while dead_term.exit_code().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        set_alias(&mut sessions.lock(), "a", "c").unwrap();
+    }
+
+    #[test]
+    fn an_alias_with_an_invalid_name_is_refused() {
+        let mut sessions = Sessions::default();
+        // Newline and tab would break the tab-separated `list` wire format.
+        set_alias(&mut sessions, "a", "bad\nname").unwrap_err();
+        set_alias(&mut sessions, "a", "bad\tname").unwrap_err();
+        set_alias(&mut sessions, "a", "").unwrap_err();
+        // Self-alias is a harmless no-op, and a missing key is refused.
+        set_alias(&mut sessions, "a", "a").unwrap();
+        set_alias(&mut sessions, "missing", "friendly").unwrap_err();
+    }
+
+    /// An alias can be set without a full attach, and the verdict reaches the
+    /// client before the connection closes.
+    ///
+    /// Mirrors `a_kill_needs_no_hello_and_no_attach`: the alias client sends one
+    /// frame and hangs up. The daemon must apply it during the handshake —
+    /// where the alias lives — rather than requiring an attach that never comes.
+    #[tokio::test]
+    async fn an_alias_needs_no_hello_and_no_attach() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        let size = TermSize { cols: 80, rows: 24 };
+        let hello = Hello {
+            session: "term-x".into(),
+            cwd: None,
+            program: Some("sh".into()),
+            args: vec!["-c".into(), "sleep 30".into()],
+            login_command: None,
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        };
+        let (terminal, _) = open_or_attach(&sessions, &hello, size).unwrap();
+
+        let (client, server) = tokio::io::duplex(1024);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+        client_write
+            .write_all(&Frame::Alias { key: "term-x".into(), alias: "renamed".into() }.encode())
+            .await
+            .unwrap();
+        drop(client_write);
+
+        handle(server, Arc::clone(&sessions)).await.unwrap();
+
+        assert_eq!(
+            resolve_key(&sessions.lock(), "renamed"),
+            "term-x",
+            "the alias must be registered during the handshake"
+        );
+        assert!(terminal.exit_code().is_none(), "the shell keeps running");
+
+        // The success verdict reaches the client before the connection closes.
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = tokio::io::AsyncReadExt::read(&mut client_read, &mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let (frame, _) = Frame::decode(&buf).unwrap().unwrap();
+        match frame {
+            Frame::Data(bytes) => {
+                let text = String::from_utf8(bytes).unwrap();
+                assert_eq!(text, "aliased", "the success verdict must be sent");
+            }
+            other => panic!("expected a Data verdict, got {other:?}"),
+        }
+
+        // A collision verdict is delivered as a Data frame before the close.
+        let (client2, server2) = tokio::io::duplex(1024);
+        let (mut read2, mut write2) = tokio::io::split(client2);
+        write2
+            .write_all(&Frame::Alias { key: "term-x".into(), alias: "renamed".into() }.encode())
+            .await
+            .unwrap();
+        drop(write2);
+
+        handle(server2, Arc::clone(&sessions)).await.unwrap_err();
+
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = tokio::io::AsyncReadExt::read(&mut read2, &mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let (frame, _) = Frame::decode(&buf).unwrap().unwrap();
+        match frame {
+            Frame::Data(bytes) => {
+                let text = String::from_utf8(bytes).unwrap();
+                assert!(text.contains("already exists"), "got: {text}");
+            }
+            other => panic!("expected a Data verdict, got {other:?}"),
+        }
     }
 }

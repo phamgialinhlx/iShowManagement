@@ -34,6 +34,9 @@ pub async fn server_disconnect(
 #[serde(rename_all = "camelCase")]
 pub struct RunningSession {
     pub name: String,
+    /// A display alias mapped to this session by a rename, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     pub pid: Option<u32>,
     pub age_seconds: u64,
     pub attached: bool,
@@ -41,9 +44,10 @@ pub struct RunningSession {
 }
 
 /// Parse `agent list` output — one **tab-separated** line per session
-/// (`name\tpid\tage\tattached|detached\tcommand`), as printed by
-/// `crates/rmux-agent/src/main.rs:102-122`. Session names are ours and cannot
-/// contain tabs or newlines, so splitting on `\t` is safe.
+/// (`name\talias\tpid\tage\tattached|detached\tcommand`), as printed by
+/// `crates/rmux-agent/src/main.rs`. The alias column is a dash when unset.
+/// Session names are ours and cannot contain tabs or newlines, so splitting on
+/// `\t` is safe.
 pub fn parse_list(out: &str) -> Vec<RunningSession> {
     out.lines()
         .filter(|l| !l.trim().is_empty())
@@ -53,6 +57,10 @@ pub fn parse_list(out: &str) -> Vec<RunningSession> {
             if name.trim().is_empty() {
                 return None;
             }
+            let alias = parts
+                .next()
+                .filter(|a| *a != "-" && !a.is_empty())
+                .map(|a| a.to_string());
             let pid = parts
                 .next()
                 .and_then(|p| if p == "-" { None } else { p.parse().ok() });
@@ -61,6 +69,7 @@ pub fn parse_list(out: &str) -> Vec<RunningSession> {
             let command = parts.next().map(|c| c.to_string()).filter(|c| !c.is_empty());
             Some(RunningSession {
                 name: name.to_string(),
+                alias,
                 pid,
                 age_seconds: age,
                 attached,
@@ -86,4 +95,34 @@ pub async fn server_sessions<R: tauri::Runtime>(
         .tty(rmux_transport::Tty::None);
     let out = resolved.exec(&spec).await.map_err(|e| e.to_string())?;
     Ok(parse_list(&out.stdout))
+}
+
+/// Map a display alias to a running terminal session on `target`, so
+/// `agent list` shows the friendly name and reattach-by-alias works.
+/// Terminals only — Claude resume identity is load-bearing and never aliased.
+#[tauri::command]
+pub async fn server_alias<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: State<'_, ClaudeStore>,
+    target: TargetRef,
+    key: String,
+    alias: String,
+) -> Result<(), String> {
+    let resolved = crate::claude::resolve(store.inner(), &target).await?;
+    let installed = ensure_agent(&app, resolved.as_ref()).await?;
+    let spec = rmux_transport::CommandSpec::new(&installed.program)
+        .arg("alias")
+        .arg(&key)
+        .arg(&alias)
+        .tty(rmux_transport::Tty::None);
+    let out = resolved.exec(&spec).await.map_err(|e| e.to_string())?;
+    if !out.ok() {
+        let msg = out.stderr.trim();
+        return Err(if msg.is_empty() {
+            format!("alias failed (status {})", out.status)
+        } else {
+            msg.to_owned()
+        });
+    }
+    Ok(())
 }

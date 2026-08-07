@@ -162,7 +162,8 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
                 | Frame::Kill { .. }
                 | Frame::SetEnv(_)
                 | Frame::List
-                | Frame::Sessions(_) => {}
+                | Frame::Sessions(_)
+                | Frame::Alias { .. } => {}
             }
         }
     }
@@ -459,6 +460,69 @@ pub async fn kill(session: &str) -> anyhow::Result<()> {
     let mut sink = [0u8; 1];
     let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut sink).await;
     Ok(())
+}
+
+/// Map a display alias to a running session.
+///
+/// Unlike `kill`, failures are errors rather than best-effort: the caller
+/// (rmux's rename) needs to know when the alias was refused so it can surface
+/// the reason instead of silently leaving a stale label.
+pub async fn alias(key: &str, alias: &str) -> anyhow::Result<()> {
+    // The alias lives with the daemon that owns the session. After an agent
+    // upgrade that may be a *previous* build's daemon, so resolve the owner the
+    // same way `kill` does rather than assuming our own.
+    let mut endpoint = daemon::endpoint()?;
+    let ours = sessions_of(&endpoint).await;
+    if !ours.iter().any(|s| s.name == key)
+        && let Some(binary) = owner_of(key).await
+        && let Some(name) = binary.file_name().and_then(|n| n.to_str())
+        && let Ok(other) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name)
+    {
+        endpoint = other;
+    }
+
+    let mut stream = match ipc::connect(&endpoint).await {
+        Ok(stream) => stream,
+        // No daemon, or none that holds the session. Do not start one — asking
+        // a fresh daemon to alias nothing is the same mistake the old kill made
+        // by attaching to a session in order to destroy it.
+        Err(_) => anyhow::bail!("no running session named {key}"),
+    };
+
+    // `Alias` alone, with no Hello in front of it — the alias client closes
+    // immediately, so it must be answered during the handshake (see `kill`).
+    stream
+        .write_all(&Frame::Alias { key: key.to_owned(), alias: alias.to_owned() }.encode())
+        .await?;
+    stream.flush().await?;
+
+    // Read the daemon's verdict. It sends one `Data` frame carrying either the
+    // success marker or the refusal reason, then closes. An old daemon that
+    // does not know `Alias` closes without replying — treat that as success so
+    // a rename on a superseded build still degrades gracefully.
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Some((frame, used)) = Frame::decode(&buf)? {
+            buf.drain(..used);
+            match frame {
+                Frame::Data(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    if text != "aliased" {
+                        anyhow::bail!("{text}");
+                    }
+                    return Ok(());
+                }
+                // Nothing else is meaningful in the reply.
+                other => anyhow::bail!("expected an alias verdict, got {other:?}"),
+            }
+        }
+        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut chunk).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
 }
 
 /// Hand the daemon environment for future sessions, read from **stdin**.

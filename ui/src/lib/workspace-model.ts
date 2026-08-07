@@ -130,6 +130,17 @@ export function reattachName(s: Pick<SessionV3, "id" | "kind">): string {
   return s.kind === "claude" ? `claude-${s.id}` : s.id;
 }
 
+/** Whether a daemon session summary is a Claude conversation.
+ *
+ * The daemon records `command` from `login_command`/`program`; for Claude the
+ * login command is the full `claude --resume <id> …` line, so match that
+ * prefix. This is the same signal `claude_list_all_sessions` uses — more
+ * reliable than the name prefix, which a renamed terminal no longer carries.
+ */
+export function isClaudeSession(command: string | null | undefined): boolean {
+  return command === "claude" || command?.startsWith("claude ") === true;
+}
+
 /**
  * A drive-letter (`C:\`) or UNC (`\\server\share`) path.
  *
