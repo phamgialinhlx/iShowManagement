@@ -209,6 +209,34 @@ emit ordinary POSIX and know nothing about it.
 - `tests/live_windows.rs` drives all of it against a real host — a filename containing `&` and
   `%PATH%`, a binary upload over stdin, search, and the clobber guard.
 
+## Release notes are for the people installing it
+
+Written for a user opening the releases page, not for the person who wrote the
+code. The first version of the 0.2.10 notes led with cascade layers, Tauri
+sidecars-versus-resources and a notarisation submission id — all true, all the
+reason *this* was hard, and none of it a reason for anyone to be pleased. It
+was rewritten.
+
+- **Lead with what they can now do, and say where it is.** "Settings ›
+  Appearance › TEXT SIZE", "click HOST on any server". A feature nobody can find
+  is a feature nobody has; the location is the difference between a changelog
+  and an announcement.
+- **Say what it replaces and why the old way was worse**, briefly. "Interface
+  scale moved everything, so turning it up made the app look stretched" tells
+  someone whether the entry is about them. A bare "added text size setting" does
+  not.
+- **Never make the bug report the headline.** Fixing our own regression is not
+  news to a user who never saw it; the *capability* is. Fixes that only restore
+  intended behaviour go in a short "Also in this release" list, or nowhere.
+- **No internal vocabulary.** No file names, no crate names, no submission ids,
+  no `@layer utilities`. That reasoning belongs in the commit message, which is
+  where it already is — and commit messages are the right place precisely
+  because the two audiences want opposite things.
+- **End with what to download and what happens to their data.** Which artefact
+  is which platform, whether settings carry over, and anything not built yet.
+- **Mark it latest** (`gh release edit <tag> --latest`). A release nobody is
+  pointed at is a release nobody installs, and `tauri-action` does not do it.
+
 ## Shipping rmux *for* Windows and Linux
 
 The section above is about Windows as a **target**. This one is about rmux **running** there,
