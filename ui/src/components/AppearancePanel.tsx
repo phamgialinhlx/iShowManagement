@@ -116,6 +116,22 @@ type Appearance = {
   scale: number;
 
   /**
+   * Text size, as a percentage, independent of `scale`.
+   *
+   * The note above says a font variable would move almost nothing because the
+   * type is 157 hard-coded pixel sizes. The count was right; the conclusion was
+   * not. Those 266 uses are only **twelve distinct sizes**, so twelve CSS
+   * overrides reach all of them (`signal-room.css`, `--font-scale`).
+   *
+   * It exists beside `scale` rather than replacing it because they answer
+   * different complaints: `zoom` is for "this display is too dense", and moves
+   * padding, meters and the terminal grid with the text; this is for "I cannot
+   * read a 9px label" and moves only type. Reported as "right now it is scaling
+   * the UI which does not work well".
+   */
+  fontScale: number;
+
+  /**
    * Typeface ids (ADR-003), resolved through `lib/fonts.ts`. Stored as stable
    * ids rather than CSS stacks so a font's fallbacks can change without
    * rewriting saved settings. `uiFont` drives the chrome; `monoFont` drives
@@ -150,6 +166,7 @@ const DEFAULTS: Appearance = {
   backgroundColor: "#0b0b0d",
   backgroundCover: 100,
   scale: 100,
+  fontScale: 100,
   // Today's look exactly — an absent/old setting is unchanged (SFU Futura +
   // IBM Plex Mono), and `load()`'s spread fills these in for pre-existing
   // stored appearances.
@@ -269,6 +286,12 @@ export function applyAppearance(a: Appearance = load()) {
   // so the effect is watched there, on the thing being configured, rather than
   // on the instrument doing the configuring.
   root.style.setProperty("--ui-zoom", isSettingsWindow ? "1" : String(zoom(a.scale)));
+
+  // Type scale *does* apply in the Settings window. Unlike `zoom` it does not
+  // move the control out from under the cursor — the slider stays where it is
+  // and only its label grows — so watching the effect where you set it is a
+  // help rather than the hazard that pinned `--ui-zoom` to 1 here.
+  root.style.setProperty("--font-scale", String((a.fontScale ?? 100) / 100));
 
   // The typefaces. `applyFonts` writes `--font-display`/`--font-mono` and fires
   // the theme event so the terminals and Monaco re-read (they cache the family
@@ -744,8 +767,18 @@ export function AppearancePanel() {
       )}
 
       {row(
+        "TEXT SIZE",
+        "Type only — labels, lists and prose. Panels and the terminal grid stay put.",
+        draft.fontScale ?? 100,
+        80,
+        180,
+        "%",
+        (fontScale) => setDraft((a) => ({ ...a, fontScale })),
+      )}
+
+      {row(
         "INTERFACE SCALE",
-        "Everything gets bigger together — labels, panels and terminal text. Terminals re-fit to the new size.",
+        "Everything together — padding, borders and the terminal grid as well as the text. Use TEXT SIZE above if you only want to read the labels; this changes the proportions.",
         draft.scale,
         60,
         200,

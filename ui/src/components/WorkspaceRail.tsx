@@ -461,18 +461,50 @@ function ProjectNode({
       </div>
 
       {adding && (
-        <div className="px-2 pb-2 pl-4">
-          <QuickAdd
-            label={project.label}
-            where={`${project.folder} on ${host ? serverLabel(host) : "this machine"}`}
-            inheritedProfile={mine.find((s) => s.modelProfile)?.modelProfile}
-            busy={false}
-            target={target}
-            folder={project.folder}
-            onCancel={() => setAdding(false)}
-            onCreate={add}
-          />
-        </div>
+        /*
+         * A modal, not an inline panel.
+         *
+         * It was rendered inside the project row, which put a conversation
+         * picker and two settings into a 216px column — and pushed every
+         * session below it down the rail while open. The app already opens
+         * "Connect a server" and "New project" this way, so an inline third
+         * shape was a second convention for the same act.
+         *
+         * The earlier reasoning against a modal still stands where it applies:
+         * a dialog that appears *on its own* over the workbench steals the
+         * keystrokes of whoever is typing in a terminal. This one is opened by
+         * a deliberate click, which is the case that rule was never about.
+         */
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.12 }}
+          className="fixed inset-0 z-[95] grid place-items-start justify-center pt-[9vh]"
+          style={{ background: "color-mix(in srgb, var(--app-bg) 62%, transparent)" }}
+          // Clicking the backdrop dismisses; clicking the panel must not, or
+          // every press inside the form would close it.
+          onClick={() => setAdding(false)}
+        >
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.14, ease: [0.2, 0.9, 0.3, 1] }}
+            className="window w-[min(560px,92vw)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <QuickAdd
+              label={project.label}
+              where={`${project.folder} on ${host ? serverLabel(host) : "this machine"}`}
+              inheritedProfile={mine.find((s) => s.modelProfile)?.modelProfile}
+              busy={false}
+              target={target}
+              folder={project.folder}
+              onCancel={() => setAdding(false)}
+              onCreate={add}
+            />
+          </motion.div>
+        </motion.div>
       )}
 
       {/* Same reasoning as the server's: `removeProject` ends every session in

@@ -125,6 +125,12 @@ body,
   margin: 0;
 }
 
+/* `rem` resolves against the root, not `body` — without this the markdown
+   headings are the one thing the type scale does not reach. */
+html {
+  font-size: calc(16px * var(--font-scale, 1));
+}
+
 /*
  * Interface scale.
  *
@@ -231,7 +237,7 @@ textarea,
 .kicker {
   font-family: var(--font-display);
   font-weight: 700;
-  font-size: 0.6rem;
+  font-size: calc(0.6rem * var(--font-scale, 1));
   letter-spacing: 0.3em;
   text-transform: uppercase;
   color: var(--text-soft);
@@ -240,7 +246,7 @@ textarea,
 /* The recurring micro-label: every panel header, every field caption. */
 .micro {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--font-scale, 1));
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--text-faint);
@@ -526,7 +532,7 @@ textarea,
 
 .btn {
   font-family: var(--font-display);
-  font-size: 11px;
+  font-size: calc(11px * var(--font-scale, 1));
   font-weight: 700;
   letter-spacing: 0.2em;
   text-transform: uppercase;
@@ -570,7 +576,7 @@ textarea,
  */
 .chip {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--font-scale, 1));
   letter-spacing: 0.18em;
   text-transform: uppercase;
   display: inline-flex;
@@ -663,7 +669,7 @@ textarea,
 
 .seg > button {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--font-scale, 1));
   letter-spacing: 0.18em;
   text-transform: uppercase;
   padding: 2px 8px;
@@ -745,7 +751,7 @@ textarea,
 
 .field {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: calc(13px * var(--font-scale, 1));
   padding: 9px 12px;
   width: 100%;
   background: rgba(0, 0, 0, 0.35);
@@ -1228,4 +1234,46 @@ body[data-hidden="true"] * {
  */
 .progress-page {
   background: color-mix(in srgb, var(--app-panel) var(--glass-pct), transparent);
+}
+
+/* ------------------------------------------------------- type scale */
+/*
+ * Text size, independent of interface scale.
+ *
+ * `--ui-zoom` scales *everything* — padding, borders, meters, the terminal grid
+ * — which is the right control for "this display is too dense" and the wrong
+ * one for "I cannot read 9px labels". Asked for as "right now it is scaling the
+ * UI which does not work well".
+ *
+ * The note in CLAUDE.md said a font variable would move almost nothing, because
+ * the type is 157 hard-coded pixel values. The count was right and the
+ * conclusion was not: those 266 uses are only **twelve distinct sizes**, and a
+ * dozen overrides is a normal amount of CSS.
+ *
+ * These sit **outside** `@layer utilities`, where Tailwind's arbitrary-value
+ * classes live, so they win without `!important` — unlayered rules beat layered
+ * ones regardless of source order. That is the same cascade fact that hid the
+ * black bar for nine rounds; it is worth using deliberately once it is known.
+ *
+ * The terminals are deliberately not included. xterm measures its own cell grid
+ * from a font size it is constructed with and does not re-read CSS, so their
+ * size is a separate setting that already exists — scaling them here would
+ * change the box without telling the terminal, and the grid would be wrong.
+ */
+.text-\[9px\] { font-size: calc(9px * var(--font-scale, 1)); }
+.text-\[9.5px\] { font-size: calc(9.5px * var(--font-scale, 1)); }
+.text-\[10px\] { font-size: calc(10px * var(--font-scale, 1)); }
+.text-\[10.5px\] { font-size: calc(10.5px * var(--font-scale, 1)); }
+.text-\[11px\] { font-size: calc(11px * var(--font-scale, 1)); }
+.text-\[11.5px\] { font-size: calc(11.5px * var(--font-scale, 1)); }
+.text-\[12px\] { font-size: calc(12px * var(--font-scale, 1)); }
+.text-\[12.5px\] { font-size: calc(12.5px * var(--font-scale, 1)); }
+.text-\[13px\] { font-size: calc(13px * var(--font-scale, 1)); }
+.text-\[16px\] { font-size: calc(16px * var(--font-scale, 1)); }
+.text-\[20px\] { font-size: calc(20px * var(--font-scale, 1)); }
+.text-\[26px\] { font-size: calc(26px * var(--font-scale, 1)); }
+
+/* The base, which everything unclassed inherits from. */
+body {
+  font-size: calc(14px * var(--font-scale, 1));
 }
