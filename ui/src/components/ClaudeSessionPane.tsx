@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useWorkspace } from "../lib/workspace";
 import { VIEW_EVENT } from "../lib/shortcuts";
@@ -8,6 +8,16 @@ import { TranscriptView } from "./TranscriptView";
 import { JiraPanel } from "./JiraPanel";
 import { FilesPane } from "./FilesPane";
 import { GitPane } from "./GitPane";
+import { TerminalView } from "./Terminal";
+import {
+  companionKey,
+  companionName,
+  readOpen,
+  readSplit,
+  splitFromPointer,
+  writeOpen,
+  writeSplit,
+} from "../lib/companion";
 import { SessionSettings } from "./SessionSettings";
 
 /**
@@ -71,6 +81,7 @@ function IconButton({
 const TRANSCRIPT_PATH = "M4 6h16M4 10h16M4 14h10M4 18h7"; // stacked lines = a transcript
 const FOLDER_PATH = "M3 6v13h18V8h-9l-2-2H3z"; // folder = this project's files
 const BOARD_PATH = "M4 4h16v16H4zM10 4v16M16 4v16"; // kanban columns = Jira
+const SPLIT_PATH = "M4 4h16v16H4zM4 13h16"; // a pane divided = the companion shell
 const GIT_PATH = "M7 4v16M7 9h6a4 4 0 014 4v3M17 4v3"; // a branch leaving the trunk
 const GEAR_PATH = "M4 8h16M9 6v4M4 16h16M15 14v4"; // sliders = session settings
 const BACK_PATH = "M15 5l-7 7 7 7"; // ← return to the conversation
@@ -80,6 +91,44 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
   const project = useWorkspace((s) => s.projectOf(session.id));
   const folder = project?.folder ?? "";
   const [view, setView] = useState<View>("claude");
+
+  /**
+   * The shell that belongs to this conversation.
+   *
+   * Kept per session and remembered, because whether you work with a terminal
+   * open is a habit rather than a per-visit decision — and switching sessions
+   * must bring *that* session's shell, which is the whole point.
+   */
+  const [companion, setCompanion] = useState(() => readOpen(session.id));
+  const [split, setSplit] = useState(() => readSplit(session.id));
+  const [dragging, setDragging] = useState(false);
+  const tileRef = useRef<HTMLDivElement>(null);
+  const live = useWorkspace((s) => s.live[companionKey(session.id)]);
+  const setLive = useWorkspace((s) => s.setLive);
+  const clearLive = useWorkspace((s) => s.clearLive);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const el = tileRef.current;
+    if (!el) return;
+    // Measured rather than read from `--ui-zoom`: `getBoundingClientRect` is in
+    // viewport pixels while the layout is in the zoomed space, and the ratio is
+    // the only thing that survives both. Same reason the file tree's splitter
+    // measures instead of assuming.
+    const move = (e: MouseEvent) => {
+      const r = el.getBoundingClientRect();
+      setSplit(splitFromPointer(e.clientY, r.top, r.height));
+    };
+    const up = () => setDragging(false);
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [dragging]);
+
+  useEffect(() => writeSplit(session.id, split), [session.id, split]);
 
   /**
    * A keyboard shortcut asking this pane to change view.
@@ -118,6 +167,16 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
           <Icon d={FOLDER_PATH} />
         </IconButton>
       )}
+      <IconButton
+        label={companion ? "Hide this session's terminal" : "Open a terminal beside this session"}
+        onClick={() => {
+          const next = !companion;
+          setCompanion(next);
+          writeOpen(session.id, next);
+        }}
+      >
+        <Icon d={SPLIT_PATH} />
+      </IconButton>
       {project && (
         <IconButton label="Git — what changed" onClick={() => setView("git")}>
           <Icon d={GIT_PATH} />
@@ -134,9 +193,19 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
     </>
   );
 
+  // Only alongside the conversation. Transcript, files and git are full-pane
+  // reading views — a shell wedged under one of them would take height from the
+  // thing you opened, to show something you did not ask for.
+  const splitting = companion && active === "claude";
+
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="relative min-h-0 flex-1">
+    <div ref={tileRef} className="flex h-full min-h-0 flex-col">
+      <div
+        className="relative min-h-0"
+        // A basis rather than a height, so the terminal below keeps its own
+        // minimum and neither half can be squeezed out of existence.
+        style={splitting ? { flex: `0 0 ${split * 100}%` } : { flex: "1 1 0%" }}
+      >
         {/* Always mounted — hidden, never torn down. Its status line carries the
             transcript / Jira icons, so this is the only header in Claude view. */}
         <div className="h-full" style={{ display: active === "claude" ? "block" : "none" }}>
@@ -182,6 +251,38 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
           </BackView>
         )}
       </div>
+
+      {splitting && (
+        <>
+          {/* The handle is 5px of hit area over a 1px line: a hairline is the
+              right *look* and the wrong target, and a divider you cannot grab
+              reads as a fixed layout. */}
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            className="relative shrink-0"
+            style={{ height: 5, cursor: "row-resize", background: "var(--border)" }}
+            title="Drag to resize"
+          />
+          <div className="min-h-0 flex-1">
+            <TerminalView
+              target={target}
+              cwd={folder}
+              // Derived from the session id, so the same shell is reattached
+              // after a restart rather than a second one being spawned.
+              session={companionName(session.id)}
+              sessionId={session.id}
+              ptyId={live}
+              onOpened={(id) => setLive(companionKey(session.id), id)}
+              onExit={() => clearLive(companionKey(session.id))}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }

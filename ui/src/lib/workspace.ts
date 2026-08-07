@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { api, isTauri, type TargetRef } from "./api";
 import { bufferKey, type Buffer, type BufferKey } from "./buffers";
+import { companionKey, companionName, forget as forgetCompanion } from "./companion";
 import { deckId, isFocusDeck, parseDeck, type Deck } from "./grid";
 import {
   autosaveDecision,
@@ -315,6 +316,17 @@ export const useWorkspace = create<State>((set, get) => ({
       const name = reattachName(session);
       if (session.kind === "claude") {
         void api.claudeEndSession(target, name).catch(() => {});
+        // **And its companion shell**, which is a real terminal under the agent
+        // and survives the app. It is not in the rail, so nothing else would
+        // ever reach it — exactly the unreachable leak `rmux-agent list` was
+        // added to make findable. Sent unconditionally: a session that never
+        // opened one has nothing to kill and the call is harmless.
+        void invoke("terminal_close", {
+          id: state.live[companionKey(id)] ?? "",
+          target,
+          session: companionName(id),
+        }).catch(() => {});
+        forgetCompanion(id);
       } else {
         void invoke("terminal_close", {
           id: state.live[id] ?? "",
@@ -325,7 +337,7 @@ export const useWorkspace = create<State>((set, get) => ({
     }
     const ws = rRemoveSession(coreOf(state), id);
     const { [id]: _r, ...runtime } = state.runtime;
-    const { [id]: _l, ...live } = state.live;
+    const { [id]: _l, [companionKey(id)]: _c, ...live } = state.live;
     set({ ...ws, runtime, live });
     schedulePersist(get);
   },
