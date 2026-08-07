@@ -61,6 +61,7 @@ export type ActionId =
   | "view.files"
   | "view.transcript"
   | "view.jira"
+  | "view.git"
   | "session.terminal"
   | "pane.left"
   | "pane.right"
@@ -82,6 +83,7 @@ export const ACTIONS: readonly Action[] = [
   { id: "view.files", label: "Files", hint: "The file browser for this session's project" },
   { id: "view.transcript", label: "Transcript", hint: "The conversation as text" },
   { id: "view.jira", label: "Jira", hint: "This session's board" },
+  { id: "view.git", label: "Git", hint: "What changed in this project" },
   { id: "session.terminal", label: "Terminal", hint: "A shell on this session's machine" },
   { id: "pane.left", label: "Pane left", hint: "Move the focus one tile left" },
   { id: "pane.right", label: "Pane right", hint: "Move the focus one tile right" },
@@ -114,6 +116,7 @@ const MAC_DEFAULTS: Record<ActionId, string> = {
   "view.files": "Mod+2",
   "view.transcript": "Mod+3",
   "view.jira": "Mod+4",
+  "view.git": "Mod+5",
   "session.terminal": "Mod+T",
   "pane.left": "Mod+Alt+ArrowLeft",
   "pane.right": "Mod+Alt+ArrowRight",
@@ -141,6 +144,7 @@ const TERMINAL_SAFE_DEFAULTS: Record<ActionId, string> = {
   "view.files": "Mod+Shift+2",
   "view.transcript": "Mod+Shift+3",
   "view.jira": "Mod+Shift+4",
+  "view.git": "Mod+Shift+5",
   "session.terminal": "Mod+Shift+T",
   "pane.left": "Mod+Shift+H",
   "pane.right": "Mod+Shift+L",
@@ -396,7 +400,7 @@ export function moveFocus(
  */
 export const VIEW_EVENT = "rmux:set-view";
 
-export type ViewName = "claude" | "files" | "transcript" | "jira";
+export type ViewName = "claude" | "files" | "transcript" | "jira" | "git";
 
 export function requestView(sessionId: string, view: ViewName): void {
   window.dispatchEvent(new CustomEvent(VIEW_EVENT, { detail: { sessionId, view } }));

@@ -23,6 +23,7 @@ mod claude_login;
 mod auth;
 mod commands;
 mod face_models;
+mod git;
 mod glass;
 mod identity_migration;
 mod keychain;
@@ -160,6 +161,11 @@ pub fn run() {
             auth::jira_transition,
             auth::jira_comment,
             auth::jira_create,
+            git::git_repo,
+            git::git_status,
+            git::git_log,
+            git::git_commit_files,
+            git::git_file_diff,
             services::docker_containers,
             services::docker_action,
             services::host_sessions,

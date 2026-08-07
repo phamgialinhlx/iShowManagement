@@ -3337,6 +3337,7 @@ dependencies = [
  "rmux-control",
  "rmux-cowork",
  "rmux-fs",
+ "rmux-git",
  "rmux-metrics",
  "rmux-ssh",
  "rmux-term",
@@ -3451,6 +3452,15 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rmux-git"
+version = "0.2.11"
+dependencies = [
+ "anyhow",
+ "rmux-transport",
+ "serde",
 ]
 
 [[package]]
