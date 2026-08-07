@@ -28,6 +28,7 @@ mod lock;
 mod logs;
 mod model_profile;
 mod settings_window;
+mod ssh_keys;
 mod theme;
 pub mod files;
 pub mod metrics;
@@ -143,6 +144,8 @@ pub fn run() {
             auth::jira_transition,
             auth::jira_comment,
             auth::jira_create,
+            ssh_keys::ssh_key_status,
+            ssh_keys::ssh_key_install,
             settings_window::open_settings,
             lock::lock_status,
             lock::lock_enable,

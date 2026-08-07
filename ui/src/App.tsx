@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Workbench } from "./screens/Workbench";
 import { SshPrompt } from "./components/SshPrompt";
+import { SshKeyOffer } from "./components/SshKeyOffer";
 import { LockScreen } from "./components/LockScreen";
 import { SERVER_KEY } from "./components/SignIn";
 import { api, isTauri, type LockStatus, type SignedIn, type Unlocked } from "./lib/api";
@@ -118,6 +119,7 @@ export function App() {
       {/* Mounted above everything: ssh can ask for a credential at any moment,
           including while signed out and working locally. */}
       {isTauri() && <SshPrompt />}
+      {isTauri() && <SshKeyOffer />}
     </>
   );
 }

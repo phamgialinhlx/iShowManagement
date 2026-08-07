@@ -28,6 +28,7 @@ use rmux_transport::{
 pub mod askpass;
 pub mod forward;
 pub mod config;
+pub mod keys;
 pub mod mux;
 pub mod winshell;
 

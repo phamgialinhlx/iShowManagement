@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from "motion/react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
+import { hostFromPrompt, passwordUsed } from "../lib/ssh-key-offer";
+
 /**
  * The credential dialog for SSH.
  *
@@ -45,6 +47,14 @@ export function SshPrompt() {
 
   const respond = async (answer: string | null) => {
     const id = prompt?.id;
+    // A password was actually supplied — so this host authenticates by password,
+    // which is the one thing rmux cannot know any other way. Recorded *before*
+    // the state is cleared, and given only the host: the secret itself never
+    // comes near the offer.
+    if (answer !== null && prompt?.kind === "password") {
+      const host = hostFromPrompt(prompt.message);
+      if (host) passwordUsed(host, prompt.message);
+    }
     // Clear first: the secret should not sit in component state while the IPC
     // round-trip completes.
     setPrompt(null);
