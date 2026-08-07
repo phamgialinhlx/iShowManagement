@@ -33,7 +33,7 @@ use tauri::Manager;
 /// often the ones worth having. A test reads the manifest and pins the two
 /// together, because a silent divergence would put the log somewhere the export
 /// button does not look.
-pub const IDENTIFIER: &str = "ai.betterscale.rmux";
+pub const IDENTIFIER: &str = "group.yitec.rmux";
 
 /// Largest the live log is allowed to get before it is rotated.
 ///

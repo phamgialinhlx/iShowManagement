@@ -5,7 +5,7 @@
 //!
 //! ```sh
 //! export RMUX_LIVE_SERVER=https://cowork.example.com
-//! RMUX_LIVE_TOKEN=$(security find-generic-password -s ai.betterscale.rmux \
+//! RMUX_LIVE_TOKEN=$(security find-generic-password -s group.yitec.rmux \
 //!     -a "$RMUX_LIVE_SERVER" -w | python3 -c \
 //!     'import sys,json; print(json.load(sys.stdin)["token"])') \
 //!   cargo test -p rmux-cowork --test live_lock -- --ignored --nocapture

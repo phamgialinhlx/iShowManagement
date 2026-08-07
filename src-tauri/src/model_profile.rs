@@ -34,7 +34,7 @@ use serde::Serialize;
 
 /// Keychain slot. Separate from the account token — different lifetime, and
 /// deleting every profile must not sign the operator out of Claude.
-const SERVICE: &str = "ai.betterscale.rmux.claude";
+const SERVICE: &str = "group.yitec.rmux.claude";
 const ACCOUNT: &str = "model-profiles";
 
 fn entry() -> anyhow::Result<keyring::Entry> {
@@ -42,8 +42,14 @@ fn entry() -> anyhow::Result<keyring::Entry> {
 }
 
 fn load() -> Vec<ModelProfile> {
-    let Ok(entry) = entry() else { return Vec::new() };
-    let Ok(raw) = entry.get_password() else { return Vec::new() };
+    // The legacy fallback matters most here: a session names its profile, and
+    // one naming a profile that has vanished *refuses to start* rather than
+    // quietly running against Anthropic. Losing this set breaks work.
+    let Some(raw) =
+        crate::keychain::read_migrating(SERVICE, crate::keychain::LEGACY_CLAUDE_SERVICE, ACCOUNT)
+    else {
+        return Vec::new();
+    };
     // A profile set that cannot be parsed is treated as absent rather than
     // fatal: refusing to start the app over a corrupt preference would be worse
     // than losing the preference.

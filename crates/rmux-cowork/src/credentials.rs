@@ -12,7 +12,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::lock::Vault;
 
-const SERVICE: &str = "ai.betterscale.rmux";
+const SERVICE: &str = "group.yitec.rmux";
+
+/// The name this service had before the rename.
+///
+/// **A keychain entry is addressed by service name, so renaming it orphans
+/// every credential already stored.** Left unhandled, an upgrade signs the
+/// operator out of Cowork and loses the session they had — with nothing on
+/// screen explaining why, because from the app's side the keychain is simply
+/// empty. So reads fall back to the old name and migrate what they find.
+///
+/// It is removed only after the copy under the new name succeeds. Deleting
+/// first would turn a keychain write failure into the permanent loss of a
+/// token that cannot be recovered without signing in again.
+const LEGACY_SERVICE: &str = "ai.betterscale.rmux";
 
 /// Everything needed to resume a session, minus anything derivable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,17 +71,45 @@ pub fn save_vault(server_url: &str, vault: &Vault) -> anyhow::Result<()> {
 /// both is identical (sign in again), and surfacing a deserialisation failure at
 /// the login screen helps nobody.
 pub fn load_vault(server_url: &str) -> anyhow::Result<Option<Vault>> {
-    match entry(server_url)?.get_password() {
-        Ok(json) => match serde_json::from_str(&json) {
-            Ok(vault) => Ok(Some(vault)),
-            Err(e) => {
-                tracing::warn!(error = %e, "discarding unreadable stored credentials");
-                Ok(None)
-            }
+    let json = match entry(server_url)?.get_password() {
+        Ok(json) => json,
+        Err(keyring::Error::NoEntry) => match migrate_legacy(server_url) {
+            Some(json) => json,
+            None => return Ok(None),
         },
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e.into()),
+        Err(e) => return Err(e.into()),
+    };
+
+    match serde_json::from_str(&json) {
+        Ok(vault) => Ok(Some(vault)),
+        Err(e) => {
+            tracing::warn!(error = %e, "discarding unreadable stored credentials");
+            Ok(None)
+        }
     }
+}
+
+/// Move a credential stored under the old service name, and return it.
+///
+/// Best effort throughout: a machine with nothing under the old name is the
+/// ordinary case, and a failure to *delete* the old entry after a successful
+/// copy is harmless — the new one is authoritative, and the stale copy is a
+/// duplicate rather than a leak of anything the keychain was not already
+/// holding.
+fn migrate_legacy(server_url: &str) -> Option<String> {
+    let legacy = keyring::Entry::new(LEGACY_SERVICE, server_url).ok()?;
+    let json = legacy.get_password().ok()?;
+
+    match keyring::Entry::new(SERVICE, server_url).and_then(|e| e.set_password(&json)) {
+        Ok(()) => {
+            tracing::info!(server = %server_url, "migrated stored credentials to the new keychain service");
+            let _ = legacy.delete_credential();
+        }
+        // Returned anyway: being unable to write the new entry is no reason to
+        // sign the operator out of a session that is sitting right there.
+        Err(e) => tracing::warn!(error = %e, "could not migrate stored credentials; using the old entry"),
+    }
+    Some(json)
 }
 
 /// Load credentials that are usable **right now**, without a PIN.

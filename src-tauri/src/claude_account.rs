@@ -21,7 +21,7 @@ use crate::terminal::TargetRef;
 
 /// Keychain slot. Distinct from the Cowork session entry — different credential,
 /// different lifetime, and revoking one must not disturb the other.
-const SERVICE: &str = "ai.betterscale.rmux.claude";
+const SERVICE: &str = "group.yitec.rmux.claude";
 /// The credential sessions run with — an OAuth token or a Console API key.
 const ACCOUNT: &str = "oauth-token";
 /// The admin key that reads the organisation's usage report.
@@ -53,7 +53,10 @@ fn entry(slot: &str) -> anyhow::Result<keyring::Entry> {
 }
 
 fn stored(slot: &str) -> Option<String> {
-    entry(slot).ok()?.get_password().ok().filter(|t| !t.is_empty())
+    // Falls back to the pre-rename service name, so an upgrade does not lose
+    // the account the operator already signed in with. See `keychain`.
+    crate::keychain::read_migrating(SERVICE, crate::keychain::LEGACY_CLAUDE_SERVICE, slot)
+        .filter(|t| !t.is_empty())
 }
 
 fn stored_token() -> Option<String> {
