@@ -28,7 +28,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rmux_transport::{shell_quote, CommandSpec, Target};
+use rmux_transport::{shell_quote, CommandSpec, NoConsoleWindow, Target};
 
 /// Where rmux keeps the keys it generates.
 ///
@@ -74,7 +74,12 @@ pub fn ensure_local_key(path: &Path, comment: &str) -> anyhow::Result<String> {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(&public);
 
-    let out = std::process::Command::new("ssh-keygen")
+    let mut keygen = std::process::Command::new("ssh-keygen");
+    // Without this the generation flashes a console window on Windows — the
+    // guard in `tests/no_console_window.rs` is what caught it, which is the
+    // point of having a test rather than a convention.
+    keygen.no_console_window();
+    let out = keygen
         .arg("-t")
         .arg("ed25519")
         .arg("-N")
