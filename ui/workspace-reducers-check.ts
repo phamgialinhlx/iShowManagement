@@ -70,17 +70,20 @@ export function run(log: (line: string) => void): boolean {
     check("removing an unknown id is a no-op", removeSession(ws, "nope") === ws);
   }
 
-  // ── Detaching a session: panes clear, the session stays, no kill ────────────
+  // ── Detaching a session: row disappears, process stays on the server ────────
+  // Structurally identical to removal (the rail row must vanish — detach means
+  // "put it back in the background"), but the store's IO half never sends the
+  // agent kill, so the daemon keeps the shell for the import picker to restore.
   {
     let { ws } = seed();
     ws = assignPane(ws, 0, { kind: "session", id: "claude-1" });
     ws = assignPane(ws, 1, { kind: "session", id: "term-1" });
     ws = detachSessionCore(ws, "claude-1");
 
+    check("detach removes the session row", !ws.sessions.some((s) => s.id === "claude-1"));
     check("detach clears the session's panes", ws.panes[0] === null);
     check("detach leaves other panes alone", ws.panes[1]?.kind === "session");
-    check("the session stays (detach is not a kill)", ws.sessions.some((s) => s.id === "claude-1"));
-    check("activeSession is untouched", ws.activeSession === "term-1");
+    check("activeSession hands off to the survivor", ws.activeSession === "term-1");
     check("detaching an unknown id is a no-op", detachSessionCore(ws, "nope") === ws);
   }
 

@@ -683,6 +683,10 @@ export const api = {
 
   claudeEndSession: (target: TargetRef, sessionName: string) =>
     call<void>("claude_end_session", { target, sessionName }),
+  /** Detach a Claude: drop the local view, leave the process running on the host. */
+  claudeStop: (id: string) => call<void>("claude_stop", { id }),
+  /** Detach a terminal: drop the local attach, leave the shell running on the host. */
+  terminalDetach: (id: string) => call<void>("terminal_detach", { id }),
 
   claudeAccountStatus: () => call<ClaudeAccount>("claude_account_status"),
   claudeAccountSave: (token: string) => call<ClaudeAccount>("claude_account_save", { token }),

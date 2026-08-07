@@ -297,6 +297,28 @@ pub async fn terminal_close<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Detach a terminal: drop the local attach client, leave the shell running.
+///
+/// The difference from `terminal_close` is the point of the operation. Closing
+/// means the operator is done with the shell — the daemon process is killed so
+/// it does not leak unreachable. Detaching means the work may still be running
+/// and is meant to be imported back: the local `ssh attach` ends (the daemon
+/// reports the session `detached`), but the daemon keeps the shell, and
+/// "Attach to running session…" reattaches to it later.
+#[tauri::command]
+pub async fn terminal_detach(
+    store: State<'_, TerminalStore>,
+    id: String,
+) -> Result<(), String> {
+    let terminal = store.inner().terminals.lock().remove(&id);
+    if let Some(terminal) = terminal {
+        // A child that has already exited cannot be killed; that is success here,
+        // not an error to report.
+        let _ = terminal.kill();
+    }
+    Ok(())
+}
+
 /// Pump a terminal's output into the webview.
 fn stream_to_channel(
     terminal: Arc<Terminal>,

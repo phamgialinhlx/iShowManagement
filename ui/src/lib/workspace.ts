@@ -385,10 +385,22 @@ export const useWorkspace = create<State>((set, get) => ({
     const session = state.sessions.find((s) => s.id === id);
     if (!session) return;
     // Detach = close the view, leave the process running under the agent. No kill.
+    // The local attach client (the Rust Terminal/ClaudeSession) is dropped so the
+    // daemon reports the session `detached` and no orphan `ssh attach` leaks —
+    // but the daemon keeps the shell, and the import picker reattaches to it.
+    const pty = state.live[id];
+    if (pty && isTauri()) {
+      if (session.kind === "claude") {
+        void api.claudeStop(pty).catch(() => {});
+      } else {
+        void api.terminalDetach(pty).catch(() => {});
+      }
+    }
     set((s) => {
       const ws = rDetachSessionCore(coreOf(s), id);
+      const { [id]: _r, ...runtime } = s.runtime;
       const { [id]: _l, ...live } = s.live;
-      return { ...ws, live };
+      return { ...ws, runtime, live };
     });
     schedulePersist(get);
   },

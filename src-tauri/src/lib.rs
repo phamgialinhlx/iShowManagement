@@ -182,6 +182,7 @@ pub fn run() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,
+            terminal::terminal_detach,
             askpass::answer_prompt,
             files::fs_list,
             files::fs_read,

@@ -124,15 +124,18 @@ export function closePane(ws: Core, index: number): Core {
 /**
  * Detach a Session — the **structural** half of the store's `detachSession`.
  *
- * Unlike `removeSession`, this does **not** drop the session and never sends a
- * kill: detaching means "stop showing it, leave it running on the server". The
- * panes pointing at it are cleared (the tiles become empty), and the session
- * stays in `sessions` so the rail keeps a row to re-attach from.
+ * Structurally identical to `removeSession`: the session row disappears from the
+ * rail and its panes clear. The difference is the store's IO half — detach never
+ * sends the agent kill, so the process keeps running on the server as a
+ * background session that "Attach to running session…" can import back.
  */
 export function detachSessionCore(ws: Core, id: SessionId): Core {
   if (!ws.sessions.some((s) => s.id === id)) return ws;
+  const sessions = ws.sessions.filter((s) => s.id !== id);
   const panes = ws.panes.map((p) => (p && p.kind === "session" && p.id === id ? null : p));
-  return { ...ws, panes };
+  const activeSession =
+    ws.activeSession === id ? (sessions[sessions.length - 1]?.id ?? null) : ws.activeSession;
+  return { ...ws, sessions, panes, activeSession };
 }
 
 /**
