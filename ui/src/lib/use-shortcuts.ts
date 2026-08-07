@@ -52,7 +52,8 @@ export function useShortcuts(options: {
         case "view.claude":
         case "view.files":
         case "view.transcript":
-        case "view.jira": {
+        case "view.jira":
+        case "view.git": {
           // Addressed to the *active session's* pane, which owns the state. A
           // pane that is not on screen ignores it, so nothing changes under a
           // tile the operator cannot see.

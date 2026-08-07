@@ -22,6 +22,7 @@ rmux-term.workspace = true
 rmux-agent.workspace = true
 keyring.workspace = true
 rmux-fs.workspace = true
+rmux-git.workspace = true
 rmux-metrics.workspace = true
 rmux-claude.workspace = true
 

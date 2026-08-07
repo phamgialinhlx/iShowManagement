@@ -151,6 +151,44 @@ export type AgentSession = {
   cpu: number | null;
 };
 
+export type GitChange = {
+  path: string;
+  origPath: string | null;
+  /** Index vs HEAD: `M`, `A`, `D`, `R`, `C`, `T`, or `.`. */
+  staged: string;
+  /** Working tree vs index; `?` for untracked. */
+  unstaged: string;
+};
+
+export type GitStatus = {
+  branch: string;
+  ahead: number;
+  behind: number;
+  /** Absent when no remote-tracking branch is configured — not the same as 0/0. */
+  upstream: string | null;
+  changes: GitChange[];
+};
+
+export type GitCommit = {
+  sha: string;
+  short: string;
+  author: string;
+  /** ISO 8601, rendered in the viewer's timezone rather than the host's. */
+  date: string;
+  subject: string;
+};
+
+/** Two versions of a file. Monaco does the diffing — see `GitPane`. */
+export type GitFileDiff = {
+  path: string;
+  oldText: string;
+  newText: string;
+  truncated: boolean;
+};
+
+/** Working tree against HEAD, or a commit against its parent. */
+export type GitAgainst = { kind: "working" } | { kind: "commit"; sha: string };
+
 export type ForwardState = "local" | "starting" | "active" | "failed" | "stopped";
 export type Forward = { port: number; state: ForwardState; error?: string };
 
@@ -642,6 +680,17 @@ export const api = {
   logExport: () => call<string>("log_export"),
 
   metricsSample: (target: TargetRef) => call<MetricsSample>("metrics_sample", { target }),
+
+  /** Is this folder a checkout, and where is its root? */
+  gitRepo: (target: TargetRef, folder: string) =>
+    call<{ root: string | null }>("git_repo", { target, folder }),
+  gitStatus: (target: TargetRef, root: string) => call<GitStatus>("git_status", { target, root }),
+  gitLog: (target: TargetRef, root: string, limit: number) =>
+    call<GitCommit[]>("git_log", { target, root, limit }),
+  gitCommitFiles: (target: TargetRef, root: string, sha: string) =>
+    call<GitChange[]>("git_commit_files", { target, root, sha }),
+  gitFileDiff: (target: TargetRef, root: string, path: string, against: GitAgainst) =>
+    call<GitFileDiff>("git_file_diff", { target, root, path, against }),
 
   /** Containers on a host, joined with their live CPU and memory. */
   dockerContainers: (target: TargetRef) => call<DockerReport>("docker_containers", { target }),
