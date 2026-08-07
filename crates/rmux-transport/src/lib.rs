@@ -19,8 +19,10 @@ use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 
+pub mod console;
 pub mod local;
 
+pub use console::NoConsoleWindow;
 pub use local::LocalTarget;
 
 /// Identifies a place work can happen. Cheap to clone; used as a map key.

@@ -4,6 +4,7 @@
 //! gets an account and a signed-in flag; it has no way to read or leak the bearer.
 
 use rmux_cowork::{Account, AuthConfig, CoworkError, Session, StoredCredentials, Vault, VaultKey, credentials};
+use rmux_transport::NoConsoleWindow;
 use serde::Serialize;
 use tauri::State;
 use tokio::sync::RwLock;
@@ -149,6 +150,7 @@ pub async fn open_external(url: String) -> Result<(), AuthError> {
     };
 
     tokio::process::Command::new(program)
+        .no_console_window()
         .arg(&url)
         .spawn()
         .map_err(|e| AuthError::message(format!("could not open a browser: {e}")))?;
@@ -259,6 +261,7 @@ pub(crate) fn device_label() -> String {
 
 fn hostname() -> Option<String> {
     std::process::Command::new("hostname")
+        .no_console_window()
         .output()
         .ok()
         .filter(|o| o.status.success())

@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 
+use rmux_transport::NoConsoleWindow;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -150,6 +151,7 @@ impl Forwards {
 
     async fn spawn(&self, host: &str, port: u16) -> std::io::Result<Child> {
         Command::new("ssh")
+            .no_console_window()
             .arg("-N")
             // See the module comment: both of these are load-bearing.
             .args(["-o", "ControlPath=none"])
@@ -247,6 +249,7 @@ impl Forwards {
         let port = free_local_port().map_err(|e| e.to_string())?;
 
         let mut child = Command::new("ssh")
+            .no_console_window()
             .arg("-N")
             .args(["-o", "ControlPath=none"])
             .args(["-o", "ExitOnForwardFailure=yes"])

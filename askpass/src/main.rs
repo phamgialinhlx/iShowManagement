@@ -47,7 +47,14 @@ fn main() -> ExitCode {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
 
-    let request = serde_json::json!({ "token": token, "prompt": prompt });
+    // `attempt` names the `ssh` process we were spawned by, so rmux can tell a
+    // credential it just refused apart from another connection asking at the
+    // same moment. Absent is fine — it only costs that distinction.
+    let request = serde_json::json!({
+        "token": token,
+        "prompt": prompt,
+        "attempt": std::env::var("RMUX_ASKPASS_ATTEMPT").ok(),
+    });
 
     let mut writer = &stream;
     if writeln!(writer, "{request}").and_then(|()| writer.flush()).is_err() {
@@ -78,9 +85,105 @@ fn main() -> ExitCode {
     }
 }
 
-/// Windows has no Unix sockets, and rmux uses an in-process SSH client there
-/// rather than driving the `ssh` binary, so this helper is never invoked.
-#[cfg(not(unix))]
+/// The same helper, over a named pipe.
+///
+/// Windows has no Unix sockets, but it does drive the `ssh` binary exactly like
+/// every other platform — the comment here used to claim otherwise, and that
+/// mistaken belief is why this returned failure for so long. A password host was
+/// therefore unusable on Windows: `ssh` has no terminal to ask on and no helper
+/// to ask through, so it spends its retries and reports `Permission denied`.
+///
+/// A pipe client is an ordinary file handle, so the protocol below is the Unix
+/// one line for line. The differences are both about pipes: an instance may be
+/// momentarily busy, and a handle carries no read timeout.
+#[cfg(windows)]
+fn main() -> ExitCode {
+    use std::fs::OpenOptions;
+    use std::io::{BufRead, BufReader, Write};
+    use std::time::Duration;
+
+    let prompt: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+
+    let (Ok(socket), Ok(token)) =
+        (std::env::var("RMUX_ASKPASS_SOCKET"), std::env::var("RMUX_ASKPASS_TOKEN"))
+    else {
+        eprintln!("rmux-askpass: not invoked by rmux");
+        return ExitCode::FAILURE;
+    };
+
+    // A `File` has no read timeout, so the bound lives here instead: generous
+    // enough to reach for a hardware token, but bounded, so a wedged rmux cannot
+    // hang an `ssh` process — and through it a terminal — forever. Matches the
+    // 300s the Unix path sets on the socket.
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(300));
+        eprintln!("rmux-askpass: rmux did not answer");
+        std::process::exit(1);
+    });
+
+    /// `ERROR_PIPE_BUSY` — every instance is occupied this instant.
+    const PIPE_BUSY: i32 = 231;
+
+    // The server opens a fresh instance as soon as one is taken, so busy is a
+    // momentary race rather than a queue. Retrying briefly is the documented way
+    // to open a pipe; failing here would surface as a refused password.
+    let mut pipe = None;
+    for _ in 0..50 {
+        match OpenOptions::new().read(true).write(true).open(&socket) {
+            Ok(handle) => {
+                pipe = Some(handle);
+                break;
+            }
+            Err(e) if e.raw_os_error() == Some(PIPE_BUSY) => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                eprintln!("rmux-askpass: rmux is not listening on {socket}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let Some(mut pipe) = pipe else {
+        eprintln!("rmux-askpass: rmux never freed a pipe instance");
+        return ExitCode::FAILURE;
+    };
+
+    // `attempt` names the `ssh` process we were spawned by, so rmux can tell a
+    // credential it just refused apart from another connection asking at the
+    // same moment. Absent is fine — it only costs that distinction.
+    let request = serde_json::json!({
+        "token": token,
+        "prompt": prompt,
+        "attempt": std::env::var("RMUX_ASKPASS_ATTEMPT").ok(),
+    });
+    if writeln!(pipe, "{request}").and_then(|()| pipe.flush()).is_err() {
+        eprintln!("rmux-askpass: failed to send the prompt");
+        return ExitCode::FAILURE;
+    }
+
+    let mut line = String::new();
+    if BufReader::new(&mut pipe).read_line(&mut line).is_err() || line.trim().is_empty() {
+        eprintln!("rmux-askpass: no answer from rmux");
+        return ExitCode::FAILURE;
+    }
+
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(&line) else {
+        eprintln!("rmux-askpass: malformed answer from rmux");
+        return ExitCode::FAILURE;
+    };
+
+    match response.get("answer").and_then(|a| a.as_str()) {
+        Some(answer) => {
+            println!("{answer}");
+            ExitCode::SUCCESS
+        }
+        None => ExitCode::FAILURE,
+    }
+}
+
+/// Anything that is neither Unix nor Windows has no transport here.
+#[cfg(not(any(unix, windows)))]
 fn main() -> ExitCode {
     eprintln!("rmux-askpass: not supported on this platform");
     ExitCode::FAILURE

@@ -18,6 +18,28 @@ import type { Terminal as Xterm } from "@xterm/xterm";
  */
 
 /**
+ * Which platform this is, asked of more than one source.
+ *
+ * `navigator.platform` is **deprecated**, and the failure mode if a webview ever
+ * stops populating it is the worst kind available here: it returns `""`, every
+ * `includes` is false, and the Windows branch below simply ceases to exist —
+ * silently, with Ctrl+C going back to interrupting instead of copying and
+ * nothing anywhere to say why. `userAgentData.platform` is the supported
+ * replacement and is asked first; the user-agent string is the last resort so
+ * that all three would have to fail at once. Measured in the shipped app:
+ * `platform: "Win32"`, `userAgentData.platform: "Windows"`.
+ */
+function platformSays(pattern: RegExp): boolean {
+  if (typeof navigator === "undefined") return false;
+  const data = (navigator as { userAgentData?: { platform?: string } }).userAgentData;
+  return pattern.test(data?.platform ?? "") || pattern.test(navigator.platform || "") ||
+    pattern.test(navigator.userAgent || "");
+}
+
+const onMac = (): boolean => platformSays(/mac/i);
+const onWindows = (): boolean => platformSays(/win/i);
+
+/**
  * Write to the clipboard, falling back when the async API is unavailable.
  *
  * Throws if nothing worked. A copy that fails silently is worse than one that
@@ -91,24 +113,141 @@ export async function copySelection(xterm: Xterm): Promise<boolean> {
 /**
  * Wire the shortcuts xterm does not provide.
  *
- * Only select-all. Copy and paste are xterm's own — see the note at the top of
- * this file; handling them here is what made paste arrive twice.
+ * **Copy on macOS is still xterm's own**, and must stay that way — the webview's
+ * Edit menu routes Cmd-C into the platform's `copy` event, and adding a second
+ * implementation on the keydown is what made paste arrive twice. Nothing below
+ * touches the macOS path.
+ *
+ * ## Why Ctrl+C needed handling, when Cmd-C never did
+ *
+ * Windows has no application Edit menu to route the key, and — the part that
+ * actually decides it — **xterm treats Ctrl+C as SIGINT and calls
+ * `preventDefault()`**, so the browser never generates a `copy` event at all.
+ * Cmd-C is not a terminal control key, so it is never intercepted and the native
+ * path runs untouched. That asymmetry is the whole bug: right-click › Copy
+ * works, because the context menu *does* raise a `copy` event, while the key
+ * that everyone reaches for first silently does nothing.
+ *
+ * It bites hardest in the Claude pane. Its TUI turns on mouse reporting, so
+ * selecting takes a Shift-drag most people never discover; having gone to that
+ * trouble, Ctrl+C then throwing the selection away is a poor reward.
  */
-export function attachClipboard(xterm: Xterm): void {
+export function attachClipboard(xterm: Xterm): Disposer {
+  const isMac = onMac();
+  const isWindows = onWindows();
+
   xterm.attachCustomKeyEventHandler((event) => {
     if (event.type !== "keydown") return true;
 
-    const isMac = navigator.platform.toUpperCase().includes("MAC");
-    // Plain Ctrl+C must stay SIGINT on every platform, so the modifier for
-    // terminal-local shortcuts is Cmd on macOS and Ctrl+Shift elsewhere.
+    const key = event.key.toLowerCase();
+
+    // **Ctrl+C copies a selection and interrupts when there is none** — the
+    // Windows Terminal and VS Code rule, which is what a Windows operator
+    // expects and what they reported missing.
+    //
+    // Interrupting must not become unreachable: a stale selection from ten
+    // minutes ago cannot be allowed to swallow the key that stops a runaway
+    // process. So the selection is **cleared once the copy lands**, and the
+    // very next Ctrl+C is an ordinary SIGINT. Worst case is pressing it twice,
+    // which is recoverable; a terminal you cannot interrupt is not.
+    if (isWindows && event.ctrlKey && !event.shiftKey && !event.altKey && key === "c") {
+      if (!xterm.hasSelection()) return true;
+
+      void copySelection(xterm)
+        .then(() => xterm.clearSelection())
+        // Leave the selection alone if the clipboard refused, so the operator
+        // can try again or use the header button rather than silently losing it.
+        .catch(() => {});
+      return false;
+    }
+
+    // Plain Ctrl+C stays SIGINT everywhere else, so terminal-local shortcuts
+    // take Cmd on macOS and Ctrl+Shift elsewhere.
     const combo = isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && event.shiftKey;
     if (!combo) return true;
 
-    if (event.key.toLowerCase() === "a") {
+    if (key === "a") {
       xterm.selectAll();
+      return false;
+    }
+
+    // Ctrl+Shift+C is the long-standing terminal convention, and on Linux it is
+    // the *only* copy binding — there is no Edit menu there either. Deliberately
+    // not extended to Cmd-C on macOS: that already works through the menu, and
+    // a second implementation of it is the bug this file was written about.
+    if (!isMac && key === "c") {
+      void copySelection(xterm).catch(() => {});
       return false;
     }
 
     return true;
   });
+
+  return attachFocusFallback(xterm, isMac);
+}
+
+/** Detaches whatever `attachClipboard` installed outside xterm itself. */
+export type Disposer = () => void;
+
+/**
+ * Copy the terminal's selection even when the terminal does not have focus.
+ *
+ * `attachCustomKeyEventHandler` only ever runs for keys delivered **to xterm's
+ * textarea**. That is the whole shortcut path, and it is enough right up until
+ * focus is somewhere else — at which point Ctrl+C reaches `document` instead,
+ * xterm never hears it, and the selection sitting on screen is not copied. The
+ * operator sees a highlighted block and a key that does nothing.
+ *
+ * Focus drifting off the terminal is not hypothetical here: it is why
+ * `ClaudePanel` restores focus on `mousedown` at all. Any header control, and
+ * any click on the padding around the rows, moves it. Right-click › Copy keeps
+ * working throughout, because the native menu raises a `copy` event that xterm
+ * answers regardless of focus — which is exactly the asymmetry that gets
+ * reported as "I can copy with the mouse but not with the keyboard".
+ *
+ * Deliberately narrow, because this is a listener on `window` competing with a
+ * key the terminal needs:
+ *
+ *  - **Only when xterm has a selection.** No selection is an ordinary interrupt
+ *    and must stay one.
+ *  - **Only when nothing else is selected.** A real DOM selection — prose in the
+ *    transcript, a file preview — belongs to the browser's own copy, and taking
+ *    it here would copy the terminal instead of the words under the cursor.
+ *  - **Only when the operator is not typing in a field.** A rename box is a text
+ *    field and Ctrl+C there means the field's own copy.
+ *  - **Never on macOS**, where ⌘C is the copy key and the Edit menu already
+ *    routes it. Plain Ctrl+C there is a control code the shell wants.
+ */
+function attachFocusFallback(xterm: Xterm, isMac: boolean): Disposer {
+  if (isMac || typeof window === "undefined") return () => {};
+
+  const onKey = (event: KeyboardEvent) => {
+    if (!event.ctrlKey || event.altKey || event.metaKey) return;
+    if (event.key.toLowerCase() !== "c") return;
+    // Shift is allowed: Ctrl+Shift+C is the other copy binding, and it reaches
+    // here for the same reason plain Ctrl+C does.
+
+    // xterm's own handler already dealt with it — this is the fallback for the
+    // case where the key never got there.
+    const target = event.target as HTMLElement | null;
+    if (target?.closest(".xterm")) return;
+
+    const tag = target?.tagName;
+    if (target?.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+      return;
+    }
+
+    if (!xterm.hasSelection()) return;
+    if ((window.getSelection()?.toString() ?? "").trim()) return;
+
+    event.preventDefault();
+    void copySelection(xterm)
+      .then(() => xterm.clearSelection())
+      .catch(() => {});
+  };
+
+  // Bubble, not capture: a text field or a nested handler that wants this key
+  // should win, and by the time it reaches `window` nothing else has claimed it.
+  window.addEventListener("keydown", onKey);
+  return () => window.removeEventListener("keydown", onKey);
 }

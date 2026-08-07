@@ -1,4 +1,5 @@
 import {
+  basename,
   migrateV2toV3,
   resolveWorkspace,
   makeServer,
@@ -168,6 +169,22 @@ export function run(log: (line: string) => void): boolean {
       makeProject(sid, "/home/me/api").id === makeProject(sid, "/home/me/api").id);
     check("makeProject labels from the basename",
       makeProject(sid, "/home/me/api").label === "api");
+
+    // A *local* project on Windows. Splitting on "/" alone left the label as
+    // the whole path, in the pane header, the rail row and the deck tile.
+    check("a windows drive path labels from its last component",
+      basename("C:\\Users\\me\\proj") === "proj");
+    check("a windows path with a trailing separator still labels",
+      basename("C:\\Users\\me\\proj\\") === "proj");
+    check("a UNC path labels from its last component",
+      basename("\\\\build01\\share\\proj") === "proj");
+    check("mixed separators resolve", basename("C:/Users/me/proj") === "proj");
+
+    // The other half, and the reason backslash is not a separator everywhere:
+    // a POSIX name may contain one, and most projects here are remote.
+    check("a posix folder containing a backslash keeps it",
+      basename("/home/me/we\\ird") === "we\\ird");
+    check("a bare posix path is unchanged", basename("/home/me/api/") === "api");
   }
 
   log("");

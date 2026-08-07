@@ -6,7 +6,9 @@ import {
   accelOf,
   conflicts,
   hasModifier,
+  isMac,
   label,
+  reachesTerminal,
   readBindings,
   writeBindings,
   type ActionId,
@@ -38,6 +40,26 @@ export function ShortcutSettings() {
 
   const clashes = conflicts(bindings);
   const clashing = new Set(clashes.flat());
+
+  /**
+   * Bindings the terminal *also* acts on.
+   *
+   * Worth its own marker rather than folding into DOUBLE-BOUND, because the
+   * failure is different and much harder to diagnose: nothing in rmux looks
+   * wrong at all. `useShortcuts` listens on the bubble, so xterm has already
+   * written to the pty by the time the shortcut runs — both things happen, and
+   * the shell half is invisible until someone notices their history jumping.
+   *
+   * **Shown off macOS only.** ⌘ is not a terminal modifier, so there is little
+   * to warn about there; and the one macOS chord this would flag —
+   * `Mod+Alt+Arrow`, four of the shipped defaults — depends on xterm's
+   * `macOptionIsMeta` and was *not* measured. Showing an unverified warning
+   * over defaults that platform ships and tests would teach the operator to
+   * ignore the marker, which costs more than the marker is worth.
+   */
+  const noisy = new Set(
+    isMac() ? [] : ACTIONS.filter((a) => reachesTerminal(bindings[a.id] ?? "")).map((a) => a.id),
+  );
 
   /**
    * While capturing, this listener owns the keyboard.
@@ -129,6 +151,12 @@ export function ShortcutSettings() {
                 </span>
               )}
 
+              {noisy.has(action.id) && (
+                <span className="micro shrink-0" style={{ color: "rgb(var(--primary))" }}>
+                  REACHES SHELL
+                </span>
+              )}
+
               <button
                 type="button"
                 className="chip shrink-0"
@@ -158,6 +186,13 @@ export function ShortcutSettings() {
       {clashes.length > 0 && (
         <span className="micro leading-relaxed" style={{ color: "var(--text-soft)" }}>
           Two actions share a shortcut. Whichever is listed first will win — rebind one of them.
+        </span>
+      )}
+
+      {noisy.size > 0 && (
+        <span className="micro leading-relaxed" style={{ color: "var(--text-soft)" }}>
+          A shortcut marked REACHES SHELL is also sent to the terminal — it will do both, and the
+          shell half is silent. Ctrl+Shift+ combinations are free.
         </span>
       )}
     </div>

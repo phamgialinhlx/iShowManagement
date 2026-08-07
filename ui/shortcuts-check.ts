@@ -20,6 +20,7 @@ import {
   match,
   moveFocus,
   normalise,
+  reachesTerminal,
   readBindings,
   writeBindings,
   type Bindings,
@@ -85,6 +86,32 @@ const reserved = ["Mod+W", "Mod+Q", "Mod+N", "Mod+M"];
 check(
   "no default takes a macOS menu key",
   ACTIONS.every((a) => !reserved.includes(normalise(DEFAULTS[a.id]))),
+);
+
+// The same guarantee for the other platforms, which had none. On macOS `Mod` is
+// ⌘ and free of the terminal; elsewhere it is Ctrl, and eight of the ten macOS
+// defaults were measured putting bytes on the wire — `Mod+4` sent `\x1c`, the
+// quit character. A colliding binding fires *both*, since `useShortcuts`
+// listens on the bubble and xterm has already written to the pty.
+//
+// `shortcut-terminal-check.ts` pins `reachesTerminal` against a real xterm; this
+// asserts the defaults respect it, which needs no browser and so runs here.
+const noisy = ACTIONS.filter((a) => reachesTerminal(DEFAULTS[a.id]));
+check(
+  noisy.length
+    ? `no default is also sent to the terminal — these are: ${noisy.map((a) => `${a.id} (${normalise(DEFAULTS[a.id])})`).join(", ")}`
+    : "no default is also sent to the terminal",
+  noisy.length === 0,
+);
+
+// Ctrl+C must keep working as an interrupt, so nothing may bind it. On macOS
+// this is `Ctrl+C` and off it `Mod+C` — the same physical keys either way.
+check(
+  "nothing binds the interrupt",
+  ACTIONS.every((a) => {
+    const chord = normalise(DEFAULTS[a.id]);
+    return chord !== "Ctrl+C" && chord !== "Mod+C";
+  }),
 );
 
 // ── conflicts are reported, not prevented ────────────────────────────────────

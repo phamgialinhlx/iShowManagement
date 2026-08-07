@@ -14,19 +14,45 @@ import { MouseModeTracker } from "./src/lib/mouse-modes";
 const lines: string[] = [];
 const say = (s: string) => lines.push(s);
 
+/**
+ * A keydown xterm will actually act on.
+ *
+ * **`keyCode` is not optional here, however deprecated it is.** xterm maps a key
+ * to a control code through the legacy `keyCode`, so a synthetic event without
+ * one is `keyCode: 0` and evaluates to nothing — Ctrl+C then produces no `\x03`
+ * and the probe reports "SIGINT was not sent" for a terminal that is working
+ * perfectly. That is a false alarm on the one assertion that must not be got
+ * wrong, so the event is built the way the browser builds it.
+ */
+const keyEvent = (extra: Record<string, unknown>) =>
+  new KeyboardEvent("keydown", {
+    key: "c",
+    code: "KeyC",
+    keyCode: 67,
+    which: 67,
+    bubbles: true,
+    cancelable: true,
+    ...extra,
+  } as unknown as KeyboardEventInit);
+
 const term = new Terminal({ fontSize: 12, scrollback: 100, allowTransparency: true });
 term.open(document.getElementById("t")!);
 term.write("hello world this is selectable text\r\nsecond line of output\r\n");
 
-let handlerRan = false;
+// **`attachCustomKeyEventHandler` sets one handler; it does not add one.**
+//
+// This used to call it a second time "to wrap" the handler `attachClipboard`
+// installs, with a comment saying so. It does not wrap it — xterm keeps a single
+// `_customKeyEventHandler` field, so the second call *replaced* rmux's handler
+// and every key assertion below was measuring the probe rather than the code
+// under test. Worth recording as a finding in its own right: anything that
+// attaches a handler after `attachClipboard` silently disables the terminal's
+// copy and select-all shortcuts.
+//
+// So there is exactly one handler now, and it is the real one. Whether xterm
+// reaches it is proven by behaviour further down — if Ctrl+C copies a selection
+// instead of sending an interrupt, the handler plainly ran.
 attachClipboard(term);
-// Wrap so we can tell whether xterm ever calls our handler.
-term.attachCustomKeyEventHandler((e) => {
-  if (e.type === "keydown" && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
-    handlerRan = true;
-  }
-  return true;
-});
 
 setTimeout(async () => {
   // 1. Can xterm produce a selection at all, and can we read it?
@@ -52,10 +78,25 @@ setTimeout(async () => {
   }
   say(`xterm fills a copy event: ${JSON.stringify(copyEventData.slice(0, 30))} (len ${copyEventData.length})`);
 
-  // 4. Does a Cmd+C keydown reach xterm's custom handler?
+  // 4. Does a Cmd+C keydown survive to the platform, rather than being claimed?
+  //
+  // This is the asymmetry behind the reported bug. Cmd-C is not a terminal
+  // control key, so xterm does not consume it and the native `copy` event above
+  // does the work. Ctrl+C *is* one: xterm claims it for SIGINT and calls
+  // preventDefault, so no `copy` event is ever raised — which is why right-click
+  // › Copy worked and Ctrl+C did nothing.
+  // Measured with **nothing selected**, which is the state the bug report
+  // describes and the only one where the asymmetry is visible: with a selection
+  // rmux's own handler takes Ctrl+C, so xterm never gets to claim it.
+  term.clearSelection();
   textarea?.focus();
-  textarea?.dispatchEvent(new KeyboardEvent("keydown", { key: "c", metaKey: true, bubbles: true, cancelable: true }));
-  say(`custom key handler saw Cmd+C: ${handlerRan}`);
+  const cmdC = keyEvent({ metaKey: true });
+  textarea?.dispatchEvent(cmdC);
+  say(`cmd+c left for the platform (not consumed): ${!cmdC.defaultPrevented}`);
+
+  const ctrlC = keyEvent({ ctrlKey: true });
+  textarea?.dispatchEvent(ctrlC);
+  say(`ctrl+c claimed by the terminal: ${ctrlC.defaultPrevented}`);
 
   // --- the buttons the Claude tab exposes, which need no selection ---------
   let copied = "";
@@ -82,6 +123,114 @@ setTimeout(async () => {
   copied = "";
   const had2 = await copySelection(term);
   say(`copySelection with a selection: returned ${had2}, wrote ${copied.length} chars`);
+
+  // --- Ctrl+C: copies a selection, and still interrupts without one ---------
+  //
+  // The reported bug was that highlight + right-click › Copy worked while
+  // Ctrl+C did nothing. The cause is that xterm claims Ctrl+C as SIGINT and
+  // calls preventDefault, so the browser never raises a `copy` event for it —
+  // whereas Cmd-C is not a control key and reaches the native path untouched.
+  //
+  // Only meaningful where the binding exists; elsewhere Ctrl+Shift+C is the
+  // copy key and plain Ctrl+C must remain SIGINT, which is what the second
+  // half asserts on every platform.
+  const isWindows = navigator.platform.toUpperCase().includes("WIN");
+  let sent = "";
+  const tap = term.onData((d) => { sent += d; });
+
+  const pressCtrlC = () => {
+    const ta = document.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+    ta?.focus();
+    ta?.dispatchEvent(keyEvent({ ctrlKey: true }));
+  };
+
+  // With a selection: it must copy, and must NOT send an interrupt.
+  term.selectAll();
+  copied = "";
+  sent = "";
+  pressCtrlC();
+  await new Promise((r) => setTimeout(r, 120));
+  say(
+    `ctrl+c with a selection: copied ${copied.length} chars, sent ${JSON.stringify(sent)}` +
+      (isWindows ? "" : " (binding is windows-only; no copy expected here)"),
+  );
+  if (isWindows) {
+    say(`  copied the selection: ${copied.length > 0}`);
+    say(`  suppressed the interrupt: ${!sent.includes("\x03")}`);
+    // And the selection is dropped, so the *next* Ctrl+C interrupts rather than
+    // copying the same stale text — a terminal you cannot interrupt is a much
+    // worse bug than one that needs the key pressed twice.
+    say(`  cleared the selection afterwards: ${!term.hasSelection()}`);
+  }
+
+  // With nothing selected: it must be an ordinary interrupt, everywhere.
+  term.clearSelection();
+  copied = "";
+  sent = "";
+  pressCtrlC();
+  await new Promise((r) => setTimeout(r, 120));
+  say(`ctrl+c with no selection sends SIGINT: ${sent.includes("\x03")} (${JSON.stringify(sent)})`);
+
+  // --- Ctrl+C while focus is NOT on the terminal ----------------------------
+  //
+  // `attachCustomKeyEventHandler` only fires for keys delivered to xterm's
+  // textarea, so once focus moves — a header button, the padding around the
+  // rows — the key lands on `document` and the terminal never hears it. Right-
+  // click › Copy keeps working the whole time, because the native menu raises a
+  // `copy` event xterm answers regardless of focus. That asymmetry is what gets
+  // reported as "the mouse can copy and the keyboard cannot".
+  const outside = document.createElement("button");
+  outside.textContent = "elsewhere";
+  document.body.append(outside);
+
+  const pressCtrlCOutside = () => {
+    outside.focus();
+    outside.dispatchEvent(keyEvent({ ctrlKey: true }));
+  };
+
+  term.selectAll();
+  copied = "";
+  sent = "";
+  pressCtrlCOutside();
+  await new Promise((r) => setTimeout(r, 150));
+  say(
+    `ctrl+c with focus off the terminal: copied ${copied.length} chars, sent ${JSON.stringify(sent)}` +
+      (isWindows ? "" : " (fallback is non-mac only; no copy expected here)"),
+  );
+  if (isWindows) {
+    say(`  copied the selection anyway: ${copied.length > 0}`);
+    say(`  did not send an interrupt: ${!sent.includes("\x03")}`);
+  }
+
+  // And it must not fire when there is nothing selected, or a keystroke aimed
+  // at nothing would start swallowing interrupts from outside the pane.
+  term.clearSelection();
+  copied = "";
+  pressCtrlCOutside();
+  await new Promise((r) => setTimeout(r, 150));
+  say(`  stays out of the way with no selection: ${copied.length === 0}`);
+
+  // A real DOM selection belongs to the browser's own copy — taking it here
+  // would copy the terminal instead of the words under the cursor.
+  const prose = document.createElement("p");
+  prose.textContent = "ordinary prose the operator highlighted";
+  prose.style.userSelect = "text";
+  document.body.append(prose);
+  const range = document.createRange();
+  range.selectNodeContents(prose);
+  window.getSelection()?.removeAllRanges();
+  window.getSelection()?.addRange(range);
+
+  term.selectAll();
+  copied = "";
+  pressCtrlCOutside();
+  await new Promise((r) => setTimeout(r, 150));
+  say(`  yields to a real DOM selection: ${copied.length === 0}`);
+  window.getSelection()?.removeAllRanges();
+  outside.remove();
+  prose.remove();
+
+  tap.dispose();
 
   // --- select mode: does disabling reporting locally actually stop it? ------
   const tracker = new MouseModeTracker();

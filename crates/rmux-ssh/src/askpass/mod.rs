@@ -22,14 +22,23 @@ use std::path::PathBuf;
 use parking_lot::RwLock;
 use serde::Serialize;
 
-// **Unix only, and stubbed rather than half-ported on Windows.** Two of the
-// three guards on this socket are filesystem permissions, which Windows does
-// not have — see `server_stub.rs` for why that makes a naive port worse than
-// no port at all.
+// **One bridge, two transports.** A Unix socket where there are Unix sockets,
+// a named pipe on Windows — and the pipe carries an explicit owner-only DACL,
+// which is what makes it an equivalent guard rather than a weaker one. It was a
+// stub until a real password host proved the stub's premise wrong: `ssh` given
+// neither a terminal nor a helper does not "fail fast with a reason", it burns
+// its retries against nothing and reports `Permission denied`, on every command,
+// forever. See `server_windows.rs`.
+//
+// Anything that is neither is still stubbed out.
 #[cfg(unix)]
 pub mod server;
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[path = "server_windows.rs"]
+pub mod server;
+
+#[cfg(not(any(unix, windows)))]
 #[path = "server_stub.rs"]
 pub mod server;
 
@@ -84,8 +93,15 @@ fn env_for(config: Option<&AskpassConfig>) -> BTreeMap<String, String> {
         // Nothing registered. Tell ssh not to try a terminal it will never get —
         // failing immediately is far better than a terminal that hangs forever
         // with no visible reason.
+        //
+        // A `BatchMode` entry used to sit here too, and it never did anything:
+        // `BatchMode` is an **ssh_config option, not an environment variable**,
+        // so `ssh` has never read a variable by that name. Removed rather than
+        // converted to a `-o` flag — measured against a real password host, `ssh`
+        // given a pipe for stdin already fails immediately with "Permission
+        // denied" rather than waiting for anything, so the flag would buy no
+        // behaviour while changing what macOS and Linux do.
         env.insert("SSH_ASKPASS_REQUIRE".to_owned(), "never".to_owned());
-        env.insert("BatchMode".to_owned(), "yes".to_owned());
         return env;
     };
 
@@ -94,6 +110,14 @@ fn env_for(config: Option<&AskpassConfig>) -> BTreeMap<String, String> {
     // present or DISPLAY is unset, neither of which we can rely on.
     env.insert("SSH_ASKPASS_REQUIRE".to_owned(), "force".to_owned());
     env.insert("RMUX_ASKPASS_SOCKET".to_owned(), config.socket.display().to_string());
+    // **Which `ssh` is asking.** Minted per invocation and never reused, so a
+    // second prompt carrying the same value is the *same* `ssh` asking again —
+    // which is what it does when an answer is refused. Nothing here acts on it;
+    // it exists so the app can tell "that credential was wrong" apart from "a
+    // different connection is authenticating too", which are otherwise
+    // indistinguishable and happen milliseconds apart. See `Memory::decide` in
+    // `src-tauri/src/askpass.rs`.
+    env.insert("RMUX_ASKPASS_ATTEMPT".to_owned(), uuid::Uuid::new_v4().simple().to_string());
     // Passed explicitly rather than left to be inherited from our own
     // environment: the helper is a grandchild process (ssh spawns it), and
     // depending on two levels of implicit inheritance for a security check is
@@ -122,6 +146,14 @@ pub struct Prompt {
     /// account, which is what tells the user whether to trust it.
     pub message: String,
     pub kind: PromptKind,
+    /// Which `ssh` invocation asked, from `RMUX_ASKPASS_ATTEMPT`.
+    ///
+    /// **Not sent to the UI.** It is bookkeeping for deciding whether a
+    /// remembered credential was just refused, and the webview has no use for
+    /// it — see the env var's comment in [`env_for`]. `None` if the helper did
+    /// not supply one.
+    #[serde(skip)]
+    pub attempt: Option<String>,
 }
 
 /// What kind of answer a prompt wants — drives which UI is shown.

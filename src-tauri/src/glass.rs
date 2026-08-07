@@ -216,6 +216,14 @@ mod imp {
 use serde::{Deserialize, Serialize};
 
 /// What the operator asked for, from Settings › Appearance.
+///
+/// **The fields are the IPC contract, not dead weight** — they have to exist for
+/// the payload to deserialise on every platform, and only the macOS
+/// implementation below reads them. So off macOS the compiler is right that
+/// nothing reads them and wrong that they can go: dropping one would reject the
+/// message the UI sends. Silenced narrowly, and only where it applies, rather
+/// than by weakening the lint or adding a fake reader.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GlassOptions {

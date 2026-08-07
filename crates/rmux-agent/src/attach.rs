@@ -357,10 +357,10 @@ fn hand_off(binary: &std::path::Path) -> anyhow::Result<ExitCode> {
             .env(HANDOFF_GUARD, "1")
             .status()?;
 
-        return Ok(match status.code() {
+        Ok(match status.code() {
             Some(0) => ExitCode::SUCCESS,
             _ => ExitCode::FAILURE,
-        });
+        })
     }
 }
 

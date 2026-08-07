@@ -125,9 +125,33 @@ export function reattachName(s: Pick<SessionV3, "id" | "kind">): string {
   return s.kind === "claude" ? `claude-${s.id}` : s.id;
 }
 
-/** The folder's last component — what a project is labelled by default. */
-export const basename = (path: string): string =>
-  path.replace(/\/+$/, "").split("/").filter(Boolean).pop() ?? path;
+/**
+ * A drive-letter (`C:\`) or UNC (`\\server\share`) path.
+ *
+ * The discriminator is deliberately the *prefix*, not the running platform: a
+ * remote project is POSIX even when rmux itself runs on Windows, and most
+ * projects are remote. Anything absolute-POSIX starts with `/` and is untouched.
+ */
+const WINDOWS_PATH = /^[a-zA-Z]:[\\/]|^\\\\/;
+
+/**
+ * The folder's last component — what a project is labelled by default.
+ *
+ * **Backslash is a separator only in a path already known to be Windows.** A
+ * POSIX filename may contain anything but `/` and NUL, backslash included, so
+ * splitting on it unconditionally would rename a remote folder genuinely called
+ * `we\ird` — the same reasoning that makes `rmux-fs` use NUL for its records.
+ *
+ * Splitting on `/` alone was a macOS-shaped assumption: it left a **local**
+ * Windows project labelled `C:\Users\me\proj`, in the pane header, the rail row
+ * and the deck tile — the full path in every place meant to carry a short name.
+ */
+export const basename = (path: string): string => {
+  const windows = WINDOWS_PATH.test(path);
+  const trailing = windows ? /[\\/]+$/ : /\/+$/;
+  const separator = windows ? /[\\/]+/ : /\/+/;
+  return path.replace(trailing, "").split(separator).filter(Boolean).pop() ?? path;
+};
 
 // ── migration v2 → v3 ────────────────────────────────────────────────────────
 
