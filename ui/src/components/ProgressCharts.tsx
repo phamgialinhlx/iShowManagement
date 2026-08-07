@@ -1,4 +1,58 @@
+import { useState } from "react";
+
 import { humanDuration, peakHour, type DayPoint, type HourPoint } from "../lib/dashboard";
+
+/**
+ * The value under the pointer.
+ *
+ * Every bar here carried a `title`, which is a tooltip in the sense that the
+ * HTML spec means and not in the sense anybody wants: the webview shows it
+ * after about a second, in the OS's own font, and it is missed entirely by
+ * someone sweeping across a chart to compare columns — which is the whole
+ * reason to hover a bar chart. Reported as the bars having "no indication of
+ * value", which is exactly right; a number nobody sees is not a number.
+ *
+ * Drawn **inside** the plot area rather than floating above it, pinned to the
+ * top where the bars are shortest. That means it can never be clipped by the
+ * card and needs no measurement — the failure mode of a positioned popover, and
+ * the one the file tree's context menu already had to learn.
+ *
+ * `pointer-events: none`, or the label lands under the cursor, ends the hover
+ * that produced it, and flickers.
+ */
+function Readout({
+  index,
+  count,
+  value,
+  caption,
+}: {
+  index: number;
+  count: number;
+  value: string;
+  caption: string;
+}) {
+  // At the ends the label is anchored to its own edge instead of centred, so a
+  // chart that starts at the card's border does not push it outside.
+  const shift = index === 0 ? "0" : index === count - 1 ? "-100%" : "-50%";
+  return (
+    <div
+      className="pointer-events-none absolute top-0 z-10 flex items-baseline gap-2 whitespace-nowrap px-[6px] py-[2px]"
+      style={{
+        left: `${((index + 0.5) / Math.max(1, count)) * 100}%`,
+        transform: `translateX(${shift})`,
+        background: "var(--app-panel)",
+        border: "1px solid var(--border)",
+      }}
+    >
+      <span className="data text-[11px] tabular-nums" style={{ color: "var(--text)" }}>
+        {value}
+      </span>
+      <span className="micro" style={{ color: "var(--text-faint)" }}>
+        {caption}
+      </span>
+    </div>
+  );
+}
 
 /**
  * The Progress page's charts.
@@ -31,6 +85,8 @@ export function DayBars({
 }) {
   const max = Math.max(1, ...points.map((p) => p[field]));
   const peak = points.reduce((best, p) => (p[field] > best[field] ? p : best), points[0]!);
+  const [at, setAt] = useState<number | null>(null);
+  const shown = at !== null ? points[at] : undefined;
 
   return (
     <div className="flex flex-col gap-1">
@@ -41,14 +97,18 @@ export function DayBars({
         </span>
       </div>
 
-      <div className="flex h-[68px] items-end gap-[3px]">
-        {points.map((p) => {
+      {/* `relative` so the readout is positioned against the plot, and
+          `onMouseLeave` on the row rather than per column — leaving one bar for
+          its neighbour would otherwise clear and re-set on every crossing. */}
+      <div className="relative flex h-[68px] items-end gap-[3px]" onMouseLeave={() => setAt(null)}>
+        {points.map((p, i) => {
           const value = p[field];
           const height = max > 0 ? (value / max) * 100 : 0;
           return (
             <div
               key={p.day}
               className="flex h-full flex-1 flex-col justify-end"
+              onMouseEnter={() => setAt(i)}
               title={`${p.day} · ${format ? format(value) : value}`}
             >
               <div
@@ -56,13 +116,27 @@ export function DayBars({
                   // A recorded-but-tiny value still gets a visible sliver, or a
                   // day's work reads as a day off.
                   height: value > 0 ? `${Math.max(3, height)}%` : 1,
-                  background: value > 0 ? "rgb(var(--busy))" : "var(--border)",
+                  // The hovered column is brightened, so the number and the bar
+                  // it describes are unmistakably the same one.
+                  background:
+                    value > 0
+                      ? `rgb(var(--busy) / ${at === null || at === i ? 1 : 0.55})`
+                      : "var(--border)",
                   transition: "height var(--dur) var(--ease)",
                 }}
               />
             </div>
           );
         })}
+
+        {shown && at !== null && (
+          <Readout
+            index={at}
+            count={points.length}
+            value={format ? format(shown[field]) : String(shown[field])}
+            caption={shown.day.slice(5)}
+          />
+        )}
       </div>
 
       <div className="flex justify-between">
@@ -108,6 +182,8 @@ export function HourClock({
   const peak = peakHour(points);
   const current = now ?? new Date().getHours();
   const total = points.reduce((n, p) => n + p.seconds, 0);
+  const [at, setAt] = useState<number | null>(null);
+  const shown = at !== null ? points[at] : undefined;
 
   return (
     <div className="flex flex-col gap-1">
@@ -118,11 +194,12 @@ export function HourClock({
         </span>
       </div>
 
-      <div className="flex h-[68px] items-end gap-[2px]">
-        {points.map((p) => (
+      <div className="relative flex h-[68px] items-end gap-[2px]" onMouseLeave={() => setAt(null)}>
+        {points.map((p, i) => (
           <div
             key={p.hour}
             className="flex h-full flex-1 flex-col justify-end"
+            onMouseEnter={() => setAt(i)}
             title={`${p.label}:00 · ${humanDuration(p.seconds)}${
               total ? ` · ${Math.round((p.seconds / total) * 100)}%` : ""
             }`}
@@ -132,13 +209,28 @@ export function HourClock({
                 height: p.seconds > 0 ? `${Math.max(3, (p.seconds / max) * 100)}%` : 1,
                 background:
                   p.seconds > 0
-                    ? `rgb(var(--busy) / ${p.hour === peak?.hour ? 1 : 0.72})`
+                    ? `rgb(var(--busy) / ${
+                        at === i ? 1 : at !== null ? 0.45 : p.hour === peak?.hour ? 1 : 0.72
+                      })`
                     : "var(--border)",
                 transition: "height var(--dur) var(--ease)",
               }}
             />
           </div>
         ))}
+
+        {shown && at !== null && (
+          <Readout
+            index={at}
+            count={points.length}
+            // An empty hour reads as a dash rather than "0s": nothing was
+            // recorded, which is not the same claim as zero seconds of work.
+            value={shown.seconds > 0 ? humanDuration(shown.seconds) : "—"}
+            caption={`${shown.label}:00${
+              total && shown.seconds > 0 ? ` · ${Math.round((shown.seconds / total) * 100)}%` : ""
+            }`}
+          />
+        )}
       </div>
 
       {/* The axis is its own row of 24 cells so a tick sits under its column
@@ -249,21 +341,41 @@ export function StreakGrid({ points }: { points: DayPoint[] }) {
     return 1;
   };
   const fill = ["var(--border)", "rgb(var(--busy) / 0.3)", "rgb(var(--busy) / 0.6)", "rgb(var(--busy))"];
+  const [hovered, setHovered] = useState<DayPoint | null>(null);
 
   // Columns are weeks, so the grid reads the way a calendar does. Filling by
   // column keeps each row a weekday.
   return (
     <div className="flex flex-col gap-1">
-      <span className="micro">LAST 8 WEEKS</span>
+      {/* The readout goes in the header rather than over the grid: the cells are
+          10px, so a label pinned to one would cover its neighbours — the very
+          squares being compared. Fixed position, so nothing moves as the pointer
+          sweeps across eight weeks. */}
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="micro">LAST 8 WEEKS</span>
+        <span className="data text-[10px]" style={{ color: "var(--text-faint)" }}>
+          {hovered
+            ? `${hovered.day} · ${hovered.tasksDone} tasks · ${hovered.commands} commands`
+            : `${points.filter((p) => p.any).length} active days`}
+        </span>
+      </div>
       <div
         className="grid gap-[3px]"
         style={{ gridTemplateRows: "repeat(7, 10px)", gridAutoFlow: "column", gridAutoColumns: "10px" }}
+        onMouseLeave={() => setHovered(null)}
       >
         {points.map((p) => (
           <div
             key={p.day}
+            onMouseEnter={() => setHovered(p)}
             title={`${p.day} · ${p.tasksDone} tasks · ${p.commands} commands`}
-            style={{ background: fill[level(p)], width: 10, height: 10 }}
+            style={{
+              background: fill[level(p)],
+              width: 10,
+              height: 10,
+              outline: hovered?.day === p.day ? "1px solid var(--text)" : "none",
+              outlineOffset: 1,
+            }}
           />
         ))}
       </div>

@@ -124,6 +124,33 @@ export type JiraIssueDetail = JiraIssue & {
   comments: JiraComment[];
 };
 
+export type Container = {
+  id: string;
+  name: string;
+  image: string;
+  /** Docker's own words — "restarting" and "paused" are real states a boolean would have to lie about. */
+  status: string;
+  running: boolean;
+  cpu: number | null;
+  /** Bytes, so the UI picks the unit rather than parsing one back. */
+  memory: number | null;
+  memoryLimit: number | null;
+  ports: string;
+};
+
+/** Either a list, or the reason there is not one. */
+export type DockerReport = { containers: Container[] } | { unavailable: { reason: string } };
+
+export type AgentSession = {
+  name: string;
+  pid: number | null;
+  ageSeconds: number;
+  attached: boolean;
+  command: string;
+  memory: number | null;
+  cpu: number | null;
+};
+
 export type ForwardState = "local" | "starting" | "active" | "failed" | "stopped";
 export type Forward = { port: number; state: ForwardState; error?: string };
 
@@ -615,6 +642,19 @@ export const api = {
   logExport: () => call<string>("log_export"),
 
   metricsSample: (target: TargetRef) => call<MetricsSample>("metrics_sample", { target }),
+
+  /** Containers on a host, joined with their live CPU and memory. */
+  dockerContainers: (target: TargetRef) => call<DockerReport>("docker_containers", { target }),
+  /**
+   * Start, stop or restart a container.
+   *
+   * The action is a closed set on the Rust side too, so nothing the webview
+   * sends can widen it into another `docker` subcommand.
+   */
+  dockerAction: (target: TargetRef, id: string, action: "start" | "stop" | "restart") =>
+    call<string>("docker_action", { target, id, action }),
+  /** Sessions `rmux-agent` is holding on a host — the abandoned ones included. */
+  hostSessions: (target: TargetRef) => call<AgentSession[]>("host_sessions", { target }),
 
   sshConfigHosts: () => call<ConfigHost[]>("ssh_config_hosts"),
 

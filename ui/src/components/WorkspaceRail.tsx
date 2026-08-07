@@ -112,14 +112,14 @@ function ServerDot({ status }: { status: SessionStatus }) {
 }
 
 /** Terminal glyph: a prompt mark (`>_`). Rule 3 — inline SVG, square caps. */
-function TerminalMark() {
+function TerminalMark({ color = "var(--text-faint)" }: { color?: string }) {
   return (
     <svg
       width="11"
       height="11"
       viewBox="0 0 24 24"
       fill="none"
-      stroke="var(--text-faint)"
+      stroke={color}
       strokeWidth="2.4"
       strokeLinecap="square"
       aria-hidden="true"
@@ -358,7 +358,7 @@ function ProjectNode({
 
   const mine = sessions.filter((s) => s.projectId === project.id);
   const [confirming, setConfirming] = useState(false);
-  const [adding, setAdding] = useState<"terminal" | "claude" | null>(null);
+  const [adding, setAdding] = useState(false);
   const onScreen = new Set(
     panes.flatMap((p) => (p && p.kind === "session" ? [p.id] : [])),
   );
@@ -380,8 +380,7 @@ function ProjectNode({
     resume?: string;
     name?: string;
   }) => {
-    if (!adding) return;
-    const id = addSession(project.id, adding, {
+    const id = addSession(project.id, "claude", {
       skipPermissions: choice.skipPermissions,
       modelProfile: choice.modelProfile,
       resume: choice.resume,
@@ -390,7 +389,7 @@ function ProjectNode({
       name: choice.name?.trim() || undefined,
     });
     openSession(id);
-    setAdding(null);
+    setAdding(false);
   };
 
   return (
@@ -420,19 +419,29 @@ function ProjectNode({
         >
           <FolderIcon />
         </button>
+        {/* A **terminal** glyph, not a `+`.
+            The plus sat next to the Claude mark and read as a generic "add", so
+            the two verbs looked like one control with a preference — and it was
+            routed through `QuickAdd`, which asks the two questions that only
+            make sense for Claude (skip permissions, which provider). A shell has
+            neither, so the panel made `+` look like a second way to start a
+            Claude session. It creates a terminal directly now, and says so. */}
         <button
           type="button"
-          onClick={() => setAdding("terminal")}
+          onClick={() => {
+            const id = addSession(project.id, "terminal");
+            openSession(id);
+          }}
           aria-label={`New terminal in ${project.label}`}
           title="New terminal"
           className="shrink-0 px-1 opacity-70 hover:opacity-100"
           style={{ color: "var(--text-soft)" }}
         >
-          <PlusIcon />
+          <TerminalMark color="currentColor" />
         </button>
         <button
           type="button"
-          onClick={() => setAdding("claude")}
+          onClick={() => setAdding(true)}
           aria-label={`New Claude session in ${project.label}`}
           title="New Claude session"
           className="shrink-0 px-1 opacity-70 hover:opacity-100"
@@ -458,11 +467,9 @@ function ProjectNode({
             where={`${project.folder} on ${host ? serverLabel(host) : "this machine"}`}
             inheritedProfile={mine.find((s) => s.modelProfile)?.modelProfile}
             busy={false}
-            // Only Claude has a history to offer; a terminal's quick-add keeps
-            // its single START button.
-            target={adding === "claude" ? target : undefined}
-            folder={adding === "claude" ? project.folder : undefined}
-            onCancel={() => setAdding(null)}
+            target={target}
+            folder={project.folder}
+            onCancel={() => setAdding(false)}
             onCreate={add}
           />
         </div>

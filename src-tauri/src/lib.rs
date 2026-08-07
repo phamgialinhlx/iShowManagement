@@ -24,9 +24,12 @@ mod auth;
 mod commands;
 mod face_models;
 mod glass;
+mod identity_migration;
+mod keychain;
 mod lock;
 mod logs;
 mod model_profile;
+mod services;
 mod settings_window;
 mod ssh_keys;
 mod theme;
@@ -88,6 +91,19 @@ pub fn run() {
         None => tracing::debug!("PATH left as inherited"),
     }
 
+    // **Before the first window, because WebKit opens localStorage with it.**
+    // A bundle identifier keys the webview's data store, so a rename makes the
+    // app look brand new: the session list, notes and every preference live in
+    // `~/Library/WebKit/<id>/`. Copying into a store that is already open gives
+    // a database that is present and missing its last writes, so this runs here
+    // and nowhere later.
+    match identity_migration::run(logs::IDENTIFIER) {
+        identity_migration::Outcome::Migrated { from } => {
+            tracing::info!(%from, "carried the previous install's data forward")
+        }
+        outcome => tracing::debug!(?outcome, "no app-data migration needed"),
+    }
+
     tauri::Builder::default()
         // Gives a notification rmux's own icon and name. Driven from Rust (see
         // `notify`), so it needs no ACL entry.
@@ -144,6 +160,9 @@ pub fn run() {
             auth::jira_transition,
             auth::jira_comment,
             auth::jira_create,
+            services::docker_containers,
+            services::docker_action,
+            services::host_sessions,
             ssh_keys::ssh_key_status,
             ssh_keys::ssh_key_install,
             settings_window::open_settings,
