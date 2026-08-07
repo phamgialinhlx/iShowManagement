@@ -58,5 +58,33 @@ echo "==> host"
 cargo build -p rmux-agent --bin rmux-agent --release
 cp target/release/rmux-agent "$OUT/rmux-agent"
 
+# ---------------------------------------------------------------------------
+# Sign the host agent, if a Developer ID is available.
+#
+# **Notarisation rejects the whole app over this one file.** The agents ship as
+# Tauri *resources*, not sidecars, so `tauri build` signs the app around them
+# and never touches them — and Apple then refuses the dmg with three errors
+# against `Contents/Resources/agents/rmux-agent`: no Developer ID, no secure
+# timestamp, no hardened runtime. Measured, on submission c6cb5590.
+#
+# Only the host binary is signed. The linux-musl and windows-gnu agents are not
+# Mach-O, so the notary service ignores them — and `codesign` cannot sign them
+# anyway.
+#
+# `--timestamp` contacts Apple's timestamp server, and `--options runtime` is
+# the hardened runtime. Both are required; neither is the default.
+IDENTITY="${APPLE_SIGNING_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+  | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+
+if [ -n "$IDENTITY" ]; then
+  echo "==> signing the host agent as $IDENTITY"
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$OUT/rmux-agent"
+  codesign --verify --strict "$OUT/rmux-agent" && echo "    signed"
+else
+  # Said out loud rather than skipped silently: a dev build works unsigned, and
+  # the failure only appears at notarisation, minutes into a release.
+  echo "==> no Developer ID found; the host agent is unsigned (notarisation will reject it)"
+fi
+
 echo
 ls -la "$OUT"
