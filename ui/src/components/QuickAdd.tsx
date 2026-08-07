@@ -88,7 +88,7 @@ export function QuickAdd({
       ref={box}
       role="dialog"
       aria-label={`New session in ${label}`}
-      className="inset flex flex-col gap-3 px-3 py-3"
+      className="inset flex max-h-[86vh] flex-col gap-3 overflow-y-auto px-3 py-3"
       style={{ borderBottom: "1px solid var(--border)" }}
     >
       <div className="flex flex-col gap-[2px]">

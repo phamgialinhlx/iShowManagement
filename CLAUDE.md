@@ -209,6 +209,32 @@ emit ordinary POSIX and know nothing about it.
 - `tests/live_windows.rs` drives all of it against a real host — a filename containing `&` and
   `%PATH%`, a binary upload over stdin, search, and the clobber guard.
 
+## Any list of unknown length gets a ceiling, in the element that scrolls
+
+A picker of a host's conversations grew past the bottom of the screen, carrying
+its own CANCEL button off with it — so the dialog could neither be scrolled nor
+dismissed. It looked fine for weeks because the folder being tested had four
+sessions in it.
+
+- **`flex-1 overflow-y-auto` bounds nothing on its own.** It resolves against
+  the nearest ancestor with a *definite* height. Inside a pane there is one;
+  inside a dialog that sizes to its content there is not, so the same component
+  is correct in one parent and unbounded in the other. That is why this appeared
+  the moment the quick-add moved from the rail into a modal, with the component
+  itself unchanged.
+- **Put the `max-height` on the scrolling element**, not on a wrapper. A cap on
+  a parent only works if the child is actually being sized by it, which is the
+  assumption that just failed.
+- **The count comes from somewhere else.** Conversations on a host, containers,
+  processes, ports, issues on a board, prompts in a transcript — every one of
+  these is unbounded in principle and small in the folder you happen to develop
+  against. Assume the largest real case, not the one on screen.
+- **A dialog needs its own `max-h` and `overflow-y-auto` too.** Capping the list
+  is not enough when headers, controls and a long path can exceed a short window
+  on their own.
+- Existing ceilings: the transcript, SENT, the Jira picker, today's list, the
+  task list, the host-wide resume list. Anything added beside them needs one.
+
 ## Release notes are for the people installing it
 
 Written for a user opening the releases page, not for the person who wrote the

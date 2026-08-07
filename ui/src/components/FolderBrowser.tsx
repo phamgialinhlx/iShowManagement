@@ -171,8 +171,17 @@ export function FolderBrowser({
       </div>
 
       <div
+        // **A ceiling of its own, not an inherited one.**
+        //
+        // `flex-1` only bounds this list when an ancestor has a definite
+        // height. Inside the rail it did; inside the quick-add modal, which
+        // sizes to its content, nothing capped it — so a host with forty
+        // conversations grew the dialog past the bottom of the screen, taking
+        // its own buttons with it and leaving no way to scroll to them.
+        // A `max-height` here is true in both, and cannot be undone by a
+        // parent that has not been laid out yet.
         className="inset min-h-0 flex-1 overflow-y-auto"
-        style={{ border: "1px solid var(--border)" }}
+        style={{ border: "1px solid var(--border)", maxHeight: "46vh" }}
       >
         {error && (
           <p role="alert" className="data p-2 text-[11px]" style={{ color: "rgb(var(--primary))" }}>
