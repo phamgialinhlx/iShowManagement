@@ -52,6 +52,9 @@ import {
 
 const V3_KEY = "rmux.workspace.v3";
 const V2_KEY = "rmux.workspace.v2";
+/** The instruments-rail collapse flag, persisted on its own since before the rail
+ *  moved into this store. Kept out of the v3 snapshot so existing installs keep it. */
+const WIDGETS_COLLAPSED_KEY = "rmux.widgetRail.collapsed";
 
 /** Guarded so importing this module in a non-browser context (a test) is inert. */
 const storage: Pick<Storage, "getItem" | "setItem"> | null =
@@ -88,6 +91,10 @@ type State = Core & {
   deck: Deck;
   focusedCell: number | null;
   railCollapsed: boolean;
+  /** The instruments (right) rail collapsed to a strip. Unlike the servers rail
+   *  this is a lasting preference, so it is persisted (`rmux.widgetRail.collapsed`)
+   *  and survives relaunch. */
+  widgetsCollapsed: boolean;
 
   // ── selectors (cheap derivations consumers reach for) ──────────────────────
   serverOf: (sessionOrProjectId: string) => Server | undefined;
@@ -150,6 +157,7 @@ type State = Core & {
   setLive: (id: string, handle: string) => void;
   clearLive: (id: string) => void;
   toggleRail: () => void;
+  toggleWidgets: () => void;
 
   // ── files (per project) ────────────────────────────────────────────────────
   targetOfProject: (projectId: ProjectId) => TargetRef;
@@ -262,6 +270,7 @@ export const useWorkspace = create<State>((set, get) => ({
   deck: parseDeck(storage?.getItem("rmux.deck") ?? storage?.getItem("rmux.grid")),
   focusedCell: null,
   railCollapsed: false,
+  widgetsCollapsed: storage?.getItem(WIDGETS_COLLAPSED_KEY) === "1",
 
   // ── selectors ──────────────────────────────────────────────────────────────
   projectOf: (sessionId) => {
@@ -497,6 +506,17 @@ export const useWorkspace = create<State>((set, get) => ({
       return { live };
     }),
   toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
+  toggleWidgets: () =>
+    set((s) => {
+      const widgetsCollapsed = !s.widgetsCollapsed;
+      // Persisted on its own key, not through the v3 snapshot — see the note there.
+      try {
+        storage?.setItem(WIDGETS_COLLAPSED_KEY, widgetsCollapsed ? "1" : "0");
+      } catch {
+        // A full localStorage must not stop the panel toggling.
+      }
+      return { widgetsCollapsed };
+    }),
 
   // ── files (per project) ────────────────────────────────────────────────────
   targetOfProject: (projectId) => get().serverOf(projectId)?.target ?? EMPTY_TARGET,
