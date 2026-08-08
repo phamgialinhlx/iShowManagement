@@ -154,6 +154,7 @@ export type DockerReport = { containers: Container[] } | { unavailable: { reason
 
 export type AgentSession = {
   name: string;
+  alias: string | null;
   pid: number | null;
   ageSeconds: number;
   attached: boolean;

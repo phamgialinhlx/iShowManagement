@@ -925,7 +925,7 @@ function ServerNode({
                     onClick={() => {
                       // `s.name` is the real daemon key; the alias is display
                       // only, so `adoptServerSession` always gets the key.
-                      adoptServerSession(server.id, s.name, isClaudeSession(s.command) ? "claude" : "terminal");
+                      adoptServerSession(server.id, s.name, isClaudeSession(s.command) ? "claude" : "terminal", s.alias);
                       setAttaching(false);
                     }}
                   >

@@ -680,7 +680,7 @@ function Sessions({ target }: { target: TargetRef }) {
             style={{ width: 7, height: 7, background: s.attached ? "rgb(var(--busy))" : "var(--text-faint)" }}
           />
           <div className="flex min-w-0 flex-1 flex-col">
-            <span className="data truncate text-[12px]" style={{ color: "var(--text)" }}>{s.name}</span>
+            <span className="data truncate text-[12px]" style={{ color: "var(--text)" }}>{s.alias ?? s.name}</span>
             <span className="micro truncate" style={{ color: "var(--text-faint)" }}>
               {s.attached ? "attached" : "detached"} · {age(s.ageSeconds)}
               {s.pid ? ` · pid ${s.pid}` : ""}

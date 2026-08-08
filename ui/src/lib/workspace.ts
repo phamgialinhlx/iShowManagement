@@ -121,7 +121,12 @@ type State = Core & {
       >
     >,
   ) => string;
-  adoptServerSession: (serverId: ServerId, name: string, kind: "terminal" | "claude") => void;
+  adoptServerSession: (
+    serverId: ServerId,
+    name: string,
+    kind: "terminal" | "claude",
+    alias?: string | null,
+  ) => void;
   removeSession: (id: string) => void;
   detachSession: (id: string) => void;
   removeProject: (id: ProjectId) => void;
@@ -331,7 +336,7 @@ export const useWorkspace = create<State>((set, get) => ({
     return id;
   },
 
-  adoptServerSession: (serverId, name, kind) => {
+  adoptServerSession: (serverId, name, kind, alias) => {
     // `name` is the real daemon key (`term-…` / `claude-…`). The picker hands
     // it over verbatim even when it displayed an alias; the alias is display
     // only. A row keyed by this exact key already exists → return to it.
@@ -356,7 +361,10 @@ export const useWorkspace = create<State>((set, get) => ({
     }
     const projectId = get().addRunningProject(serverId);
     const newId = get().addSession(projectId, kind, {
-      name: id,            // the display/bare id; reattach -> claude-<id>
+      // The display name is the alias the picker showed (`s.alias ?? s.name`),
+      // or the bare id when there is none — the same label a rename would set.
+      // `renamed` latches so an auto-adopted title never overwrites it.
+      name: (alias?.trim() || id),
       renamed: true,
       hostName: name,      // the exact daemon-held name, used verbatim at attach/kill
     });

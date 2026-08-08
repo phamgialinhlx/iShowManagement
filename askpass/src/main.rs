@@ -16,6 +16,58 @@
 
 use std::process::ExitCode;
 
+/// Hand the secret to `ssh`, which reads the first line of stdout.
+///
+/// This is deliberately **not** `println!`. Rust's `println!` panics when its
+/// write hits a broken pipe, and this binary is compiled with
+/// `panic = "abort"` (see Cargo.toml) — so a dead pipe was a **SIGABRT**, not
+/// an error return. That matters here more than it usually does: `ssh` dies or
+/// moves on while the dialog is open (app quit mid-prompt, the master torn
+/// down, a rejected key), and a helper that aborts delivers nothing — `ssh`
+/// sees no answer, the connection fails, and rmux retries, which reads as a
+/// password loop. A dead pipe is a normal failure for an askpass helper, not a
+/// panic.
+fn deliver(answer: &str) -> ExitCode {
+    let mut bytes = answer.as_bytes().to_vec();
+    bytes.push(b'\n'); // OpenSSH reads the first line of stdout as the secret.
+
+    match write_stdout(&bytes) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("rmux-askpass: could not deliver the answer: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Write to fd 1 directly, bypassing the buffered `Stdout` wrapper.
+///
+/// `Stdout` is line-buffered, so a write that fails partway can leave data in
+/// the buffer — and the error we care about (EPIPE) must reach the caller
+/// immediately, not be deferred to some later flush. A raw fd has no buffer:
+/// `write` returns the error now or never.
+#[cfg(unix)]
+fn write_stdout(bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::io::FromRawFd;
+
+    // Safety: fd 1 is the caller's stdout, which this process owns for its
+    // lifetime; taking ownership just means the handle is closed on exit,
+    // which is what happens anyway. There is no other use of stdout here.
+    let mut out = unsafe { std::fs::File::from_raw_fd(1) };
+    out.write_all(bytes)
+}
+
+#[cfg(windows)]
+fn write_stdout(bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    // A console handle write returns `ERROR_BROKEN_PIPE` (propagated as `Err`)
+    // just like a Unix write, so a dead pipe is handled the same way on both
+    // platforms.
+    let mut out = std::io::stdout().lock();
+    out.write_all(bytes)
+}
+
 #[cfg(unix)]
 fn main() -> ExitCode {
     // Imported here rather than at the top: on Windows the whole body below is
@@ -74,11 +126,7 @@ fn main() -> ExitCode {
     };
 
     match response.get("answer").and_then(|a| a.as_str()) {
-        Some(answer) => {
-            // OpenSSH takes the first line of stdout as the secret.
-            println!("{answer}");
-            ExitCode::SUCCESS
-        }
+        Some(answer) => deliver(answer),
         // The user dismissed the dialog. Non-zero tells ssh to give up rather
         // than retrying with an empty password.
         None => ExitCode::FAILURE,
@@ -174,10 +222,7 @@ fn main() -> ExitCode {
     };
 
     match response.get("answer").and_then(|a| a.as_str()) {
-        Some(answer) => {
-            println!("{answer}");
-            ExitCode::SUCCESS
-        }
+        Some(answer) => deliver(answer),
         None => ExitCode::FAILURE,
     }
 }
