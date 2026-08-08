@@ -20,6 +20,7 @@ rmux-transport.workspace = true
 anyhow.workspace = true
 camino.workspace = true
 dirs.workspace = true
+notify.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
