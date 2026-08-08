@@ -364,21 +364,7 @@ works for an icon and fails on anything real. Verified against a real host — s
 recognised as a PNG. Like a browser report, the path is *typed* into the composer and never
 submitted.
 
-## Design system — SIGNAL ROOM
-
-`ui/src/styles/signal-room.css` is the source of truth. Four rules, all load-bearing:
-
--1. **Text must be legible.** `--text-faint` was `#5c5953` — 2.77:1 against the panel, well
-   under the 4.5:1 normal text needs, and most of what wears it is 9px labels. It is now
-   `#7e7b74` (4.57:1), still a clear step below `--text-soft` (6.46:1). Measure before
-   choosing a grey; prose belongs at `--text-soft`, not `--text-faint`.
-0. **Red (`#e63b2e`) only where the operator must act.** Working/done stay monochrome;
-   in-progress is amber. Red that means three things means nothing.
-1. **Zero border-radius**, enforced by a global `!important`. `.round` is the only escape
-   hatch, for genuinely circular instruments.
-2. **Blinking is for cursors only.** Liveness = data movement. Meters "breathe" by scaling
-   the *bar*, never the printed number — animating a value invents data.
-3. **No emoji.** Inline SVG, Lucide-style, 1.5–1.7px strokes, square caps.
+## Design system
 
 **Panels tint; they must not `backdrop-filter`.** This one reads backwards and cost two
 wrong diagnoses. `backdrop-filter` filters *the page's own backdrop*, and the desktop behind
