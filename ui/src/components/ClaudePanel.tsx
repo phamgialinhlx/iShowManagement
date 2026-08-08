@@ -568,6 +568,7 @@ export function ClaudePanel({
   useEffect(() => {
     if (!claudeId) return;
     let cancelled = false;
+    let timer: number | undefined;
 
     const tick = async () => {
       try {
@@ -601,11 +602,33 @@ export function ClaudePanel({
       }
     };
 
-    void tick();
-    const timer = setInterval(tick, 400);
+    const start = () => {
+      if (timer === undefined && !cancelled) {
+        void tick();
+        timer = window.setInterval(() => void tick(), 400);
+      }
+    };
+    const stop = () => {
+      if (timer !== undefined) {
+        window.clearInterval(timer);
+        timer = undefined;
+      }
+    };
+    // The rail is driven by pushed status events now (`status-watch`); this fast
+    // poll exists only for the decision card and dropped-connection detection,
+    // both of which matter only while the pane is on screen. Hidden, it stands
+    // down entirely — this per-pane poll is what was heating the machine.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    if (document.visibilityState === "visible") start();
+
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [claudeId, sessionId, setStatus]);
 
