@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+import { PanelLoader } from "../PanelLoader";
+
 import { api, isTauri, type ProcessInfo, type TargetRef } from "../../lib/api";
 import { accent, paint, textRamp, tokenAlpha } from "../../lib/palette";
 
@@ -322,7 +324,7 @@ export function TopProcesses({
           className="data"
           style={{ fontSize: 11, margin: "auto", color: "var(--text-faint)" }}
         >
-          {error ? "unreachable" : "reading…"}
+          {error ? "unreachable" : <PanelLoader variant="inline" phase="READING PROCESSES" />}
         </div>
       ) : (
         <Donut

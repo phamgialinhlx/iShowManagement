@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { PanelLoader } from "./PanelLoader";
+
 import { api, isTauri, type JiraIssue, type JiraIssueDetail, type JiraTransition } from "../lib/api";
 import { classify, inProject, loadIssues, summarise, type IssuesState } from "../lib/jira";
 // The same sanitiser the `.docx` reader uses, and for the same reason.
@@ -59,9 +61,7 @@ export function JiraPanel({ project }: { project: string }) {
 
   if (state.state === "loading") {
     return (
-      <div className="grid h-full place-items-center">
-        <span className="micro">reading the board…</span>
-      </div>
+      <PanelLoader phase="READING THE BOARD" detail={project} />
     );
   }
 
@@ -218,7 +218,7 @@ function IssueRow({ issue, onChanged }: { issue: JiraIssue; onChanged: () => voi
       {open && (
         <div className="flex flex-col gap-3 px-4 pb-4">
           {detail === null ? (
-            <span className="micro">loading…</span>
+            <PanelLoader variant="inline" phase="READING THE ISSUE" />
           ) : (
             <>
               {detail.descriptionHtml ? (

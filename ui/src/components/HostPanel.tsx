@@ -183,7 +183,7 @@ function Processes({ target }: { target: TargetRef }) {
       )}
 
       {rows === null ? (
-        <p className="micro p-4">reading…</p>
+        <PanelLoader variant="rows" phase="READING PROCESSES" rows={5} />
       ) : shown.length === 0 ? (
         <p className="micro p-4">nothing matches</p>
       ) : (
