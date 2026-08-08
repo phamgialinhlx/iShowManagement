@@ -11,7 +11,7 @@
 
 use std::process::ExitCode;
 
-use rmux_agent::{Hello, attach, daemon};
+use rmux_agent::{Hello, attach, daemon, status};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -120,13 +120,25 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        // Stream Claude session status changes as NDJSON on stdout. Replaces the
+        // client's per-pane screen-scrape poll with an event stream — see
+        // `status.rs`. An older agent lacks this arm and exits via the usage
+        // branch below, which is exactly how the client detects the fallback.
+        "watch-status" => match status::watch_status().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("rmux-agent: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
         "version" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
 
         _ => {
-            eprintln!("usage: rmux-agent <attach|daemon|kill|list|setenv|version> [--session NAME] [--cwd DIR]");
+            eprintln!("usage: rmux-agent <attach|daemon|kill|list|setenv|watch-status|version> [--session NAME] [--cwd DIR]");
             ExitCode::FAILURE
         }
     }
