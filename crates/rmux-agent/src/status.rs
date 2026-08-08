@@ -69,8 +69,12 @@ struct Update {
     /// `busy | shell | idle | waiting` from Claude, or `gone` when the file has
     /// disappeared or its process is no longer alive.
     status: String,
+    /// `statusUpdatedAt` — the host-clock millisecond epoch of the last status
+    /// change. The client uses it as a skew-free watermark to tell an "unseen"
+    /// finished session (changed since you last looked) from one you have
+    /// acknowledged — the read/unread axis the old inventory kept.
     #[serde(skip_serializing_if = "Option::is_none")]
-    updated_at: Option<String>,
+    updated_at: Option<u64>,
 }
 
 /// What was last reported for a file, so only genuine changes are emitted.
@@ -85,7 +89,16 @@ struct Parsed {
     status: String,
     cwd: Option<String>,
     pid: Option<u32>,
-    updated_at: Option<String>,
+    updated_at: Option<u64>,
+}
+
+/// Read `statusUpdatedAt` (or a legacy `updatedAt`), tolerating both a JSON number
+/// — which is what Claude actually writes (`1785474593641`) — and a numeric
+/// string, so a schema tweak either way keeps working. `as_str()` alone silently
+/// dropped the field, because the real value is a number.
+fn read_updated_at(v: &serde_json::Value) -> Option<u64> {
+    let field = v.get("statusUpdatedAt").or_else(|| v.get("updatedAt"))?;
+    field.as_u64().or_else(|| field.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 /// Read the fields we care about, tolerating partial writes and unknown shapes.
@@ -98,11 +111,7 @@ fn parse_file(path: &Path) -> Option<Parsed> {
     let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("idle").to_owned();
     let cwd = v.get("cwd").and_then(|s| s.as_str()).map(str::to_owned);
     let pid = v.get("pid").and_then(serde_json::Value::as_u64).map(|p| p as u32);
-    let updated_at = v
-        .get("statusUpdatedAt")
-        .or_else(|| v.get("updatedAt"))
-        .and_then(|s| s.as_str())
-        .map(str::to_owned);
+    let updated_at = read_updated_at(&v);
     Some(Parsed { session_id, status, cwd, pid, updated_at })
 }
 
@@ -209,7 +218,7 @@ fn scan<W: Write>(
                         cwd: parsed.cwd.clone(),
                         pid: parsed.pid,
                         status: status.clone(),
-                        updated_at: parsed.updated_at.clone(),
+                        updated_at: parsed.updated_at,
                     },
                 )?;
                 known.insert(path, Known { session_id: parsed.session_id, status });
@@ -308,7 +317,9 @@ mod tests {
             "sessionId": session_id,
             "cwd": "/srv/app",
             "status": status,
-            "statusUpdatedAt": "2026-08-08T00:00:00Z",
+            // A number, like Claude actually writes it — the client reads this as
+            // its skew-free watermark.
+            "statusUpdatedAt": 1_785_474_593_641u64,
         });
         std::fs::write(dir.join(file), serde_json::to_vec(&body).unwrap()).unwrap();
     }
@@ -339,6 +350,8 @@ mod tests {
         assert_eq!(first.len(), 1, "one update for the new file: {first:?}");
         assert_eq!(first[0]["sessionId"], "sess-1");
         assert_eq!(first[0]["status"], "busy");
+        // Carried through as a number, not dropped — the watermark depends on it.
+        assert_eq!(first[0]["updatedAt"], 1_785_474_593_641u64);
 
         // A second pass with nothing changed must be silent, or the "push" is a
         // poll wearing a different hat.
@@ -428,6 +441,20 @@ mod tests {
         let mut out = Vec::new();
         scan(&dir, &mut known, &mut out, &all_claude).unwrap();
         assert!(lines(&out).is_empty(), "unusable files produce no updates");
+    }
+
+    #[test]
+    fn updated_at_reads_both_a_number_and_a_numeric_string() {
+        // Claude writes a number; `as_str()` alone silently dropped it. A numeric
+        // string is accepted too, so a schema tweak either way keeps the watermark.
+        let num = serde_json::json!({ "statusUpdatedAt": 1234u64 });
+        assert_eq!(read_updated_at(&num), Some(1234));
+        let s = serde_json::json!({ "statusUpdatedAt": "1234" });
+        assert_eq!(read_updated_at(&s), Some(1234));
+        let legacy = serde_json::json!({ "updatedAt": 99u64 });
+        assert_eq!(read_updated_at(&legacy), Some(99));
+        let absent = serde_json::json!({ "status": "idle" });
+        assert_eq!(read_updated_at(&absent), None);
     }
 
     #[test]
