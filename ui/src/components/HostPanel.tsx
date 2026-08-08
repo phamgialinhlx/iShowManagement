@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { PanelLoader } from "./PanelLoader";
 import {
   api,
   isTauri,
@@ -542,7 +543,7 @@ function Docker({ target }: { target: TargetRef }) {
   if (error && !report) {
     return <p className="data px-4 py-3 text-[11px]" style={{ color: "rgb(var(--primary))" }}>{error}</p>;
   }
-  if (!report) return <p className="micro px-4 py-3">reading…</p>;
+  if (!report) return <PanelLoader variant="rows" phase="READING CONTAINERS" rows={4} />;
 
   // Said outright rather than shown as an empty list — "docker is not installed"
   // and "no containers running" are different facts with different answers.
@@ -665,7 +666,7 @@ function Sessions({ target }: { target: TargetRef }) {
   if (error) {
     return <p className="data px-4 py-3 text-[11px] leading-relaxed" style={{ color: "rgb(var(--primary))" }}>{error}</p>;
   }
-  if (!rows) return <p className="micro px-4 py-3">reading…</p>;
+  if (!rows) return <PanelLoader variant="rows" phase="READING SESSIONS" rows={4} />;
   if (!rows.length) {
     return <p className="micro px-4 py-3" style={{ color: "var(--text-faint)" }}>no sessions running on this host</p>;
   }

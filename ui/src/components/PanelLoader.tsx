@@ -25,15 +25,30 @@ import { useEffect, useState } from "react";
 /** After this, the wait is worth quantifying. */
 const SHOW_CLOCK_AFTER = 3;
 
+/**
+ * How much room the caller has.
+ *
+ * One component with three shapes rather than three components, because the
+ * reason seven surfaces each invented their own bare string is that this one
+ * was easy to miss and awkward to reuse for a list. A variant is easier to
+ * reach for than a new file.
+ */
+export type LoaderVariant = "panel" | "rows" | "inline";
+
 export function PanelLoader({
   phase,
   detail,
+  variant = "panel",
+  /** How many skeleton rows to draw, for `rows`. */
+  rows = 5,
   /** Shown once the wait runs long — usually why it is taking a while. */
   hint,
   hintAfter = 6,
 }: {
   phase: string;
   detail?: string;
+  variant?: LoaderVariant;
+  rows?: number;
   hint?: string;
   hintAfter?: number;
 }) {
@@ -43,6 +58,52 @@ export function PanelLoader({
     const timer = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // A widget with room for one line. Still says *what*, because "loading" alone
+  // is the thing this component exists not to say.
+  if (variant === "inline") {
+    return (
+      <span className="micro" style={{ color: "var(--text-faint)" }}>
+        {phase}
+        {seconds >= SHOW_CLOCK_AFTER ? ` · ${seconds}s` : ""}
+      </span>
+    );
+  }
+
+  // A list is coming, so draw where its rows will be. The pane then does not
+  // jump when the answer lands — and a skeleton in the shape of the answer
+  // reads as "this is filling in" rather than "something is happening".
+  if (variant === "rows") {
+    return (
+      <div className="flex flex-col gap-2 px-3 py-3">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="micro" style={{ color: "var(--text-soft)" }}>
+            {phase}
+          </span>
+          {seconds >= SHOW_CLOCK_AFTER && (
+            <span className="data text-[10px] tabular-nums" style={{ color: "var(--text-faint)" }}>
+              {seconds}s
+            </span>
+          )}
+        </div>
+        {detail && (
+          <span className="micro truncate" style={{ color: "var(--text-faint)" }} title={detail}>
+            {detail}
+          </span>
+        )}
+        <ul className="flex flex-col gap-[6px]">
+          {/* Uneven widths, because a column of identical bars reads as a
+              rendering fault rather than as content arriving. */}
+          {Array.from({ length: rows }, (_, i) => [68, 84, 55, 76, 62][i % 5]!).map((w, i) => (
+            <li key={i} className="git-row flex items-center gap-2">
+              <span className="shrink-0" style={{ width: 6, height: 6, background: "var(--text-faint)" }} />
+              <span style={{ height: 7, width: `${w}%`, background: "var(--text-faint)" }} />
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
 
   return (
     <div className="grid h-full place-items-center px-6">

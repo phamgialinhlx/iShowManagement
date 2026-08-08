@@ -59,14 +59,26 @@ const MAX_BLOB: usize = 2 * 1024 * 1024;
 /// So every read prints this first and everything before it is discarded. It
 /// cannot be defended against by trimming, because the preamble is arbitrary
 /// and host-specific — only the command itself knows where its output begins.
-const START: &str = "\u{1}__RMUX_GIT_BEGIN__\u{1}";
+/// **Plain ASCII, and matched from the right.**
+///
+/// The first version wrapped the marker in `\x01`, on the theory that a
+/// control character cannot occur in real output. It cannot — but it also does
+/// not reliably survive the trip: the command crosses `ssh`, a login shell and
+/// possibly a pty, any of which may echo, translate or swallow it, and the
+/// result was an empty body and a bare "git status failed".
+///
+/// A random-looking ASCII suffix cannot appear by accident either, and it
+/// travels as ordinary text. `rsplit_once` rather than `split_once` because a
+/// pty echoes the command line it was given — which contains the marker — so
+/// the *first* occurrence can be the echo and only the last is the output.
+const START: &str = "__RMUX_GIT_BEGIN_9f2c7d__";
 
 /// Splits the two sides of a comparison in one command's output.
 ///
 /// `\x01` cannot occur in the source anyone would read in a diff editor, and
 /// the surrounding text makes an accidental match effectively impossible. A
 /// plain word marker would be matched by this file itself.
-const SPLIT: &str = "\u{1}__RMUX_GIT_SPLIT__\u{1}";
+const SPLIT: &str = "__RMUX_GIT_SPLIT_9f2c7d__";
 
 /// Run a script on the target and return only what *it* printed.
 ///
@@ -76,7 +88,7 @@ const SPLIT: &str = "\u{1}__RMUX_GIT_SPLIT__\u{1}";
 async fn run(target: &dyn Target, script: &str) -> anyhow::Result<(String, bool)> {
     let line = format!("printf '%s' {}; {{ {} }}", shell_quote(START), script);
     let out = target.exec(&CommandSpec::login_shell().arg("-c").arg(line)).await?;
-    let body = match out.stdout.split_once(START) {
+    let body = match out.stdout.rsplit_once(START) {
         Some((_preamble, rest)) => rest.to_string(),
         // No marker means the shell died before running anything — a bad
         // folder, a refused connection. Keep the text: it is the diagnosis.
