@@ -20,6 +20,7 @@ pub mod agent;
 mod claude;
 mod claude_account;
 mod claude_login;
+mod claude_status;
 mod auth;
 mod commands;
 mod face_models;
@@ -135,6 +136,7 @@ pub fn run() {
         .manage(files::FsStore::default())
         .manage(metrics::MetricsStore::default())
         .manage(claude::ClaudeStore::default())
+        .manage(claude_status::ClaudeStatusStore::default())
         .manage(agent::AgentStore::default())
         .manage(claude_login::LoginStore::default())
         .manage(tunnels::TunnelStore::default())
@@ -233,6 +235,8 @@ pub fn run() {
             claude::claude_resize,
             claude::claude_write,
             claude::claude_stop,
+            claude_status::claude_status_watch,
+            claude_status::claude_status_unwatch,
             files::fs_join,
             files::fs_parent,
             files::fs_search,

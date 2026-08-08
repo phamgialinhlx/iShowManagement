@@ -131,6 +131,7 @@ pub async fn claude_end_session<R: tauri::Runtime>(
 pub async fn claude_start<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     store: State<'_, ClaudeStore>,
+    status_store: State<'_, crate::claude_status::ClaudeStatusStore>,
     target: TargetRef,
     cwd: Option<String>,
     // `resume` carries the id of a conversation to continue instead of starting
@@ -214,6 +215,15 @@ pub async fn claude_start<R: tauri::Runtime>(
     let session = Arc::new(match session_name.as_ref().filter(|_| agent_available) {
         Some(name) => {
             let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+            // Push status for this host from now on, so the rail is driven by
+            // change events rather than the per-pane screen-scrape poll. Cheap
+            // and idempotent — a second session on the same host is a no-op.
+            crate::claude_status::ensure_watch(
+                &app,
+                status_store.inner(),
+                Arc::clone(&resolved),
+                installed.program.clone(),
+            );
             let line = ClaudeSession::launch_line(resume.as_deref(), &args, rendering);
 
             let mut spec = installed.attach_spec(name, cwd.as_deref(), cols, rows);
