@@ -10,6 +10,7 @@ rmux-transport.workspace = true
 
 anyhow.workspace = true
 serde.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 rmux-ssh.workspace = true

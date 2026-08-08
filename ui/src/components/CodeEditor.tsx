@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { initMonaco, languageForPath, monaco, THEME_NAME } from "../lib/monaco";
 import { readMonoStack } from "../lib/fonts";
 import type { Buffer } from "../lib/buffers";
+import { PanelLoader } from "./PanelLoader";
 
 /**
  * The Monaco editor bound to one buffer.
@@ -163,7 +164,9 @@ export function CodeEditor({
   // Anything that is not editable text is shown *over* the host element rather
   // than instead of it.
   const overlay = buffer.loading ? (
-    <span className="micro">loading…</span>
+    // Reading a file is an SSH round trip, and a big one is slow enough to read
+    // as a hang. `rows` because what arrives is lines of text.
+    <PanelLoader variant="rows" phase="READING THE FILE" detail={buffer.path} rows={8} />
   ) : buffer.error ? (
     <p role="alert" className="data text-[11px]" style={{ color: "rgb(var(--primary))" }}>
       {buffer.error}
