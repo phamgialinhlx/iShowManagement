@@ -55,7 +55,16 @@ export function Metrics({ target }: { target: TargetRef }) {
     };
   }, [target]);
 
-  if (!sample) return null;
+  // The footer keeps its shape while the first sample is taken. A bar that
+  // appears from nothing several seconds in reads as the app finishing its
+  // start-up long after it has started.
+  if (!sample) {
+    return (
+      <span className="micro" style={{ color: "var(--text-faint)" }}>
+        SAMPLING…
+      </span>
+    );
+  }
 
   const memPercent = sample.memoryTotalBytes
     ? (sample.memoryUsedBytes / sample.memoryTotalBytes) * 100

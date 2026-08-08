@@ -1277,3 +1277,78 @@ body[data-hidden="true"] * {
 body {
   font-size: calc(14px * var(--font-scale, 1));
 }
+
+/*
+ * **The terminals opt out, and this is the line that does it.**
+ *
+ * The note above says they are excluded; until now that was only a claim —
+ * `html`, `body` and the `.text-[Npx]` overrides all reached inside `.xterm`.
+ *
+ * xterm measures its own cell grid from the font size it was *constructed*
+ * with, once, and maps a mouse position to a row by dividing by that cell
+ * height. Change the CSS font metrics underneath it and the two disagree: the
+ * grid it draws and the grid it measures drift apart, so a click resolves to a
+ * row further and further down the further you are from the top. Reported as
+ * "when i select text to highlight, the line way below my cursor got
+ * highlighted instead" — which is that divergence, exactly.
+ *
+ * Resetting the *variable* rather than the sizes is what makes this total: any
+ * `calc(... * var(--font-scale))` inside the subtree resolves at 1, including
+ * rules added later that nobody thought to exclude.
+ */
+.xterm,
+.xterm * {
+  --font-scale: 1;
+}
+
+/* ------------------------------------------------- git: reading a repository */
+/*
+ * A commit graph drawing itself, while the real one is being read.
+ *
+ * Rule 2 holds and is the reason this is not a spinner or a pulse: liveness is
+ * shown by *data moving*, never by opacity flicker. The line advances and the
+ * nodes land on it in sequence, so the motion carries the same shape as the
+ * thing being fetched — a history arriving commit by commit.
+ *
+ * Amber, because in-progress is amber and never red (rule 0). And it is a
+ * *skeleton* rather than a bare label: the rows it draws are where the change
+ * list will be, so the pane does not jump when the answer arrives.
+ */
+@keyframes git-trunk {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+
+@keyframes git-node {
+  0%, 100% { transform: scale(0.55); opacity: 0.35; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes git-row {
+  0%, 100% { opacity: 0.18; }
+  50% { opacity: 0.5; }
+}
+
+.git-trunk {
+  transform-origin: top;
+  animation: git-trunk 1.1s var(--ease) infinite alternate;
+}
+
+.git-node {
+  animation: git-node 1.6s var(--ease) infinite;
+}
+
+.git-node:nth-of-type(2) { animation-delay: 0.2s; }
+.git-node:nth-of-type(3) { animation-delay: 0.4s; }
+.git-node:nth-of-type(4) { animation-delay: 0.6s; }
+
+.git-row {
+  animation: git-row 1.6s var(--ease) infinite;
+}
+
+.git-row:nth-child(2) { animation-delay: 0.15s; }
+.git-row:nth-child(3) { animation-delay: 0.3s; }
+.git-row:nth-child(4) { animation-delay: 0.45s; }
+.git-row:nth-child(5) { animation-delay: 0.6s; }
+
+/* The animations stop with the window — see the visibility rule above. */

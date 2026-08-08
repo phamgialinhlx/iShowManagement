@@ -3459,8 +3459,10 @@ name = "rmux-git"
 version = "0.2.12"
 dependencies = [
  "anyhow",
+ "rmux-ssh",
  "rmux-transport",
  "serde",
+ "tokio",
 ]
 
 [[package]]

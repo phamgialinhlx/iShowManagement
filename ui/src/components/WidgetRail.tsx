@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { motion, Reorder, useDragControls } from "motion/react";
 
 import { HostStatus } from "./widgets/HostStatus";
+import { PanelLoader } from "./PanelLoader";
 import { TopProcesses } from "./widgets/TopProcesses";
 import { TokenSpend } from "./widgets/TokenSpend";
 import { Clock } from "./widgets/Clock";
@@ -244,7 +245,7 @@ function HostWidget({
   if (!host.sample) {
     return (
       <Widget title="HOST" onDragStart={onDragStart}>
-        <span className="micro">reading…</span>
+        <PanelLoader variant="inline" phase="READING THE HOST" />
       </Widget>
     );
   }
@@ -330,7 +331,14 @@ function UsageWidget({
   return (
     <Widget title="TOKEN SPEND" onDragStart={onDragStart}>
       <div className="flex flex-col gap-2">
-        <TokenSpend input={usage?.input ?? 0} output={usage?.output ?? 0} />
+        {/* `?? 0` conflated "not read yet" with "nothing spent", so the widget
+            asserted "no usage recorded yet" while it was still reading — a
+            different and wrong fact, and the one people act on. */}
+        {usage ? (
+          <TokenSpend input={usage.input} output={usage.output} />
+        ) : (
+          <PanelLoader variant="inline" phase="READING THE TRANSCRIPT" />
+        )}
 
         <ContextRow status={status} window={session.contextWindow} />
 

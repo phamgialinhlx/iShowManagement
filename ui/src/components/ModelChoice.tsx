@@ -35,7 +35,16 @@ export function ModelChoice({
     api.modelProfiles().then(setProfiles).catch(() => setProfiles([]));
   }, []);
 
-  if (profiles === null) return null;
+  // Not `null`. An absent control reads as "this feature does not exist", and
+  // the operator goes looking for it in Settings — the rule that a state which
+  // can outlast a frame needs a visible state of its own.
+  if (profiles === null) {
+    return (
+      <span className="micro" style={{ color: "var(--text-faint)" }}>
+        READING MODEL PROFILES…
+      </span>
+    );
+  }
 
   if (profiles.length === 0) {
     if (!hintWhenEmpty) return null;

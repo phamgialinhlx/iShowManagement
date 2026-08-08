@@ -10,3 +10,7 @@ rmux-transport.workspace = true
 
 anyhow.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+rmux-ssh.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

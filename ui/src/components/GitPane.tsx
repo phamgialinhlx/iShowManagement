@@ -26,6 +26,58 @@ import { useWorkspace } from "../lib/workspace";
  * scanning a checkout forever because a tab is open somewhere.
  */
 
+/**
+ * A commit graph drawing itself, while the real one is read.
+ *
+ * The pane showed nothing at all during the first read — and that read is a
+ * `git status` and a `git log` over SSH, which on a large repository takes long
+ * enough to look broken. The rule is that a state which can outlast a frame
+ * needs a visible state of its own, and it must say *what* it is doing.
+ *
+ * A skeleton rather than a spinner: the rows sit where the change list will,
+ * so nothing jumps when the answer lands.
+ */
+function Reading({ where }: { where: string }) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 py-3">
+      <div className="flex items-center gap-3">
+        {/* The trunk grows and the nodes land on it in sequence — the shape of
+            a history arriving, rather than an opacity flicker (rule 2). */}
+        <svg width="16" height="56" viewBox="0 0 16 56" aria-hidden="true" className="shrink-0">
+          <line
+            className="git-trunk"
+            x1="8" y1="2" x2="8" y2="54"
+            stroke="rgb(var(--busy) / 0.45)" strokeWidth="1.5"
+          />
+          {[8, 22, 36, 50].map((cy) => (
+            <circle key={cy} className="git-node" cx="8" cy={cy} r="3" fill="rgb(var(--busy))"
+              style={{ transformOrigin: `8px ${cy}px` }} />
+          ))}
+        </svg>
+        <div className="flex min-w-0 flex-col gap-[3px]">
+          <span className="micro" style={{ color: "var(--text-soft)" }}>
+            READING THE REPOSITORY
+          </span>
+          {/* Where from, not just that it is loading — over SSH the host is the
+              reason it is slow, so naming it is the useful half. */}
+          <span className="micro truncate" style={{ color: "var(--text-faint)" }} title={where}>
+            {where}
+          </span>
+        </div>
+      </div>
+
+      <ul className="flex flex-col gap-[6px]">
+        {[68, 84, 55, 76, 62].map((w, i) => (
+          <li key={i} className="git-row flex items-center gap-2">
+            <span className="shrink-0" style={{ width: 6, height: 6, background: "var(--text-faint)" }} />
+            <span style={{ height: 7, width: `${w}%`, background: "var(--text-faint)" }} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** A letter and its meaning, for the row marker. */
 function mark(change: GitChange): { letter: string; color: string; title: string } {
   const code = change.unstaged === "?" ? "?" : change.staged !== "." ? change.staged : change.unstaged;
@@ -103,6 +155,14 @@ export function GitPane({ projectId }: { projectId: string }) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
+
+  // The *first* read only. A REFRESH leaves the existing list on screen:
+  // replacing a good answer with a skeleton makes the pane flicker under
+  // someone who just asked it to check, which is the rule about nothing moving
+  // under the operator's hands.
+  if (root === undefined || (busy && !status)) {
+    return <Reading where={folder} />;
+  }
 
   // Said outright rather than shown as an empty change list, which would claim
   // "nothing has changed" — a different and wrong fact.
