@@ -79,9 +79,12 @@ jobs:
           # trying to import one rather than falling back to unsigned — which is
           # exactly what killed both macOS jobs on the first run. An unsigned
           # macOS build would not be usable by anyone anyway.
-          - name: Windows
-            os: windows-latest
-            args: ""
+          # Windows is off for this release at the operator's request — it is
+          # being checked on a real Windows machine separately. Restore these
+          # three lines to build it again; nothing else depends on them.
+          # - name: Windows
+          #   os: windows-latest
+          #   args: ""
           - name: Linux
             os: ubuntu-22.04
             args: ""
