@@ -435,9 +435,14 @@ textarea,
   background: color-mix(in srgb, var(--app-panel) var(--glass-overlay, 14%), transparent);
 }
 
-/* Insets ride the same overlay. Left at their fixed 62% they would become the
-   only solid thing on screen — a field reading as heavier than the panel
-   containing it, which inverts the depth the whole design depends on. */
+.chrome-black {
+  background: color-mix(in srgb, var(--ansi-black) var(--panel-tint, 38%), transparent);
+}
+
+:root[data-native-glass="on"] .chrome-black {
+  background: color-mix(in srgb, var(--ansi-black) var(--glass-overlay, 14%), transparent);
+}
+
 :root[data-native-glass="on"] .inset {
   background: color-mix(
     in srgb,
@@ -640,6 +645,21 @@ textarea,
 .link:hover {
   color: var(--text);
   text-decoration-color: var(--text);
+}
+
+/*
+ * The title-bar settings gear: a bare icon, no box, that tints from faint up to
+ * full text on hover — the same "chrome control lights up under the pointer" the
+ * `.chip` border does, but for an icon that a frame would only make heavier.
+ */
+.title-cog {
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease);
+}
+
+.title-cog:hover {
+  color: var(--text);
 }
 
 /*

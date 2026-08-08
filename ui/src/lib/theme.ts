@@ -312,6 +312,12 @@ export function deriveTokens(t: Theme): Record<string, string> {
     "--app-panel-2": lighten(t.background, 8),
     "--app-elev": lighten(t.background, 12),
 
+    // The raw ANSI Black slot, exposed so chrome that wants to read *darker* than
+    // the derived panel elevation (the dock, the top bar) can sit on it directly.
+    // Kept a plain colour; the tint/glass translucency is applied at the usage
+    // site, exactly like `--app-panel`.
+    "--ansi-black": t.black,
+
     // Borders and hover: the foreground at fixed alphas (the shipped
     // rgba(232,230,225,·) values are #e8e6e1 = Text, so this is exact).
     "--border": alpha(t.foreground, 0.14),

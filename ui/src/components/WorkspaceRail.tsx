@@ -216,6 +216,20 @@ function FolderIcon() {
   );
 }
 
+/** Server-rack glyph for HOST — the machine itself, not one of its readouts
+ *  (processes, ports, metrics all belong to the box). Stacked rectangles fit the
+ *  zero-radius language; the two square LEDs are where a status tint could go. */
+function HostIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="7" />
+      <rect x="3" y="13" width="18" height="7" />
+      <path d="M7 7.5h.01" />
+      <path d="M7 16.5h.01" />
+    </svg>
+  );
+}
+
 function SessionRow({
   session,
   active,
@@ -613,7 +627,7 @@ function ServerNode({
     <div className="mb-1">
       {/* Server card — accent bar, status dot, bold name; the HOST / + verbs. */}
       <div
-        className="group/srv relative mx-1.5 mt-1.5 flex items-center gap-2 py-[7px] pl-2.5 pr-2"
+        className="group/srv relative mx-1.5 mt-1.5 flex items-center gap-1.5 py-[7px] pl-2.5 pr-2"
         style={{
           background: "color-mix(in srgb, var(--text) 6%, transparent)",
           boxShadow: "inset 3px 0 0 var(--text-soft)",
@@ -634,11 +648,13 @@ function ServerNode({
         </button>
         <button
           type="button"
-          className="chip shrink-0"
           onClick={() => openHost(server.id)}
+          aria-label="Host"
           title="Host: processes, ports, metrics"
+          className="shrink-0 px-1 opacity-70 hover:opacity-100"
+          style={{ color: "var(--text-soft)" }}
         >
-          HOST
+          <HostIcon />
         </button>
         <button
           type="button"
@@ -750,7 +766,7 @@ export function WorkspaceRail({
 
   return (
     <motion.aside
-      className="panel relative flex shrink-0 flex-col overflow-hidden"
+      className="panel chrome-black relative flex shrink-0 flex-col overflow-hidden"
       animate={{ width: collapsed ? RAIL_COLLAPSED : railWidth }}
       // The spring is for the collapse toggle. A *drag* must not spring: the
       // edge would lag the pointer and overshoot on release, which reads as the
