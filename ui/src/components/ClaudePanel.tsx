@@ -12,6 +12,10 @@ import { useWorkspace } from "../lib/workspace";
 import { basename } from "../lib/workspace-model";
 import { claudeTheme, gpuRendering } from "../lib/terminal-theme";
 import { readMonoStack } from "../lib/fonts";
+import { scaledFontSize } from "../lib/terminal-font";
+
+/** The size at 100%. Scaled by TEXT SIZE through xterm's own option. */
+const TERM_FONT_BASE = 12;
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { ContextMeter } from "./ContextMeter";
 import { BrowserReports } from "./BrowserReports";
@@ -279,7 +283,7 @@ export function ClaudePanel({
       // The operator's chosen mono font (ADR-003) — same live-token read and
       // event-driven push as the terminal tab.
       fontFamily: readMonoStack(),
-      fontSize: 12,
+      fontSize: scaledFontSize(TERM_FONT_BASE),
       lineHeight: 1.3,
       cursorBlink: true,
       scrollback: 5000,
@@ -500,6 +504,7 @@ export function ClaudePanel({
       // (ADR-003): the token changed, but xterm cached the family.
       xterm.options.theme = claudeTheme();
       xterm.options.fontFamily = readMonoStack();
+      xterm.options.fontSize = scaledFontSize(TERM_FONT_BASE);
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     // The ANSI theme *or the font* changed in this document — push both in, like
@@ -507,6 +512,7 @@ export function ClaudePanel({
     const onTheme = () => {
       xterm.options.theme = claudeTheme();
       xterm.options.fontFamily = readMonoStack();
+      xterm.options.fontSize = scaledFontSize(TERM_FONT_BASE);
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     window.addEventListener("storage", onAppearance);

@@ -12,6 +12,10 @@ import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
 import { gpuRendering, terminalTheme } from "../lib/terminal-theme";
 import { readMonoStack } from "../lib/fonts";
+import { scaledFontSize } from "../lib/terminal-font";
+
+/** The size at 100%. Scaled by TEXT SIZE through xterm's own option. */
+const TERM_FONT_BASE = 13;
 import { PanelLoader } from "./PanelLoader";
 
 /**
@@ -100,7 +104,7 @@ export function TerminalView({
       // it reflects a preview as well as a committed value. Pushed in on the
       // appearance/theme events below, because xterm caches this at construction.
       fontFamily: readMonoStack(),
-      fontSize: 13,
+      fontSize: scaledFontSize(TERM_FONT_BASE),
       lineHeight: 1.25,
       // Rule 2: the cursor is the one thing in this design allowed to blink.
       cursorBlink: true,
@@ -306,6 +310,7 @@ export function TerminalView({
       // font (ADR-003): the token changed, but xterm cached the family.
       xterm.options.theme = terminalTheme();
       xterm.options.fontFamily = readMonoStack();
+      xterm.options.fontSize = scaledFontSize(TERM_FONT_BASE);
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     // Switching the ANSI theme *or the font* fires this in *this* document (a
@@ -315,6 +320,7 @@ export function TerminalView({
     const onTheme = () => {
       xterm.options.theme = terminalTheme();
       xterm.options.fontFamily = readMonoStack();
+      xterm.options.fontSize = scaledFontSize(TERM_FONT_BASE);
       requestAnimationFrame(() => requestAnimationFrame(refit));
     };
     window.addEventListener("storage", onAppearance);
