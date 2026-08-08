@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "rmux"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3356,7 +3356,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-agent"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "camino",
@@ -3375,7 +3375,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-askpass"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "rmux-ssh",
  "serde_json",
@@ -3384,7 +3384,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-claude"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -3402,7 +3402,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-control"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3417,11 +3417,11 @@ dependencies = [
 
 [[package]]
 name = "rmux-core"
-version = "0.2.11"
+version = "0.2.12"
 
 [[package]]
 name = "rmux-cowork"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3439,7 +3439,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-fs"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3456,7 +3456,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-git"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "rmux-transport",
@@ -3465,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-metrics"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "rmux-transport",
@@ -3476,11 +3476,11 @@ dependencies = [
 
 [[package]]
 name = "rmux-proto"
-version = "0.2.11"
+version = "0.2.12"
 
 [[package]]
 name = "rmux-ssh"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3499,7 +3499,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-term"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3516,7 +3516,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-transport"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "async-trait",
