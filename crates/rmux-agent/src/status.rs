@@ -109,10 +109,12 @@ fn parse_file(path: &Path) -> Option<Parsed> {
 /// Is a pid still alive?
 ///
 /// `kill(pid, 0)` sends no signal: `0` means alive and ours, `EPERM` means alive
-/// but owned by someone else, `ESRCH` means dead. A crashed Claude can leave its
-/// file behind reading `busy` forever, so a dead pid is reported as `gone` rather
-/// than as work still in progress.
-#[cfg(unix)]
+/// but owned by someone else, `ESRCH` means dead.
+///
+/// Compiled only off Linux (where it backs the `pid_is_claude` fallback) and in
+/// tests. On Linux the `/proc`-based `pid_is_claude` is the whole check, so this
+/// would be dead code there.
+#[cfg(all(unix, any(not(target_os = "linux"), test)))]
 fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -121,16 +123,48 @@ fn pid_alive(pid: u32) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), any(not(target_os = "linux"), test)))]
 fn pid_alive(_pid: u32) -> bool {
     true
 }
 
-/// The status to report — `gone` when the process behind a still-present file has
-/// died, otherwise Claude's own status.
-fn effective_status(parsed: &Parsed) -> String {
+/// Whether `pid` is a live `claude` process — the **recycled-pid guard**.
+///
+/// A crashed Claude can leave its session file behind reading `busy` forever, and
+/// once the OS reuses that pid for another program `kill(pid, 0)` still reports
+/// "alive" — so the stale file's last status would light a rail dot for a session
+/// that has actually ended. Checking that the pid is not merely alive but still
+/// *`claude`* closes both cases. This is ported from the old tmux inventory, which
+/// guarded on `comm == "claude"` and had a dedicated recycled-pid test.
+///
+/// The agent only ever runs on Linux, so `/proc` is always present in production.
+#[cfg(target_os = "linux")]
+fn pid_is_claude(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        // `comm` is the bare command name; normalise like the old `comm_base`
+        // (drop any path and a login shell's leading '-') before comparing.
+        Ok(comm) => comm.trim().rsplit('/').next().unwrap_or("").trim_start_matches('-') == "claude",
+        // No such pid — dead.
+        Err(_) => false,
+    }
+}
+
+/// Off Linux — where the unit tests build — there is no `/proc`, so fall back to
+/// plain liveness. The recycled-pid guard proper is exercised with an injected
+/// checker in the tests, which is platform-independent.
+#[cfg(not(target_os = "linux"))]
+fn pid_is_claude(pid: u32) -> bool {
+    pid_alive(pid)
+}
+
+/// The status to report — `gone` when the file's pid is no longer a live Claude
+/// (dead, or its pid reused by another process), otherwise Claude's own status.
+fn effective_status(parsed: &Parsed, is_claude: &dyn Fn(u32) -> bool) -> String {
     match parsed.pid {
-        Some(pid) if !pid_alive(pid) => "gone".to_owned(),
+        Some(pid) if !is_claude(pid) => "gone".to_owned(),
         _ => parsed.status.clone(),
     }
 }
@@ -149,6 +183,7 @@ fn scan<W: Write>(
     dir: &Path,
     known: &mut HashMap<PathBuf, Known>,
     out: &mut W,
+    is_claude: &dyn Fn(u32) -> bool,
 ) -> std::io::Result<()> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
@@ -163,7 +198,7 @@ fn scan<W: Write>(
             // A partial write parses as nothing; the next pass (woken by the
             // watcher's close event, or the backstop) picks up the final state.
             let Some(parsed) = parse_file(&path) else { continue };
-            let status = effective_status(&parsed);
+            let status = effective_status(&parsed, is_claude);
 
             let changed = known.get(&path).map(|k| k.status != status).unwrap_or(true);
             if changed {
@@ -246,7 +281,7 @@ pub async fn watch_status() -> anyhow::Result<()> {
     loop {
         {
             let mut out = std::io::stdout();
-            scan(&dir, &mut known, &mut out)?;
+            scan(&dir, &mut known, &mut out, &pid_is_claude)?;
         }
 
         // The directory may have only just been created (a host where Claude had
@@ -286,6 +321,12 @@ mod tests {
             .collect()
     }
 
+    /// Treat every pid as a live Claude — isolates the scan/diff logic from the
+    /// recycled-pid guard, which has its own tests below.
+    fn all_claude(_pid: u32) -> bool {
+        true
+    }
+
     #[test]
     fn a_new_file_is_reported_once_and_not_again_unchanged() {
         let dir = tempdir();
@@ -293,7 +334,7 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out).unwrap();
+        scan(&dir, &mut known, &mut out, &all_claude).unwrap();
         let first = lines(&out);
         assert_eq!(first.len(), 1, "one update for the new file: {first:?}");
         assert_eq!(first[0]["sessionId"], "sess-1");
@@ -302,7 +343,7 @@ mod tests {
         // A second pass with nothing changed must be silent, or the "push" is a
         // poll wearing a different hat.
         let mut out2 = Vec::new();
-        scan(&dir, &mut known, &mut out2).unwrap();
+        scan(&dir, &mut known, &mut out2, &all_claude).unwrap();
         assert!(lines(&out2).is_empty(), "unchanged status must not re-emit");
     }
 
@@ -314,11 +355,11 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut sink = Vec::new();
-        scan(&dir, &mut known, &mut sink).unwrap();
+        scan(&dir, &mut known, &mut sink, &all_claude).unwrap();
 
         write_session(&dir, "1.json", "sess-1", pid, "idle");
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out).unwrap();
+        scan(&dir, &mut known, &mut out, &all_claude).unwrap();
         let got = lines(&out);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["status"], "idle");
@@ -331,11 +372,11 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut sink = Vec::new();
-        scan(&dir, &mut known, &mut sink).unwrap();
+        scan(&dir, &mut known, &mut sink, &all_claude).unwrap();
 
         std::fs::remove_file(dir.join("1.json")).unwrap();
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out).unwrap();
+        scan(&dir, &mut known, &mut out, &all_claude).unwrap();
         let got = lines(&out);
         assert_eq!(got.len(), 1, "the session ending is one event: {got:?}");
         assert_eq!(got[0]["sessionId"], "sess-1");
@@ -345,16 +386,35 @@ mod tests {
     #[test]
     fn a_dead_pid_reads_gone_even_with_the_file_present() {
         let dir = tempdir();
-        // A pid that is almost certainly not running. Reused-pid flakiness would
-        // only ever make this test *lenient*, never a false failure.
+        // A pid that is almost certainly not running. Uses the real checker, which
+        // off Linux is liveness and on Linux is a `/proc` miss — dead either way.
+        // Reused-pid flakiness would only ever make this test *lenient*.
         write_session(&dir, "1.json", "sess-1", 0x7FFF_FFF0, "busy");
 
         let mut known = HashMap::new();
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out).unwrap();
+        scan(&dir, &mut known, &mut out, &pid_is_claude).unwrap();
         let got = lines(&out);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["status"], "gone", "a stale busy file must not read as working");
+    }
+
+    #[test]
+    fn a_recycled_pid_reads_gone_even_while_alive() {
+        // The recycled-pid guard: the pid is alive but is no longer `claude` — the
+        // old Claude exited and the OS handed its number to another program. A
+        // liveness-only check would read this as still working; the identity check
+        // must report `gone`. Mirrors the old inventory's
+        // `stale_and_recycled_pids_excluded`.
+        let dir = tempdir();
+        write_session(&dir, "1.json", "sess-1", std::process::id(), "busy");
+
+        let mut known = HashMap::new();
+        let mut out = Vec::new();
+        scan(&dir, &mut known, &mut out, &|_| false).unwrap();
+        let got = lines(&out);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["status"], "gone", "a pid reused by a non-claude process is not working");
     }
 
     #[test]
@@ -366,14 +426,16 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out).unwrap();
+        scan(&dir, &mut known, &mut out, &all_claude).unwrap();
         assert!(lines(&out).is_empty(), "unusable files produce no updates");
     }
 
     #[test]
-    fn the_live_process_is_reported_alive() {
+    fn liveness_and_identity_reject_pid_zero() {
         assert!(pid_alive(std::process::id()));
         assert!(!pid_alive(0));
+        // Portable on any host: pid 0 is never a live claude.
+        assert!(!pid_is_claude(0));
     }
 
     fn tempdir() -> PathBuf {
