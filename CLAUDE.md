@@ -579,13 +579,20 @@ to say "this is a string".
 - **A running session turns; it does not blink.** A static amber dot cannot distinguish work
   still going from work that stopped an hour ago, which is the single most useful thing the
   rail can say. Rule 2 holds — the ring rotates continuously and the dot never disappears.
-- **"Finished" is a transition, not a state.** `idle` cannot tell a session that just finished
-  ten minutes of work from one that has never run, and those deserve opposite amounts of
-  attention. `setStatus` records `finishedAt` on the working→not-working edge; the rail marks
-  that session in the accent colour until it is **opened**. Cleared by looking, never by a
-  timer: an alert that expires on its own is one the operator misses by being away from the
-  desk, which is exactly when a long run finishes. Runtime only — restoring it would greet
-  every launch with a rail full of marks that have already been seen.
+- **"Finished" (unseen) is a watermark, not an edge flag.** `idle` cannot tell a session that
+  just finished ten minutes of work from one that has never run, and those deserve opposite
+  amounts of attention. A session is *unseen* when it is idle and its last status change is
+  newer than what has been acknowledged: `isSessionUnseen` compares the runtime `lastStatusAt`
+  (the host-clock `statusUpdatedAt` the agent's `watch-status` stream carries, or a local-clock
+  stamp on the working→idle edge for the fallback poll) against a per-session `seen` watermark.
+  Opening a session advances its watermark, which is what clears the mark — by looking, never on
+  a timer: an alert that expires on its own is one the operator misses by being away from the
+  desk, which is exactly when a long run finishes. **`seen` is persisted** (`rmux.seen`, its own
+  key), on purpose: a run that finished while the app was closed must still read as unseen on
+  next launch — the case the earlier runtime-only `finishedAt` edge flag missed. A session never
+  looked at is *seeded* caught-up on first sight, so launch does not open to a rail full of marks
+  nobody has earned. This is the model the 0.2.8 tmux tree used (`seen[session]` vs
+  `statusUpdatedAt`).
 - The header counts **both** kinds of "needs you". Counting only `waiting` left a rail full of
   accent dots above a header claiming everything was fine.
 

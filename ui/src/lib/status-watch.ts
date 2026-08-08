@@ -58,7 +58,9 @@ type StatusUpdate = {
   cwd?: string;
   pid?: number;
   status: string;
-  updatedAt?: string;
+  /** Host-clock ms of the change (Claude's `statusUpdatedAt`). Drives the unseen
+   *  watermark, so a run that finished while the app was closed still shows. */
+  updatedAt?: number;
 };
 type StatusEvent =
   | { targetId: string; ready: true }
@@ -129,7 +131,9 @@ export function startStatusWatch(): () => void {
       state.setResume(match.id, ev.sessionId);
     }
     const status = mapStatus(ev.status);
-    if (status) state.setStatus(match.id, status);
+    // Pass the host-clock stamp through so the unseen watermark is skew-free and
+    // survives a restart — the whole reason for the watermark over an edge flag.
+    if (status) state.setStatus(match.id, status, ev.updatedAt);
   };
 
   const onEvent = (ev: StatusEvent) => {

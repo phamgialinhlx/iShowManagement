@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
 import { useRailWidth } from "../lib/rail-width";
-import { useWorkspace } from "../lib/workspace";
+import { isSessionUnseen, useWorkspace } from "../lib/workspace";
 import { RailGrip } from "./RailGrip";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
 import { QuickAdd } from "./QuickAdd";
@@ -247,6 +247,9 @@ function SessionRow({
   const [editing, setEditing] = useState(false);
   const rename = useWorkspace((s) => s.renameSession);
   const status = useWorkspace((s) => s.statusOf(session.id));
+  // Subscribed to the derived boolean, so the mark clears the moment the session
+  // is opened (its watermark advances) or lights when a newer change arrives.
+  const unseen = useWorkspace((s) => isSessionUnseen(s.runtime, s.seen, session.id));
 
   // A child row: the tree line supplies the left edge, so selection is a filled
   // block (as in the reference) rather than the top-level bar `rowSurface` draws.
@@ -261,7 +264,7 @@ function SessionRow({
       {editing ? (
         <div className="flex items-center gap-2 px-3 py-[6px] pl-3">
           {session.kind === "claude" ? (
-            <StatusDot status={status.status} finished={status.finishedAt !== undefined} />
+            <StatusDot status={status.status} finished={unseen} />
           ) : (
             <TerminalMark />
           )}
@@ -294,7 +297,7 @@ function SessionRow({
           className="flex w-full items-center gap-2 px-3 py-[6px] pl-3 text-left"
         >
           {session.kind === "claude" ? (
-            <StatusDot status={status.status} finished={status.finishedAt !== undefined} />
+            <StatusDot status={status.status} finished={unseen} />
           ) : (
             <TerminalMark />
           )}
@@ -601,6 +604,7 @@ function ServerNode({
   const projects = useMemo(() => allProjects.filter((p) => p.serverId === server.id), [allProjects, server.id]);
   const allSessions = useWorkspace((s) => s.sessions);
   const runtime = useWorkspace((s) => s.runtime);
+  const seen = useWorkspace((s) => s.seen);
   const openHost = useWorkspace((s) => s.openHost);
   const removeServer = useWorkspace((s) => s.removeServer);
   const [confirming, setConfirming] = useState(false);
@@ -617,11 +621,11 @@ function ServerNode({
       if (s.kind !== "claude") continue;
       const r = runtime[s.id];
       if (r?.status === "working") return "working";
-      // Already returned above if working, so a set finishedAt is finished-unseen.
-      if (r?.status === "waiting" || r?.finishedAt !== undefined) waiting = true;
+      // Already returned above if working, so waiting or finished-unseen needs you.
+      if (r?.status === "waiting" || isSessionUnseen(runtime, seen, s.id)) waiting = true;
     }
     return waiting ? "waiting" : "idle";
-  }, [mine, runtime]);
+  }, [mine, runtime, seen]);
 
   return (
     <div className="mb-1">
@@ -745,6 +749,7 @@ export function WorkspaceRail({
   const sessions = useWorkspace((s) => s.sessions);
   const collapsed = useWorkspace((s) => s.railCollapsed);
   const runtime = useWorkspace((s) => s.runtime);
+  const seen = useWorkspace((s) => s.seen);
 
   const { width: railWidth, startResize } = useRailWidth("rmux.rail.width", RAIL_DEFAULT);
 
@@ -760,8 +765,7 @@ export function WorkspaceRail({
   // Both kinds of "needs you", Claude only: asking, or finished-and-unseen.
   const needing = sessions.filter((s) => {
     if (s.kind !== "claude") return false;
-    const r = runtime[s.id];
-    return r?.status === "waiting" || (r?.finishedAt !== undefined && r.status !== "working");
+    return runtime[s.id]?.status === "waiting" || isSessionUnseen(runtime, seen, s.id);
   }).length;
 
   return (
