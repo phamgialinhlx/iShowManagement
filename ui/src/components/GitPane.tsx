@@ -125,12 +125,15 @@ export function GitPane({ projectId }: { projectId: string }) {
       const repo = await api.gitRepo(target, folder);
       setRoot(repo.root);
       if (!repo.root) return;
-      const [s, l] = await Promise.all([
-        api.gitStatus(target, repo.root),
-        api.gitLog(target, repo.root, 50),
-      ]);
-      setStatus(s);
-      setCommits(l);
+      // **Sequential, not `Promise.all`.** Each IPC command resolves its own
+      // `SshTarget` and calls `connect()`, so running them together raced three
+      // connects at the same ControlMaster socket. Concurrency through a single
+      // already-connected target is fine — proven by `live_git`'s concurrent
+      // test, five rounds — so the fault is in establishing the connection,
+      // not in using it. One extra round trip is the cost, and the status is
+      // shown as soon as it lands rather than waiting on the log.
+      setStatus(await api.gitStatus(target, repo.root));
+      setCommits(await api.gitLog(target, repo.root, 50));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
