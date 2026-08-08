@@ -64,6 +64,8 @@ export function Workbench({
   const setDeck = useWorkspace((s) => s.setDeck);
   const railCollapsed = useWorkspace((s) => s.railCollapsed);
   const toggleRail = useWorkspace((s) => s.toggleRail);
+  const widgetsCollapsed = useWorkspace((s) => s.widgetsCollapsed);
+  const toggleWidgets = useWorkspace((s) => s.toggleWidgets);
   const serverOf = useWorkspace((s) => s.serverOf);
   const projectOf = useWorkspace((s) => s.projectOf);
   const targetOf = useWorkspace((s) => s.targetOf);
@@ -143,6 +145,58 @@ export function Workbench({
               {active.name} · {activeHost ?? "local"}
             </span>
           )}
+          {/*
+            Settings lives at the top-right of the title bar rather than in the
+            footer — a gear icon is where an operator instinctively reaches for it,
+            and it frees the footer's horizontal budget. A bare button (not a
+            `.chip`) so no border boxes the icon; buttons auto-block the drag region
+            so the window still moves everywhere around it. When the app lock is
+            armed a small padlock rides alongside — the icon-only button must not
+            drop the "· locked" signal the text button carried.
+          */}
+          <button
+            type="button"
+            onClick={() => void api.openSettings()}
+            aria-label={lock?.locked ? "Settings (app lock armed)" : "Settings"}
+            title={
+              lock?.locked
+                ? "Settings — accounts, your Claude credential, and the app lock (armed)"
+                : "Settings — accounts, the app lock, and your Claude credential"
+            }
+            className="title-cog inline-flex items-center gap-1"
+            style={{ height: 22 }}
+          >
+            {lock?.locked && (
+              <svg
+                width="9"
+                height="9"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="square"
+                strokeLinejoin="miter"
+                aria-hidden="true"
+              >
+                <rect x="4" y="11" width="16" height="10" />
+                <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+              </svg>
+            )}
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="square"
+              strokeLinejoin="miter"
+              aria-hidden="true"
+            >
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </button>
         </div>
       </TitleBar>
 
@@ -177,7 +231,7 @@ export function Workbench({
         )}
 
         <footer
-          className="flex shrink-0 items-center gap-4 border-t px-3 py-1"
+          className="chrome-black flex shrink-0 items-center gap-4 border-t px-3 py-1"
           style={{ borderColor: "var(--border)" }}
         >
           <button
@@ -266,14 +320,35 @@ export function Workbench({
 
             {activeTarget && <Metrics target={activeTarget} />}
 
+            {/*
+              The instruments (right) rail's collapse toggle, mirroring the servers
+              toggle at the footer's far left. Same icon, flipped horizontally — the
+              panel divider sits on the right (`M15 4v16`) because this panel is on
+              the right — so the two toggles read as a matched pair pointing at their
+              own sides.
+            */}
             <button
               type="button"
-              className="chip"
-              style={{ color: "var(--text-faint)" }}
-              onClick={() => void api.openSettings()}
-              title="Accounts, the app lock, and your Claude credential"
+              aria-label={widgetsCollapsed ? "Show the instruments panel" : "Hide the instruments panel"}
+              aria-pressed={!widgetsCollapsed}
+              title={widgetsCollapsed ? "Show instruments panel" : "Hide instruments panel"}
+              onClick={toggleWidgets}
+              className="shrink-0"
+              style={{ color: widgetsCollapsed ? "var(--text-faint)" : "var(--text-soft)" }}
             >
-              {lock?.locked ? "settings · locked" : "settings"}
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="square"
+                aria-hidden="true"
+              >
+                <rect x="3" y="4" width="18" height="16" />
+                <path d="M15 4v16" />
+              </svg>
             </button>
           </div>
         </footer>
