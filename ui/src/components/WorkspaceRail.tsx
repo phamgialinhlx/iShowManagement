@@ -501,7 +501,7 @@ function SessionRow({
               }}
             />
             <RailMenuItem
-              label="Import session…"
+              label="Attach session…"
               onClick={() => {
                 setMenu(null);
                 onImport();
@@ -524,7 +524,7 @@ function ProjectNode({
   project: Project;
   folded: boolean;
   onToggle: () => void;
-  /** Open the "Attach to running session…" picker, so an imported session can
+  /** Open the "Attach to running session…" picker, so an adopted session can
    *  be brought back without hunting for the server-card menu. */
   onImport: () => void;
 }) {
@@ -668,7 +668,7 @@ function ProjectNode({
               }}
             />
             <RailMenuItem
-              label="Import session…"
+              label="Attach session…"
               onClick={() => {
                 setMenu(null);
                 onImport();
