@@ -42,12 +42,48 @@ use serde::Serialize;
 /// before this.
 const MAX_BLOB: usize = 2 * 1024 * 1024;
 
+/// Marks where the *command's* output starts.
+///
+/// **A login shell prints things.** `CommandSpec::login_shell()` is `-l -i`,
+/// which is required so a version manager's PATH exists — and an interactive
+/// shell also emits the host's message of the day, a job-control warning, and
+/// whatever else `.zshrc` feels like. All of it lands on stdout ahead of the
+/// answer.
+///
+/// Measured against a real host: `git rev-parse --show-toplevel` returned five
+/// lines of ASCII-art banner followed by the path, so the repository root
+/// became the banner, every later command `cd`'d into a directory that could
+/// not exist, and the pane reported the banner back as its error. The parsers
+/// were never reached.
+///
+/// So every read prints this first and everything before it is discarded. It
+/// cannot be defended against by trimming, because the preamble is arbitrary
+/// and host-specific — only the command itself knows where its output begins.
+const START: &str = "\u{1}__RMUX_GIT_BEGIN__\u{1}";
+
 /// Splits the two sides of a comparison in one command's output.
 ///
 /// `\x01` cannot occur in the source anyone would read in a diff editor, and
 /// the surrounding text makes an accidental match effectively impossible. A
 /// plain word marker would be matched by this file itself.
 const SPLIT: &str = "\u{1}__RMUX_GIT_SPLIT__\u{1}";
+
+/// Run a script on the target and return only what *it* printed.
+///
+/// The exit status is the script's own: `printf` cannot fail in a way that
+/// matters, and a trailing `{ ... }` group leaves `$?` as the last command's,
+/// so `ok()` still reports whether git succeeded.
+async fn run(target: &dyn Target, script: &str) -> anyhow::Result<(String, bool)> {
+    let line = format!("printf '%s' {}; {{ {} }}", shell_quote(START), script);
+    let out = target.exec(&CommandSpec::login_shell().arg("-c").arg(line)).await?;
+    let body = match out.stdout.split_once(START) {
+        Some((_preamble, rest)) => rest.to_string(),
+        // No marker means the shell died before running anything — a bad
+        // folder, a refused connection. Keep the text: it is the diagnosis.
+        None => out.stdout.clone(),
+    };
+    Ok((body, out.ok()))
+}
 
 /// One path in the working tree that differs from `HEAD`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -120,24 +156,21 @@ pub struct FileDiff {
 /// wrong. The root is returned because a project folder is frequently a
 /// subdirectory, and every later command should run against the same tree.
 pub async fn repo_root(target: &dyn Target, folder: &str) -> anyhow::Result<Option<String>> {
-    let line = format!(
-        "cd {} 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true",
+    let script = format!(
+        "cd {} 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true;",
         shell_quote(folder)
     );
-    let out = target.exec(&CommandSpec::login_shell().arg("-c").arg(line)).await?;
-    let root = out.stdout.trim();
+    let (body, _) = run(target, &script).await?;
+    let root = body.trim();
     Ok(if root.is_empty() { None } else { Some(root.to_string()) })
 }
 
 /// `git status --porcelain=v2 -z --branch`, parsed.
 pub async fn status(target: &dyn Target, root: &str) -> anyhow::Result<Status> {
-    let line = format!(
-        "cd {} && git status --porcelain=v2 -z --branch 2>&1",
-        shell_quote(root)
-    );
-    let out = target.exec(&CommandSpec::login_shell().arg("-c").arg(line)).await?;
-    anyhow::ensure!(out.ok(), "{}", out.stdout.trim().lines().next().unwrap_or("git status failed"));
-    Ok(parse_status(&out.stdout))
+    let script = format!("cd {} && git status --porcelain=v2 -z --branch 2>&1;", shell_quote(root));
+    let (body, ok) = run(target, &script).await?;
+    anyhow::ensure!(ok, "{}", body.trim().lines().next().unwrap_or("git status failed"));
+    Ok(parse_status(&body))
 }
 
 /// Recent commits, newest first.
@@ -146,32 +179,32 @@ pub async fn log(target: &dyn Target, root: &str, limit: usize) -> anyhow::Resul
     // separate *commits* with NUL as well, which is indistinguishable from a
     // field break — so the format supplies its own separators and the count is
     // what re-syncs the reader.
-    let line = format!(
-        "cd {} && git log --no-color -n {} --format=%H%x00%h%x00%an%x00%aI%x00%s%x00 2>&1",
+    let script = format!(
+        "cd {} && git log --no-color -n {} --format=%H%x00%h%x00%an%x00%aI%x00%s%x00 2>&1;",
         shell_quote(root),
         limit.clamp(1, 500),
     );
-    let out = target.exec(&CommandSpec::login_shell().arg("-c").arg(line)).await?;
-    if !out.ok() {
+    let (body, ok) = run(target, &script).await?;
+    if !ok {
         // A repository with no commits yet is not an error, it is Tuesday.
-        if out.stdout.contains("does not have any commits") {
+        if body.contains("does not have any commits") {
             return Ok(Vec::new());
         }
-        anyhow::bail!("{}", out.stdout.trim().lines().next().unwrap_or("git log failed"));
+        anyhow::bail!("{}", body.trim().lines().next().unwrap_or("git log failed"));
     }
-    Ok(parse_log(&out.stdout))
+    Ok(parse_log(&body))
 }
 
 /// The files a commit touched.
 pub async fn commit_files(target: &dyn Target, root: &str, sha: &str) -> anyhow::Result<Vec<Change>> {
-    let line = format!(
-        "cd {} && git show --name-status --format= -z {} 2>&1",
+    let script = format!(
+        "cd {} && git show --name-status --format= -z {} 2>&1;",
         shell_quote(root),
         shell_quote(sha),
     );
-    let out = target.exec(&CommandSpec::login_shell().arg("-c").arg(line)).await?;
-    anyhow::ensure!(out.ok(), "{}", out.stdout.trim().lines().next().unwrap_or("git show failed"));
-    Ok(parse_name_status(&out.stdout))
+    let (body, ok) = run(target, &script).await?;
+    anyhow::ensure!(ok, "{}", body.trim().lines().next().unwrap_or("git show failed"));
+    Ok(parse_name_status(&body))
 }
 
 /// Which revision a file is being compared against.
@@ -222,16 +255,15 @@ pub async fn file_diff(
         )
     };
 
-    let line = format!(
-        "cd {} && {{ {}; }}; printf '%s' {}; {{ {}; }}",
+    let script = format!(
+        "cd {} && {{ {}; }}; printf '%s' {}; {{ {}; }};",
         shell_quote(root),
         show_left,
         shell_quote(SPLIT),
         show_right,
     );
-    let out = target.exec(&CommandSpec::login_shell().arg("-c").arg(line)).await?;
-
-    let (old_text, new_text) = out.stdout.split_once(SPLIT).unwrap_or((out.stdout.as_str(), ""));
+    let (body, _) = run(target, &script).await?;
+    let (old_text, new_text) = body.split_once(SPLIT).unwrap_or((body.as_str(), ""));
     Ok(FileDiff {
         path: path.to_string(),
         truncated: old_text.len() >= MAX_BLOB || new_text.len() >= MAX_BLOB,
@@ -394,6 +426,43 @@ mod tests {
         "1 .D N... 100644 100644 000000 ccc ddd gone.txt\x00",
         "? untracked file.txt\x00",
     );
+
+    /// What an interactive login shell prepends, before the command runs.
+    ///
+    /// Captured from a real host: 717 bytes of ASCII-art banner and a job
+    /// control warning, none of it containing a NUL — which is exactly why it
+    /// is dangerous. It merges with the first NUL-terminated record into one
+    /// field, and a `trim()` cannot tell where it ends.
+    const PREAMBLE: &str = "bash: cannot set terminal process group (-1)\n\
+        bash: no job control in this shell\n\
+        __   _____ _____ _____ ____\n\
+        \\ \\ / /_ _|_   _| ____/ ___|\n\
+        >> a message of the day\n";
+
+    #[test]
+    fn the_shell_preamble_is_discarded_not_trimmed() {
+        // `repo_root` took the whole of stdout as a path, so the repository
+        // root became the banner plus the path — and every command after it
+        // `cd`'d somewhere impossible and reported the banner as its error.
+        // Verified on a real host: 717 bytes before the marker.
+        let raw = format!("{PREAMBLE}{START}/home/a/project\n");
+        let after = raw.split_once(START).map(|(_, rest)| rest.trim()).unwrap_or_default();
+        assert_eq!(after, "/home/a/project");
+
+        // The reason trimming cannot work: the preamble carries no NUL, so it
+        // fuses with the first record rather than forming a field of its own.
+        let fused = format!("{PREAMBLE}# branch.oid abc\x00# branch.head main\x00");
+        assert!(!fused.split('\x00').next().unwrap().starts_with("# "));
+    }
+
+    #[test]
+    fn a_marked_status_parses_through_the_preamble() {
+        let raw = format!("{PREAMBLE}{START}{STATUS}");
+        let body = raw.split_once(START).map(|(_, r)| r).unwrap_or(&raw);
+        let s = parse_status(body);
+        assert_eq!(s.branch, "rmux");
+        assert_eq!(s.changes.len(), 5);
+    }
 
     #[test]
     fn the_branch_and_its_divergence_are_read() {
