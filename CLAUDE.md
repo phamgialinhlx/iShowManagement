@@ -1,44 +1,3 @@
-# rmux — agent instructions
-
-A fast, direct-SSH remote dev client. Rust core (Tauri v2) + React/Tailwind/motion UI.
-Replaces `redstone-cowork`'s Electron desktop app. Full plan:
-`~/.claude/plans/if-you-check-redstone-cowork-dynamic-spark.md`.
-
-## The one architectural rule
-
-**Remote coding never goes through the Cowork server.** Terminals, files, metrics,
-browsers and Claude sessions are a direct SSH connection from this client to the target
-host. The Cowork server (`../redstone-cowork/apps/api`, NestJS) is reused *only* for auth,
-the shared server registry, messaging, token-usage reporting, leaderboard and team targets.
-
-The previous generation relayed sessions through that server, which is where its whole
-bug class came from — ghost permission cards, eaten answers, sessions reaped by poller
-heartbeat, stale keep-alives after an API redeploy. If a design idea reintroduces a server
-hop on the session path, it is wrong.
-
-## Do not copy from redstone-cowork
-
-Read it for the *design language* and the *feature list*. Never port its code — an
-earlier attempt to make an offline edition by modifying it in place inherited its
-problems. Every file here is written fresh.
-
-## Layout
-
-```
-crates/rmux-transport   Target trait: Local | Ssh — THE seam (see below)
-crates/rmux-ssh         system `ssh` + ControlMaster; askpass bridge
-crates/rmux-agent       remote daemon + thin stdio proxy (not yet built)
-askpass/                SSH_ASKPASS helper binary — routes credential prompts to the UI
-crates/rmux-term        local PTY + scrollback; terminals outlive their views
-crates/rmux-fs          FileSystem trait: LocalFs | TargetFs (POSIX shell over ssh)
-crates/rmux-metrics     CPU/memory sampled over the existing connection
-crates/rmux-claude      Claude PTY control + screen parsing (not yet built)
-crates/rmux-control     the socket other apps drive rmux through (rbrowse and friends)
-crates/rmux-cowork      Cowork server client + OS keyring
-src-tauri/              thin IPC layer only — no logic
-ui/                     React 19 + Tailwind 4 + motion
-```
-
 ## Invariants
 
 - **Local and remote are one code path.** Everything is written against
@@ -405,21 +364,7 @@ works for an icon and fails on anything real. Verified against a real host — s
 recognised as a PNG. Like a browser report, the path is *typed* into the composer and never
 submitted.
 
-## Design system — SIGNAL ROOM
-
-`ui/src/styles/signal-room.css` is the source of truth. Four rules, all load-bearing:
-
--1. **Text must be legible.** `--text-faint` was `#5c5953` — 2.77:1 against the panel, well
-   under the 4.5:1 normal text needs, and most of what wears it is 9px labels. It is now
-   `#7e7b74` (4.57:1), still a clear step below `--text-soft` (6.46:1). Measure before
-   choosing a grey; prose belongs at `--text-soft`, not `--text-faint`.
-0. **Red (`#e63b2e`) only where the operator must act.** Working/done stay monochrome;
-   in-progress is amber. Red that means three things means nothing.
-1. **Zero border-radius**, enforced by a global `!important`. `.round` is the only escape
-   hatch, for genuinely circular instruments.
-2. **Blinking is for cursors only.** Liveness = data movement. Meters "breathe" by scaling
-   the *bar*, never the printed number — animating a value invents data.
-3. **No emoji.** Inline SVG, Lucide-style, 1.5–1.7px strokes, square caps.
+## Design system
 
 **Panels tint; they must not `backdrop-filter`.** This one reads backwards and cost two
 wrong diagnoses. `backdrop-filter` filters *the page's own backdrop*, and the desktop behind
@@ -560,13 +505,20 @@ to say "this is a string".
 - **A running session turns; it does not blink.** A static amber dot cannot distinguish work
   still going from work that stopped an hour ago, which is the single most useful thing the
   rail can say. Rule 2 holds — the ring rotates continuously and the dot never disappears.
-- **"Finished" is a transition, not a state.** `idle` cannot tell a session that just finished
-  ten minutes of work from one that has never run, and those deserve opposite amounts of
-  attention. `setStatus` records `finishedAt` on the working→not-working edge; the rail marks
-  that session in the accent colour until it is **opened**. Cleared by looking, never by a
-  timer: an alert that expires on its own is one the operator misses by being away from the
-  desk, which is exactly when a long run finishes. Runtime only — restoring it would greet
-  every launch with a rail full of marks that have already been seen.
+- **"Finished" (unseen) is a watermark, not an edge flag.** `idle` cannot tell a session that
+  just finished ten minutes of work from one that has never run, and those deserve opposite
+  amounts of attention. A session is *unseen* when it is idle and its last status change is
+  newer than what has been acknowledged: `isSessionUnseen` compares the runtime `lastStatusAt`
+  (the host-clock `statusUpdatedAt` the agent's `watch-status` stream carries, or a local-clock
+  stamp on the working→idle edge for the fallback poll) against a per-session `seen` watermark.
+  Opening a session advances its watermark, which is what clears the mark — by looking, never on
+  a timer: an alert that expires on its own is one the operator misses by being away from the
+  desk, which is exactly when a long run finishes. **`seen` is persisted** (`rmux.seen`, its own
+  key), on purpose: a run that finished while the app was closed must still read as unseen on
+  next launch — the case the earlier runtime-only `finishedAt` edge flag missed. A session never
+  looked at is *seeded* caught-up on first sight, so launch does not open to a rail full of marks
+  nobody has earned. This is the model the 0.2.8 tmux tree used (`seen[session]` vs
+  `statusUpdatedAt`).
 - The header counts **both** kinds of "needs you". Counting only `waiting` left a rail full of
   accent dots above a header claiming everything was fine.
 

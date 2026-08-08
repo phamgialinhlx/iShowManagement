@@ -20,14 +20,16 @@
  *    automatically, so they keep working without extra markup.
  *
  * The band clears the macOS traffic lights (left padding) and stays a usable drag
- * target. It was 56px, which read as a lot of empty space above the tabs; 40px is
- * tighter without becoming a thin strip that is frustrating to grab. The traffic
- * lights are an OS layer drawn over the webview, so the band height does not clip
- * them — this is purely how much of our own chrome sits up top.
+ * target. It was 56px, which read as a lot of empty space above the tabs; it is now
+ * 34px to match Zed's title bar (`platform_title_bar_height` = `max(1.75rem, 34px)`,
+ * which lands on 34 at its default UI font). rmux sizes chrome in fixed pixels under
+ * `zoom` rather than in rem, so the flat floor is the meaningful equivalent of Zed's
+ * expression. The traffic lights are an OS layer drawn over the webview, so the band
+ * height does not clip them — this is purely how much of our own chrome sits up top.
  */
 
 /** Height of the drag band. Exported so layouts can offset content by it. */
-export const TITLE_BAR_HEIGHT = 36;
+export const TITLE_BAR_HEIGHT = 34;
 
 export function TitleBar({ children }: { children?: React.ReactNode }) {
   const isMac = navigator.userAgent.includes("Mac");
@@ -35,7 +37,7 @@ export function TitleBar({ children }: { children?: React.ReactNode }) {
   return (
     <div
       data-tauri-drag-region="deep"
-      className="fixed inset-x-0 top-0 z-50 flex items-center justify-between pr-4"
+      className="chrome-black fixed inset-x-0 top-0 z-50 flex items-center justify-between pr-4"
       style={{ height: TITLE_BAR_HEIGHT, paddingLeft: isMac ? 82 : 16 }}
     >
       <span className="micro select-none">rmux</span>

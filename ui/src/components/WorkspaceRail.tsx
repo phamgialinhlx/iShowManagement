@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
 import { useRailWidth } from "../lib/rail-width";
-import { useWorkspace } from "../lib/workspace";
+import { isSessionUnseen, useWorkspace } from "../lib/workspace";
 import { RailGrip } from "./RailGrip";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
 import { QuickAdd } from "./QuickAdd";
@@ -50,43 +50,124 @@ function serverLabel(server: Server): string {
   return `${t.user ? `${t.user}@` : ""}${t.host}${t.port ? `:${t.port}` : ""}`;
 }
 
-/** Rule 0: red means *you* must act, and nothing else does. */
-function statusColor(status: SessionStatus): string {
-  switch (status) {
-    case "waiting":
-      return "rgb(var(--primary))";
-    case "working":
-      return "rgb(var(--busy))";
-    default:
-      return "var(--text-faint)";
-  }
-}
+/** The old iShowManagement (0.2.8) status palette — Nord — kept verbatim by
+ *  request. This deliberately steps outside SIGNAL ROOM's rules: blue and green
+ *  are not in the app palette and red is normally reserved for "act now". It is a
+ *  chosen look for these four icons, not the app-wide accent system. */
+const OLD_STATUS = {
+  working: "#88c0d0", // nord8
+  waiting: "#ebcb8b", // nord13
+  unseen: "#a3be8c", // nord14
+  seen: "#7b88a1", // brightened nord3
+} as const;
 
-/** The attention mark — see the long note in the old rail. Only Claude sessions
- *  carry one; a terminal renders its kind glyph instead. */
+/** The attention mark, drawn the way the old rail drew it — Lucide `loader`
+ *  (spinning), `circle-alert`, `circle-check`, and a filled/negative
+ *  `circle-check`. Only Claude sessions carry one; a terminal renders its kind
+ *  glyph instead. 12px, per the size chosen for this. */
 function StatusDot({ status, finished }: { status: SessionStatus; finished?: boolean }) {
   const done = finished && status !== "working";
+
   if (status === "working") {
+    // lucide: loader — spins (reuses the `ring-spin` rotation keyframe).
     return (
-      <span
-        className="round ring-spin shrink-0"
-        title="working"
-        style={{
-          width: 9,
-          height: 9,
-          border: "1.5px solid rgb(var(--busy) / 0.28)",
-          borderTopColor: "rgb(var(--busy))",
-          boxSizing: "border-box",
-        }}
-      />
+      <svg
+        className="ring-spin shrink-0"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        style={{ color: OLD_STATUS.working }}
+      >
+        <title>working</title>
+        <path d="M12 2v4" />
+        <path d="m16.2 7.8 2.9-2.9" />
+        <path d="M18 12h4" />
+        <path d="m16.2 16.2 2.9 2.9" />
+        <path d="M12 18v4" />
+        <path d="m4.9 19.1 2.9-2.9" />
+        <path d="M2 12h4" />
+        <path d="m4.9 4.9 2.9 2.9" />
+      </svg>
     );
   }
+
+  if (status === "waiting") {
+    // lucide: circle-alert
+    return (
+      <svg
+        className="shrink-0"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        style={{ color: OLD_STATUS.waiting }}
+      >
+        <title>waiting</title>
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" x2="12" y1="8" y2="12" />
+        <line x1="12" x2="12.01" y1="16" y2="16" />
+      </svg>
+    );
+  }
+
+  if (done) {
+    // lucide: circle-check — finished but not looked at yet (unseen).
+    return (
+      <svg
+        className="shrink-0"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        style={{ color: OLD_STATUS.unseen }}
+      >
+        <title>finished — not looked at yet</title>
+        <circle cx="12" cy="12" r="10" />
+        <path d="m9 12 2 2 4-4" />
+      </svg>
+    );
+  }
+
+  // lucide: circle-check, negative — a filled disc with a knocked-out check, for
+  // an idle session already seen. The check is knocked out against the panel.
   return (
-    <span
-      className={`round shrink-0${done ? " done-swell" : ""}`}
-      title={done ? "finished — not looked at yet" : status}
-      style={{ width: 7, height: 7, background: done ? "rgb(var(--primary))" : statusColor(status) }}
-    />
+    <svg
+      className="shrink-0"
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="none"
+      aria-hidden="true"
+      style={{ color: OLD_STATUS.seen }}
+    >
+      <title>idle</title>
+      <circle cx="12" cy="12" r="10" />
+      <path
+        d="m9 12 2 2 4-4"
+        fill="none"
+        stroke="var(--app-panel)"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -216,6 +297,20 @@ function FolderIcon() {
   );
 }
 
+/** Server-rack glyph for HOST — the machine itself, not one of its readouts
+ *  (processes, ports, metrics all belong to the box). Stacked rectangles fit the
+ *  zero-radius language; the two square LEDs are where a status tint could go. */
+function HostIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="7" />
+      <rect x="3" y="13" width="18" height="7" />
+      <path d="M7 7.5h.01" />
+      <path d="M7 16.5h.01" />
+    </svg>
+  );
+}
+
 function SessionRow({
   session,
   active,
@@ -233,6 +328,9 @@ function SessionRow({
   const [editing, setEditing] = useState(false);
   const rename = useWorkspace((s) => s.renameSession);
   const status = useWorkspace((s) => s.statusOf(session.id));
+  // Subscribed to the derived boolean, so the mark clears the moment the session
+  // is opened (its watermark advances) or lights when a newer change arrives.
+  const unseen = useWorkspace((s) => isSessionUnseen(s.runtime, s.seen, session.id));
 
   // A child row: the tree line supplies the left edge, so selection is a filled
   // block (as in the reference) rather than the top-level bar `rowSurface` draws.
@@ -247,7 +345,7 @@ function SessionRow({
       {editing ? (
         <div className="flex items-center gap-2 px-3 py-[6px] pl-3">
           {session.kind === "claude" ? (
-            <StatusDot status={status.status} finished={status.finishedAt !== undefined} />
+            <StatusDot status={status.status} finished={unseen} />
           ) : (
             <TerminalMark />
           )}
@@ -280,7 +378,7 @@ function SessionRow({
           className="flex w-full items-center gap-2 px-3 py-[6px] pl-3 text-left"
         >
           {session.kind === "claude" ? (
-            <StatusDot status={status.status} finished={status.finishedAt !== undefined} />
+            <StatusDot status={status.status} finished={unseen} />
           ) : (
             <TerminalMark />
           )}
@@ -587,6 +685,7 @@ function ServerNode({
   const projects = useMemo(() => allProjects.filter((p) => p.serverId === server.id), [allProjects, server.id]);
   const allSessions = useWorkspace((s) => s.sessions);
   const runtime = useWorkspace((s) => s.runtime);
+  const seen = useWorkspace((s) => s.seen);
   const openHost = useWorkspace((s) => s.openHost);
   const removeServer = useWorkspace((s) => s.removeServer);
   const [confirming, setConfirming] = useState(false);
@@ -603,17 +702,17 @@ function ServerNode({
       if (s.kind !== "claude") continue;
       const r = runtime[s.id];
       if (r?.status === "working") return "working";
-      // Already returned above if working, so a set finishedAt is finished-unseen.
-      if (r?.status === "waiting" || r?.finishedAt !== undefined) waiting = true;
+      // Already returned above if working, so waiting or finished-unseen needs you.
+      if (r?.status === "waiting" || isSessionUnseen(runtime, seen, s.id)) waiting = true;
     }
     return waiting ? "waiting" : "idle";
-  }, [mine, runtime]);
+  }, [mine, runtime, seen]);
 
   return (
     <div className="mb-1">
       {/* Server card — accent bar, status dot, bold name; the HOST / + verbs. */}
       <div
-        className="group/srv relative mx-1.5 mt-1.5 flex items-center gap-2 py-[7px] pl-2.5 pr-2"
+        className="group/srv relative mx-1.5 mt-1.5 flex items-center gap-1.5 py-[7px] pl-2.5 pr-2"
         style={{
           background: "color-mix(in srgb, var(--text) 6%, transparent)",
           boxShadow: "inset 3px 0 0 var(--text-soft)",
@@ -634,11 +733,13 @@ function ServerNode({
         </button>
         <button
           type="button"
-          className="chip shrink-0"
           onClick={() => openHost(server.id)}
+          aria-label="Host"
           title="Host: processes, ports, metrics"
+          className="shrink-0 px-1 opacity-70 hover:opacity-100"
+          style={{ color: "var(--text-soft)" }}
         >
-          HOST
+          <HostIcon />
         </button>
         <button
           type="button"
@@ -729,6 +830,7 @@ export function WorkspaceRail({
   const sessions = useWorkspace((s) => s.sessions);
   const collapsed = useWorkspace((s) => s.railCollapsed);
   const runtime = useWorkspace((s) => s.runtime);
+  const seen = useWorkspace((s) => s.seen);
 
   const { width: railWidth, startResize } = useRailWidth("rmux.rail.width", RAIL_DEFAULT);
 
@@ -744,13 +846,12 @@ export function WorkspaceRail({
   // Both kinds of "needs you", Claude only: asking, or finished-and-unseen.
   const needing = sessions.filter((s) => {
     if (s.kind !== "claude") return false;
-    const r = runtime[s.id];
-    return r?.status === "waiting" || (r?.finishedAt !== undefined && r.status !== "working");
+    return runtime[s.id]?.status === "waiting" || isSessionUnseen(runtime, seen, s.id);
   }).length;
 
   return (
     <motion.aside
-      className="panel relative flex shrink-0 flex-col overflow-hidden"
+      className="panel chrome-black relative flex shrink-0 flex-col overflow-hidden"
       animate={{ width: collapsed ? RAIL_COLLAPSED : railWidth }}
       // The spring is for the collapse toggle. A *drag* must not spring: the
       // edge would lag the pointer and overshoot on release, which reads as the

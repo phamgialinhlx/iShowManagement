@@ -3361,6 +3361,7 @@ dependencies = [
  "camino",
  "dirs",
  "libc",
+ "notify",
  "parking_lot",
  "rmux-ssh",
  "rmux-term",

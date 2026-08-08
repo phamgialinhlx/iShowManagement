@@ -61,3 +61,5 @@ references/zed
 references/tsmanager
 tmp/
 web/dist
+ui/dist
+references/iShowManagement-0.2.8/

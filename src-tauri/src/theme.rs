@@ -128,16 +128,13 @@ pub struct ThemeStore {
     last_written: Mutex<Option<String>>,
 }
 
-fn config_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join("theme.toml"))
+fn config_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
+    Ok(home.join(".rmux").join("theme.toml"))
 }
 
-/// Read and parse, tolerating absence and corruption — either yields the default
-/// (no user themes, SIGNAL ROOM active) rather than an error, so a bad file never
-/// strands the app with no colours.
-fn read_file<R: Runtime>(app: &AppHandle<R>) -> ThemeFile {
-    let Ok(path) = config_path(app) else {
+fn read_file() -> ThemeFile {
+    let Ok(path) = config_path() else {
         return ThemeFile { active: default_active(), themes: BTreeMap::new() };
     };
     match std::fs::read_to_string(&path) {
@@ -149,19 +146,12 @@ fn read_file<R: Runtime>(app: &AppHandle<R>) -> ThemeFile {
     }
 }
 
-/// Serialize and write, recording the bytes so the watcher ignores this write.
-fn write_file<R: Runtime>(
-    app: &AppHandle<R>,
-    store: &ThemeStore,
-    file: &ThemeFile,
-) -> Result<(), String> {
-    let path = config_path(app)?;
+fn write_file(store: &ThemeStore, file: &ThemeFile) -> Result<(), String> {
+    let path = config_path()?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let text = toml::to_string_pretty(file).map_err(|e| e.to_string())?;
-    // Record *before* writing: the watcher may fire before this function returns,
-    // and it compares against this to decide our-write-vs-hand-edit.
     *store.last_written.lock() = Some(text.clone());
     std::fs::write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
     Ok(())
@@ -176,12 +166,9 @@ fn to_state(file: ThemeFile) -> ThemeState {
     ThemeState { active: file.active, user_themes }
 }
 
-/* -------------------------------------------------------------- commands */
-
-/// The current state: the active name plus the operator's saved themes.
 #[tauri::command]
-pub fn theme_state<R: Runtime>(app: AppHandle<R>) -> ThemeState {
-    to_state(read_file(&app))
+pub fn theme_state() -> ThemeState {
+    to_state(read_file())
 }
 
 /// Create or update a user theme. Refuses a built-in name — those are immutable
@@ -198,9 +185,9 @@ pub fn theme_save<R: Runtime>(
     if theme.name.trim().is_empty() {
         return Err("a theme needs a name".to_owned());
     }
-    let mut file = read_file(&app);
+    let mut file = read_file();
     file.themes.insert(theme.name, theme.colors);
-    write_file(&app, &store, &file)?;
+    write_file(&store, &file)?;
     Ok(broadcast(&app, file))
 }
 
@@ -222,9 +209,9 @@ pub fn theme_set_active<R: Runtime>(
     store: State<'_, ThemeStore>,
     name: String,
 ) -> Result<ThemeState, String> {
-    let mut file = read_file(&app);
+    let mut file = read_file();
     file.active = name;
-    write_file(&app, &store, &file)?;
+    write_file(&store, &file)?;
     Ok(broadcast(&app, file))
 }
 
@@ -236,12 +223,12 @@ pub fn theme_delete<R: Runtime>(
     store: State<'_, ThemeStore>,
     name: String,
 ) -> Result<ThemeState, String> {
-    let mut file = read_file(&app);
+    let mut file = read_file();
     file.themes.remove(&name);
     if file.active == name {
         file.active = default_active();
     }
-    write_file(&app, &store, &file)?;
+    write_file(&store, &file)?;
     Ok(broadcast(&app, file))
 }
 
@@ -253,7 +240,7 @@ pub fn theme_delete<R: Runtime>(
 pub fn start_watcher<R: Runtime>(app: AppHandle<R>) {
     use notify::{EventKind, RecursiveMode, Watcher};
 
-    let Ok(path) = config_path(&app) else { return };
+    let Ok(path) = config_path() else { return };
     let Some(dir) = path.parent().map(PathBuf::from) else { return };
     if std::fs::create_dir_all(&dir).is_err() {
         return;

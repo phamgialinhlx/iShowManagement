@@ -19,6 +19,7 @@ pub mod daemon;
 pub mod ipc;
 pub mod protocol;
 pub mod provision;
+pub mod status;
 pub mod tty;
 
 pub use protocol::{Frame, Hello};
