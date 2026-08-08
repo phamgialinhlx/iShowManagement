@@ -5,6 +5,7 @@ import { api, isTauri, type GitChange, type GitCommit, type GitStatus } from "..
 import { initMonaco, languageForPath, THEME_NAME } from "../lib/monaco";
 import { readMonoStack } from "../lib/fonts";
 import { useWorkspace } from "../lib/workspace";
+import { PanelLoader } from "./PanelLoader";
 
 /**
  * What changed, for the project this pane belongs to.
@@ -445,7 +446,25 @@ function DiffView({
         </p>
       )}
 
-      <div ref={hostRef} className="min-h-0 flex-1" />
+      {/* The host stays mounted throughout — Monaco attaches to a real element,
+          so it cannot be conditionally rendered. The loader sits *over* it
+          instead, and leaves when the editor has something to show. Reported as
+          a blank screen between clicking a file and the diff appearing, which
+          is a fetch of two file versions over SSH — easily long enough to read
+          as broken. */}
+      <div className="relative min-h-0 flex-1">
+        <div ref={hostRef} className="absolute inset-0" />
+        {!state && !error && (
+          <div className="absolute inset-0" style={{ background: "var(--app-panel)" }}>
+            <PanelLoader
+              variant="rows"
+              phase="READING BOTH VERSIONS"
+              detail={viewing.change.path}
+              rows={7}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

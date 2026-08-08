@@ -88,13 +88,28 @@ const SPLIT: &str = "__RMUX_GIT_SPLIT_9f2c7d__";
 async fn run(target: &dyn Target, script: &str) -> anyhow::Result<(String, bool)> {
     let line = format!("printf '%s' {}; {{ {} }}", shell_quote(START), script);
     let out = target.exec(&CommandSpec::login_shell().arg("-c").arg(line)).await?;
-    let body = match out.stdout.rsplit_once(START) {
-        Some((_preamble, rest)) => rest.to_string(),
-        // No marker means the shell died before running anything — a bad
-        // folder, a refused connection. Keep the text: it is the diagnosis.
-        None => out.stdout.clone(),
-    };
-    Ok((body, out.ok()))
+    match out.stdout.rsplit_once(START) {
+        Some((_preamble, rest)) => Ok((rest.to_string(), out.ok())),
+        None => {
+            // **The marker is always printed, so its absence is the bug — not
+            // the command's failure.** Reporting the raw text here is what put
+            // the host's message-of-the-day on screen as if it were a git
+            // error, three times. Say what actually happened instead, and log
+            // the bytes so the next report is diagnosable rather than guessed.
+            tracing::warn!(
+                bytes = out.stdout.len(),
+                status_ok = out.ok(),
+                head = %out.stdout.chars().take(200).collect::<String>().escape_debug(),
+                tail = %out.stdout.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>().escape_debug(),
+                "git: output marker missing — cannot tell the shell's preamble from the command's output"
+            );
+            anyhow::bail!(
+                "could not read the command's output on this host \
+                 (the shell returned {} bytes with no marker) — see the log",
+                out.stdout.len()
+            )
+        }
+    }
 }
 
 /// One path in the working tree that differs from `HEAD`.
