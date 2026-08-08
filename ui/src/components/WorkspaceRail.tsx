@@ -50,43 +50,124 @@ function serverLabel(server: Server): string {
   return `${t.user ? `${t.user}@` : ""}${t.host}${t.port ? `:${t.port}` : ""}`;
 }
 
-/** Rule 0: red means *you* must act, and nothing else does. */
-function statusColor(status: SessionStatus): string {
-  switch (status) {
-    case "waiting":
-      return "rgb(var(--primary))";
-    case "working":
-      return "rgb(var(--busy))";
-    default:
-      return "var(--text-faint)";
-  }
-}
+/** The old iShowManagement (0.2.8) status palette — Nord — kept verbatim by
+ *  request. This deliberately steps outside SIGNAL ROOM's rules: blue and green
+ *  are not in the app palette and red is normally reserved for "act now". It is a
+ *  chosen look for these four icons, not the app-wide accent system. */
+const OLD_STATUS = {
+  working: "#88c0d0", // nord8
+  waiting: "#ebcb8b", // nord13
+  unseen: "#a3be8c", // nord14
+  seen: "#7b88a1", // brightened nord3
+} as const;
 
-/** The attention mark — see the long note in the old rail. Only Claude sessions
- *  carry one; a terminal renders its kind glyph instead. */
+/** The attention mark, drawn the way the old rail drew it — Lucide `loader`
+ *  (spinning), `circle-alert`, `circle-check`, and a filled/negative
+ *  `circle-check`. Only Claude sessions carry one; a terminal renders its kind
+ *  glyph instead. 12px, per the size chosen for this. */
 function StatusDot({ status, finished }: { status: SessionStatus; finished?: boolean }) {
   const done = finished && status !== "working";
+
   if (status === "working") {
+    // lucide: loader — spins (reuses the `ring-spin` rotation keyframe).
     return (
-      <span
-        className="round ring-spin shrink-0"
-        title="working"
-        style={{
-          width: 9,
-          height: 9,
-          border: "1.5px solid rgb(var(--busy) / 0.28)",
-          borderTopColor: "rgb(var(--busy))",
-          boxSizing: "border-box",
-        }}
-      />
+      <svg
+        className="ring-spin shrink-0"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        style={{ color: OLD_STATUS.working }}
+      >
+        <title>working</title>
+        <path d="M12 2v4" />
+        <path d="m16.2 7.8 2.9-2.9" />
+        <path d="M18 12h4" />
+        <path d="m16.2 16.2 2.9 2.9" />
+        <path d="M12 18v4" />
+        <path d="m4.9 19.1 2.9-2.9" />
+        <path d="M2 12h4" />
+        <path d="m4.9 4.9 2.9 2.9" />
+      </svg>
     );
   }
+
+  if (status === "waiting") {
+    // lucide: circle-alert
+    return (
+      <svg
+        className="shrink-0"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        style={{ color: OLD_STATUS.waiting }}
+      >
+        <title>waiting</title>
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" x2="12" y1="8" y2="12" />
+        <line x1="12" x2="12.01" y1="16" y2="16" />
+      </svg>
+    );
+  }
+
+  if (done) {
+    // lucide: circle-check — finished but not looked at yet (unseen).
+    return (
+      <svg
+        className="shrink-0"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        style={{ color: OLD_STATUS.unseen }}
+      >
+        <title>finished — not looked at yet</title>
+        <circle cx="12" cy="12" r="10" />
+        <path d="m9 12 2 2 4-4" />
+      </svg>
+    );
+  }
+
+  // lucide: circle-check, negative — a filled disc with a knocked-out check, for
+  // an idle session already seen. The check is knocked out against the panel.
   return (
-    <span
-      className={`round shrink-0${done ? " done-swell" : ""}`}
-      title={done ? "finished — not looked at yet" : status}
-      style={{ width: 7, height: 7, background: done ? "rgb(var(--primary))" : statusColor(status) }}
-    />
+    <svg
+      className="shrink-0"
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="none"
+      aria-hidden="true"
+      style={{ color: OLD_STATUS.seen }}
+    >
+      <title>idle</title>
+      <circle cx="12" cy="12" r="10" />
+      <path
+        d="m9 12 2 2 4-4"
+        fill="none"
+        stroke="var(--app-panel)"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
