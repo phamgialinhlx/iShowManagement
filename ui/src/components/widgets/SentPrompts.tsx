@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { PanelLoader } from "../PanelLoader";
+
 import { api, isTauri, type TargetRef, type TranscriptEntry } from "../../lib/api";
 
 /**
@@ -96,11 +98,7 @@ export function SentPrompts({
   if (!entries) {
     // Loading is a state with a name. A pane that can take seconds must say so,
     // or it is indistinguishable from a broken one.
-    return (
-      <p className="data text-[10px]" style={{ color: "var(--text-faint)" }}>
-        Reading the transcript…
-      </p>
-    );
+    return <PanelLoader variant="inline" phase="READING THE TRANSCRIPT" />;
   }
 
   if (!prompts.length) {

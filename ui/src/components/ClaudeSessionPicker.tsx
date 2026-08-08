@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { PanelLoader } from "./PanelLoader";
+
 import { api, type ClaudeSessionInfo, type TargetRef } from "../lib/api";
 
 /**
@@ -85,7 +87,9 @@ export function ClaudeSessionPicker({
         className="inset min-h-0 flex-1 overflow-y-auto"
         style={{ border: "1px solid var(--border)", maxHeight: "46vh" }}
       >
-        {sessions === null && <p className="micro p-2">looking for previous sessions…</p>}
+        {sessions === null && (
+          <PanelLoader variant="rows" phase="LOOKING FOR PREVIOUS SESSIONS" rows={4} />
+        )}
 
         {sessions?.map((session) => (
           <button

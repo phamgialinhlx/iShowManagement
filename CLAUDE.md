@@ -740,6 +740,43 @@ with ControlMaster holding the socket. Only the matches cross the network.
   only when focused — from the tree, or right after clicking a search result, the key did
   nothing, which reads as a missing feature rather than a focus rule.
 
+## One loader, so a seventh vocabulary does not arrive next month
+
+`PanelLoader` is the only loading component. Nearly every fetch in rmux is an SSH
+round trip, so nearly every one of these states can outlast a frame — and the rule
+they serve is the "never leave a blank screen" one above, which has already cost
+real time once.
+
+The survey that prompted this found **two** problems, and the second was the more
+interesting: three surfaces showed nothing at all, and the other seven had each
+invented their own bare string (`loading…`, `reading…`, `Reading the transcript…`,
+`looking for previous sessions…`). `PanelLoader` already existed, already encoded
+the design rules, and had exactly **one** caller. It drifted because it was easy to
+miss and awkward to reuse for a list — so the fix was to make it reachable, not to
+write an eighth one.
+
+- **Three variants, one component.** `panel` (a sweep, for a full pane), `rows` (a
+  skeleton list, where the answer is a list) and `inline` (one `.micro` line, for a
+  widget with no room). A variant is easier to reach for than a new file, which is
+  the whole point.
+- **Say *what* and *from where*.** `phase` is the step, `detail` is the host or
+  folder. Over SSH the host is the reason it is slow, so naming it is the useful
+  half — "loading" alone is precisely what this component exists not to say.
+- **Skeleton rows sit where the real rows will**, at uneven widths. A column of
+  identical bars reads as a rendering fault rather than as content arriving, and
+  rows in the wrong place make the pane jump when the answer lands.
+- **A refresh is not a first load.** The skeleton shows on the first read only;
+  REFRESH leaves the existing list on screen. Replacing a good answer with a
+  skeleton makes the pane flicker under someone who just asked it to check — the
+  "nothing moves under the operator's hands" rule.
+- **A loading state must not add a poll.** These render while a request the widget
+  *already* makes is in flight. Anything else re-breaks the rule below.
+- **Button labels are not this.** `reading…` inside a REFRESH button is an in-flight
+  control, not a blank pane, and it stays as it is.
+- **The clock appears after 3s**, because a slow step with a visible clock reads as
+  *slow* while the same step with no clock reads as *hung*. The bar is indeterminate
+  on purpose — a percentage nobody measured is an invented measurement.
+
 ## A widget that is switched off must not run
 
 Instruments are choosable (rail header › INSTRUMENTS), and *off means off* — the widget is

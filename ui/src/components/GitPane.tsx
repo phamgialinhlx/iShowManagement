@@ -285,8 +285,8 @@ export function GitPane({ projectId }: { projectId: string }) {
                   {openSha === c.sha && (
                     <ul className="pb-1">
                       {commitFiles.length === 0 && (
-                        <li className="micro px-3 py-1 pl-6" style={{ color: "var(--text-faint)" }}>
-                          reading…
+                        <li className="px-3 py-1 pl-6">
+                          <PanelLoader variant="inline" phase="READING THE COMMIT" />
                         </li>
                       )}
                       {commitFiles.map((f) => {
