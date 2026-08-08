@@ -570,6 +570,30 @@ to say "this is a string".
 - The header counts **both** kinds of "needs you". Counting only `waiting` left a rail full of
   accent dots above a header claiming everything was fine.
 
+## There is one scale, and it is the type
+
+**Interface scale is gone.** `#root` carried `zoom: var(--ui-zoom)`, chosen over
+a font setting on the belief that the type was 157 hard-coded pixel values, so a
+font variable "would move almost nothing". The count was right and the
+conclusion was wrong: those 266 uses are **twelve distinct sizes**, which is
+what makes `--font-scale` work at all.
+
+And `zoom` was worst exactly where the app spends its time. xterm computes its
+cell grid once, from the font size it was constructed with, in unscaled CSS
+pixels — then maps a mouse position with `getBoundingClientRect()`, which
+returns *viewport* pixels, already multiplied by the zoom. At 110% the two
+disagree by that factor and the error accumulates downward, so a drag near the
+bottom of a pane selects several lines below the cursor. Reported twice, and the
+first fix only closed the `--font-scale` half of it.
+
+- **Never scale a terminal by scaling its container.** It measures what it
+  draws; change one without the other and every click lands somewhere else.
+- `--font-scale` is neutralised inside `.xterm` by resetting the *variable*, so
+  any `calc()` added later resolves at 1 without anyone remembering to exclude it.
+- The removal clears `--ui-zoom` explicitly rather than merely not setting it —
+  a machine with a stored scale would otherwise keep applying it forever with no
+  control left to undo it.
+
 ## Progress — counting the day without inventing it
 
 `ui/src/lib/activity.ts` is the only place rmux keeps a tally of its own, and everything on

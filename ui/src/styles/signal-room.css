@@ -132,29 +132,26 @@ html {
 }
 
 /*
- * Interface scale.
+ * There is no interface scale, and that is deliberate.
  *
- * On `#root` rather than `:root`, and **not** compensated — `100%` is already
- * right. This browser implements the standardised `zoom`, where percentages
- * resolve inside the zoomed coordinate space, so a `calc(100% / z)` divides by
- * the scale a second time: at 109% the app filled 91% of its window and left a
- * band of desktop down the right and bottom edges. Measured in real WebKit
- * (`ui/zoom-check.html`), which is the only engine whose answer counts here —
- * Chrome still uses the legacy behaviour and would have said the opposite:
+ * `#root` used to carry `zoom: var(--ui-zoom)`. It was chosen over a font
+ * setting on the belief that the type was 157 hard-coded pixel values, so a
+ * font variable "would move almost nothing". The count was right and the
+ * conclusion was wrong — those uses are twelve distinct sizes, which is why
+ * TEXT SIZE works.
  *
- *   viewport 1712x931 · width:100% -> 1695x931 · calc(100%/1.09) -> 1555
+ * And `zoom` was actively harmful where it mattered most. xterm computes its
+ * cell grid from the font size it was constructed with, in unscaled CSS
+ * pixels, then maps a mouse position with `getBoundingClientRect()` — which
+ * returns *viewport* pixels, already multiplied by the zoom. At 110% the two
+ * disagree by exactly that factor and the error accumulates downward, so a
+ * drag near the bottom of a pane selected several lines below the cursor.
+ * Reported, twice.
  *
- * It stays on `#root` rather than `:root` because zooming the document element
- * scales the root box while `height: 100%` resolves against the *unscaled*
- * viewport, which clipped the app at any scale but 100%.
- *
- * Overlays come out right for free: an element with `zoom` other than 1 is a
- * containing block for fixed-position descendants, so `.atmosphere` and the
- * modals resolve against `#root` — which is the window.
+ * Scaling the type alone leaves the terminals measuring what they draw. The
+ * cost is that padding and borders no longer grow with the text, which is a
+ * smaller price than a terminal you cannot select in.
  */
-#root {
-  zoom: var(--ui-zoom, 1);
-}
 
 body {
   background: transparent; /* the native window is translucent; see atmosphere */

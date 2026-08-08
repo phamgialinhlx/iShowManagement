@@ -183,21 +183,7 @@ function load(): Appearance {
   }
 }
 
-/**
- * Is this document the Settings window?
- *
- * Read from the URL for the same reason `main.tsx` does: it must be known
- * synchronously, before the first paint, or the sheet flashes at the wrong
- * scale.
- */
-const isSettingsWindow =
-  typeof window !== "undefined" &&
-  new URLSearchParams(window.location.search).get("window") === "settings";
 
-/** The scale as a zoom factor, clamped to what the slider offers. */
-function zoom(scale: number): number {
-  return Math.min(Math.max(scale, 60), 200) / 100;
-}
 
 /**
  * A filesystem path as the webview can load it.
@@ -285,7 +271,10 @@ export function applyAppearance(a: Appearance = load()) {
   // becomes hard to put back. The workbench is visible while Settings is open,
   // so the effect is watched there, on the thing being configured, rather than
   // on the instrument doing the configuring.
-  root.style.setProperty("--ui-zoom", isSettingsWindow ? "1" : String(zoom(a.scale)));
+  // **Explicitly cleared, not merely unset.** A machine that stored a scale
+  // before this was removed would otherwise keep applying it forever with no
+  // control left to undo it.
+  root.style.removeProperty("--ui-zoom");
 
   // Type scale *does* apply in the Settings window. Unlike `zoom` it does not
   // move the control out from under the cursor — the slider stays where it is
@@ -776,15 +765,6 @@ export function AppearancePanel() {
         (fontScale) => setDraft((a) => ({ ...a, fontScale })),
       )}
 
-      {row(
-        "INTERFACE SCALE",
-        "Everything together — padding, borders and the terminal grid as well as the text. Use TEXT SIZE above if you only want to read the labels; this changes the proportions.",
-        draft.scale,
-        60,
-        200,
-        "%",
-        (scale) => setDraft((a) => ({ ...a, scale })),
-      )}
 
       <button
         type="button"
