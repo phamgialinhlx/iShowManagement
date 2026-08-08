@@ -30,3 +30,35 @@ async fn status_against_a_real_repository() {
     let log = rmux_git::log(t, &root, 5).await.expect("log");
     println!("commits = {}", log.len());
 }
+
+/// Two reads at once, which is what the pane actually does.
+///
+/// The sequential test above passed every time while the app failed
+/// intermittently — and the difference was `Promise.all` in `GitPane`, not
+/// anything in this crate. A test that does not reproduce the caller's
+/// concurrency cannot see the caller's bug.
+#[tokio::test]
+#[ignore = "needs a real host"]
+async fn concurrent_reads_do_not_starve_each_other() {
+    let host = std::env::var("RMUX_LIVE_HOST").unwrap_or_else(|_| "contabo2".into());
+    let folder = std::env::var("RMUX_LIVE_REPO")
+        .unwrap_or_else(|_| "/home/anh.nguyen/redstone-agent".into());
+
+    let ssh = SshTarget::new(rmux_transport::SshHostId::new(host));
+    ssh.connect().await.expect("connect");
+    let t: &dyn Target = &ssh;
+    let root = rmux_git::repo_root(t, &folder).await.unwrap().expect("a repository");
+
+    // Five rounds: an intermittent fault that shows once in a session needs
+    // more than one attempt to be caught deliberately.
+    for round in 1..=5 {
+        let (s, l) = tokio::join!(
+            rmux_git::status(t, &root),
+            rmux_git::log(t, &root, 20),
+        );
+        match (&s, &l) {
+            (Ok(s), Ok(l)) => println!("round {round}: {} changes, {} commits", s.changes.len(), l.len()),
+            _ => panic!("round {round}: status={:?} log={:?}", s.err(), l.err()),
+        }
+    }
+}
