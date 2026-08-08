@@ -133,7 +133,7 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
         <div className="h-full" style={{ display: active === "claude" ? "block" : "none" }}>
           <ClaudePanel
             sessionId={session.id}
-            sessionName={session.hostName ?? `claude-${session.id}`}
+            agentSession={session.hostName ?? `claude-${session.id}`}
             target={target}
             cwd={folder}
             resume={session.resume}

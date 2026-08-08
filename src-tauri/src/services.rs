@@ -333,25 +333,55 @@ pub async fn agent_sessions(target: &dyn Target, program: &str) -> anyhow::Resul
 
     let mut sessions = Vec::new();
     for row in listing.lines().filter(|l| !l.trim().is_empty()) {
-        let mut f = row.split('\t');
-        let (Some(name), Some(pid), Some(age), Some(attached)) =
-            (f.next(), f.next(), f.next(), f.next())
-        else {
-            continue;
-        };
-        let pid = pid.trim().parse::<u32>().ok();
+        let (name, pid, age_seconds, attached, command) = parse_agent_row(row);
         let (memory, cpu) = pid.and_then(|p| usage.get(&p)).copied().unzip();
         sessions.push(AgentSession {
-            name: name.trim().to_string(),
+            name,
             pid,
-            age_seconds: age.trim().parse().unwrap_or(0),
-            attached: attached.trim() == "attached",
-            command: f.next().unwrap_or_default().trim().to_string(),
+            age_seconds,
+            attached,
+            command,
             memory,
             cpu,
         });
     }
     Ok(sessions)
+}
+
+/// One tab-separated row of `rmux-agent list`, either generation.
+///
+/// `agent list` grew an alias column. Older daemons print the 5-column form
+/// `name\tpid\tage\tattached\tcommand`; this build's prints
+/// `name\talias\tpid\tage\tattached\tcommand` (alias is `-` when none). The two
+/// are told apart by the field after the name: a pid, or an alias that is not
+/// one. Getting this wrong misreads every row — the age becomes the pid, the
+/// attachment flag becomes the age. Both shapes parse into the same fields.
+fn parse_agent_row(row: &str) -> (String, Option<u32>, u64, bool, String) {
+    let mut f = row.split('\t');
+    let name = f.next().unwrap_or_default().trim();
+    let second = f.next().unwrap_or_default().trim();
+    let (pid, age, attached) = match second.parse::<u32>() {
+        // Old form: the second field *is* the pid.
+        Ok(pid) => {
+            let age = f.next().unwrap_or_default().trim();
+            let attached = f.next().unwrap_or_default().trim() == "attached";
+            (Some(pid), age, attached)
+        }
+        // New form: the second field is the alias; the pid follows it.
+        Err(_) => {
+            let pid = f.next().unwrap_or_default().trim();
+            let age = f.next().unwrap_or_default().trim();
+            let attached = f.next().unwrap_or_default().trim() == "attached";
+            (pid.parse::<u32>().ok(), age, attached)
+        }
+    };
+    (
+        name.to_string(),
+        pid,
+        age.parse().unwrap_or(0),
+        attached,
+        f.next().unwrap_or_default().trim().to_string(),
+    )
 }
 
 #[tauri::command]
@@ -432,5 +462,55 @@ fc4a0701b555\t0.01%\t204.3MiB / 62.79GiB\n";
         assert_eq!(c.ports, "");
         assert_eq!(c.status, "Up 25 hours");
         assert_eq!(c.cpu, Some(0.0));
+    }
+}
+
+#[cfg(test)]
+mod agent_list_parsing {
+    use super::parse_agent_row;
+
+    #[test]
+    fn parses_the_new_six_column_format() {
+        // name, alias, pid, age, attached, command — alias is `-` when none.
+        let (name, pid, age, attached, command) =
+            parse_agent_row("term-abc-1\tmain\t1234\t42\tdetached\tsh");
+        assert_eq!(name, "term-abc-1");
+        assert_eq!(pid, Some(1234));
+        assert_eq!(age, 42);
+        assert!(!attached);
+        assert_eq!(command, "sh");
+    }
+
+    #[test]
+    fn parses_the_new_format_with_no_alias() {
+        let (name, pid, age, attached, command) =
+            parse_agent_row("claude-xyz-9\t-\t5678\t9001\tattached\tclaude --resume cafebabe");
+        assert_eq!(name, "claude-xyz-9");
+        assert_eq!(pid, Some(5678));
+        assert_eq!(age, 9001);
+        assert!(attached);
+        assert_eq!(command, "claude --resume cafebabe");
+    }
+
+    #[test]
+    fn parses_the_old_five_column_format() {
+        // Older daemons have no alias column: name, pid, age, attached, command.
+        let (name, pid, age, attached, command) =
+            parse_agent_row("term-abc-1\t1234\t42\tdetached\tsh");
+        assert_eq!(name, "term-abc-1");
+        assert_eq!(pid, Some(1234));
+        assert_eq!(age, 42);
+        assert!(!attached);
+        assert_eq!(command, "sh");
+    }
+
+    #[test]
+    fn a_dead_session_has_no_pid() {
+        // A reaped session prints a `-` for the pid too: the second field is the
+        // alias, the third is the pid, and both are `-` when unset.
+        let (name, pid, age, _, _) = parse_agent_row("claude-xyz-9\t-\t-\t9001\tattached\t");
+        assert_eq!(name, "claude-xyz-9");
+        assert_eq!(pid, None);
+        assert_eq!(age, 9001);
     }
 }

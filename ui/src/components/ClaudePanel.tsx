@@ -116,7 +116,7 @@ type ClaudeState = { prompt: Prompt | null; working: boolean };
 
 export function ClaudePanel({
   sessionId,
-  sessionName,
+  agentSession,
   target,
   cwd,
   resume,
@@ -132,7 +132,7 @@ export function ClaudePanel({
    * (`claude-<stripped-base>`), so the daemon reattaches to the running Claude
    * rather than spawning a duplicate under the freshly-minted local id.
    */
-  sessionName?: string;
+  agentSession?: string;
   target: TargetRef;
   cwd?: string;
   /** Controls rendered at the right of the status line (e.g. open-transcript). */
@@ -396,7 +396,7 @@ export function ClaudePanel({
             target,
             cwd,
             resume,
-            sessionName: sessionName ?? `claude-${sessionId}`,
+            sessionName: agentSession ?? `claude-${sessionId}`,
             fullscreen,
             skipPermissions,
             modelProfile,
