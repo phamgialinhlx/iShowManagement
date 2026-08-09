@@ -86,5 +86,19 @@ else
   echo "==> no Developer ID found; the host agent is unsigned (notarisation will reject it)"
 fi
 
+# Stamp what these were built from.
+#
+# `src-tauri/build.rs` refuses to build the app when this disagrees with the
+# workspace version, because the alternative is shipping an app whose agents are
+# from another version — which is not a degraded build, it is one that cannot
+# open a terminal on any host, and it says so only as
+# "the uploaded agent reported X, expected Y".
+#
+# The stamp is written **last**, so a build that failed part way through does not
+# leave a claim that the agents are current.
+VERSION=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
+printf '%s\n' "$VERSION" > "$OUT/VERSION"
+echo "==> stamped $OUT/VERSION as $VERSION"
+
 echo
 ls -la "$OUT"
