@@ -943,6 +943,43 @@ the position exposed the misdetection underneath.
 - **Synthetic fixtures must draw a caret.** Three tests wrote `  1. Yes` with no marker, which
   is not a screen Claude ever produces; they encoded the bug into the suite.
 
+## Answering a card: two dialogs, and never the wrong option
+
+Claude draws at least two kinds of dialog and **they commit differently**. The
+permission prompt commits on the digit. The question card does not — it prints
+`Enter to select · ↑↓ to navigate · n to add notes` along its bottom, and a digit
+there is navigation at most. `keys::choose` sent the digit alone, so that card was
+**completely inert**: reported as "I can't click the first answer and it keeps
+showing the question again", with nothing on screen to suggest a keystroke had
+been delivered and ignored.
+
+- **Enter is sent only once the caret is *observed* on the option that was asked
+  for.** Appending it unconditionally is the obvious fix and it is unsafe: if a
+  digit is a no-op in some dialog, Enter commits whatever happens to be
+  highlighted, so a click on option 3 answers option 1. Failing to answer is
+  recoverable and visible; answering the wrong thing is neither. So `answer`
+  writes the digit, reads the screen back, and confirms only on a match —
+  otherwise it reports that the option could not be selected. Pinned in both
+  directions, including a fake whose caret never moves.
+- **Rule 1 in `keys` still holds.** The *selection* is made by the digit, never by
+  counting arrow presses against a highlight that moves on its own. What changed
+  is that confirming is a separate, evidence-gated step.
+- **An option label stops where a neighbouring panel starts.** Claude runs inline,
+  so a redraw paints only the columns it writes and whatever an earlier message
+  left further right stays on the row. Options and a leftover diagram then share
+  rows, and reading to the end of the line swallows the neighbour —
+  `Cap the answer shape │ turn starts`, measured on a real session.
+  **The damage is not cosmetic**: the fingerprint is the question plus every
+  label, so a neighbour that changes as Claude streams changes the labels, changes
+  the fingerprint, and makes every answer refused as "no longer on screen". That
+  is the second half of the same bug report, and it looks nothing like its cause.
+  `cut_at_neighbour` cuts at U+2500–U+257F, which an option label never contains.
+  The **ASCII pipe is deliberately excluded** — `Use A | B` is an ordinary label,
+  and truncating it would invent a new bug while fixing this one.
+- **This lives in the app, not the agent**, so a plain rebuild ships it — no
+  `build-agents.sh`, no redeploy. Worth knowing before chasing a fix that "did
+  not take".
+
 ## rmux is a backend, and the browser is not part of it
 
 There is **no in-app browser**, and that is settled rather than pending. rmux's window is

@@ -174,12 +174,39 @@ fn parse_choice(line: &str) -> Option<(String, String, bool)> {
     // The separator must be "." or ")" — otherwise "2024 was a year" parses as
     // an option.
     let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
-    let label = rest.trim();
+    let label = cut_at_neighbour(rest.trim());
     if label.is_empty() {
         return None;
     }
 
     Some((digits.to_owned(), label.to_owned(), selected))
+}
+
+/// Cut a label where a *different* panel starts on the same row.
+///
+/// Claude runs inline (see `Rendering`), so a redraw paints only the columns it
+/// writes — anything an earlier message left further right stays on the row.
+/// Options and a leftover diagram then share rows, and reading a label to the
+/// end of the line swallows the neighbour: `Cap the answer shape │ turn starts`.
+///
+/// **The damage is not cosmetic.** The prompt's fingerprint is the question plus
+/// every label, so a neighbour that changes as Claude streams changes the labels,
+/// changes the fingerprint, and makes `Session::answer` refuse every click as
+/// "no longer on screen". The operator experiences that as a card that cannot be
+/// clicked and a question that keeps coming back — which is exactly how it was
+/// reported, with nothing on screen connecting it to a stray diagram.
+///
+/// Box drawing is the signal because an option label never contains any: it is
+/// chrome by construction, drawn by a TUI rather than typed by whoever wrote the
+/// choice. The ASCII pipe is deliberately **not** included — `Use A | B` is a
+/// perfectly ordinary label, and truncating it would invent a different bug in
+/// the name of fixing this one. The frame's own edges are already gone by here,
+/// trimmed from both ends, so what is left is a genuine interior neighbour.
+fn cut_at_neighbour(label: &str) -> &str {
+    match label.find(|c: char| ('\u{2500}'..='\u{257f}').contains(&c)) {
+        Some(at) => label[..at].trim_end(),
+        None => label,
+    }
 }
 
 /// Is this option line drawn inside Claude's box frame?
@@ -356,6 +383,69 @@ mod tests {
 │   3. No, and tell Claude what to do differently  │
 ╰──────────────────────────────────────────────────╯
 "#;
+
+    /// Options with **another panel drawn beside them**, reproduced from a real
+    /// session where the card became unusable.
+    ///
+    /// Claude runs inline, so a redraw only paints the columns it writes and
+    /// whatever an earlier message left further right stays on the row. The
+    /// options and that leftover diagram then share rows, and reading a label to
+    /// the end of the line swallows it.
+    ///
+    /// The operator's report was not "the labels look wrong" — it was **"I can't
+    /// click the first answer and it keeps showing the question again"**, which
+    /// is the second-order effect: the panel's text changes as Claude streams,
+    /// so the labels change, so the fingerprint changes, so every answer is
+    /// refused as stale.
+    const SIDE_BY_SIDE: &str = r#"
+Which should I build next?
+
+ ❯ 1. Quick-ack agent                    ┌──────────────────────────┐
+   2. Cap the answer shape               │ turn starts              │
+   3. Fold read-channel into             │   ├─ ack agent (4k ctx,  │
+   4. Move per-user blocks last          │  nhắn của anh…"          │
+"#;
+
+    /// The same screen one repaint later: only the *neighbour* changed.
+    const SIDE_BY_SIDE_LATER: &str = r#"
+Which should I build next?
+
+ ❯ 1. Quick-ack agent                    ┌──────────────────────────┐
+   2. Cap the answer shape               │ turn ends                │
+   3. Fold read-channel into             │   └─ main agent          │
+   4. Move per-user blocks last          │  real answer at ~64s     │
+"#;
+
+    #[test]
+    fn a_neighbouring_panel_is_not_part_of_the_label() {
+        let prompt = parse_state(&lines(SIDE_BY_SIDE)).prompt.expect("a real dialog");
+
+        assert_eq!(
+            prompt.choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
+            [
+                "Quick-ack agent",
+                "Cap the answer shape",
+                "Fold read-channel into",
+                "Move per-user blocks last",
+            ],
+            "labels must stop where the adjacent panel starts",
+        );
+    }
+
+    #[test]
+    fn a_neighbours_repaint_does_not_invalidate_the_answer() {
+        // The bug that made the card unusable. These are the same question with
+        // the same options; only the unrelated panel beside them moved. If the
+        // fingerprints differ, `answer` refuses every click as stale and the
+        // operator sees the question come back untouched.
+        let first = parse_state(&lines(SIDE_BY_SIDE)).prompt.expect("a dialog");
+        let second = parse_state(&lines(SIDE_BY_SIDE_LATER)).prompt.expect("a dialog");
+
+        assert_eq!(
+            first.fingerprint, second.fingerprint,
+            "a neighbour repainting is not a new question",
+        );
+    }
 
     /// The real trust prompt, captured from Claude Code 2.1.220 on a live host.
     const REAL_TRUST_PROMPT: &str = r#"
