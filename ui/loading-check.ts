@@ -75,7 +75,7 @@ function paintedHeight(host: HTMLElement): number {
 
 // 1. Every variant paints something. This is the whole bug, stated directly.
 for (const variant of ["panel", "rows", "inline"] as const) {
-  const host = mount(variant, "READING THE TRANSCRIPT", "contabo2");
+  const host = mount(variant, "READING THE TRANSCRIPT", "example-host");
   const h = paintedHeight(host);
   check(`${variant} paints`, h > 0, `tallest painted child ${h.toFixed(1)}px`);
 

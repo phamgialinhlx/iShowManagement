@@ -9,7 +9,7 @@ use rmux_transport::Target;
 #[tokio::test]
 #[ignore = "needs a real host"]
 async fn status_against_a_real_repository() {
-    let host = std::env::var("RMUX_LIVE_HOST").unwrap_or_else(|_| "contabo2".into());
+    let host = std::env::var("RMUX_LIVE_HOST").unwrap_or_else(|_| "example-host".into());
     let folder = std::env::var("RMUX_LIVE_REPO")
         .unwrap_or_else(|_| "/home/anh.nguyen/redstone-agent".into());
 
@@ -40,7 +40,7 @@ async fn status_against_a_real_repository() {
 #[tokio::test]
 #[ignore = "needs a real host"]
 async fn concurrent_reads_do_not_starve_each_other() {
-    let host = std::env::var("RMUX_LIVE_HOST").unwrap_or_else(|_| "contabo2".into());
+    let host = std::env::var("RMUX_LIVE_HOST").unwrap_or_else(|_| "example-host".into());
     let folder = std::env::var("RMUX_LIVE_REPO")
         .unwrap_or_else(|_| "/home/anh.nguyen/redstone-agent".into());
 
