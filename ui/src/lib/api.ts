@@ -679,6 +679,12 @@ export const api = {
   /** Writes one shareable file to the desktop and returns its full path. */
   logExport: () => call<string>("log_export"),
 
+  /** Turn benchmark (`BENCH …`) logging on or off, app-wide. */
+  setDebugLogging: (on: boolean) => call<void>("set_debug_logging", { on }),
+
+  /** Append one benchmark line to the log (no-op unless debug logging is on). */
+  logEvent: (msg: string) => call<void>("log_event", { msg }),
+
   metricsSample: (target: TargetRef) => call<MetricsSample>("metrics_sample", { target }),
 
   /** Is this folder a checkout, and where is its root? */

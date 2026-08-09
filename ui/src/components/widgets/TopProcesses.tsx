@@ -254,11 +254,34 @@ export function TopProcesses({
         .catch(() => alive && setError(true));
     };
 
-    load();
-    const timer = setInterval(load, POLL_MS);
+    // Poll only while the window is on screen — `ps` over every process is an
+    // SSH round trip, and the donut is not drawn when the window is hidden.
+    // Standing the timer down (not just skipping the body) is what drops the
+    // wakeups. Mirrors ClaudePanel's status poll.
+    let timer: number | undefined;
+    const start = () => {
+      if (timer === undefined && alive) {
+        load();
+        timer = window.setInterval(load, POLL_MS);
+      }
+    };
+    const stop = () => {
+      if (timer !== undefined) {
+        window.clearInterval(timer);
+        timer = undefined;
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    if (document.visibilityState === "visible") start();
+
     return () => {
       alive = false;
-      clearInterval(timer);
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [target, by]);
 

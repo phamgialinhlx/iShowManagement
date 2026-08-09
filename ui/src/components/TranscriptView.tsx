@@ -4,6 +4,8 @@ import remarkGfm from "remark-gfm";
 
 import { api, isTauri, type TargetRef, type Transcript, type TranscriptEntry } from "../lib/api";
 import { MARKDOWN_COMPONENTS } from "../lib/markdown-code";
+import { useWorkspace } from "../lib/workspace";
+import { bench } from "../lib/debug-log";
 
 /**
  * The conversation, as a document.
@@ -137,10 +139,12 @@ function sameTranscript(a: Transcript | null, b: Transcript): boolean {
 }
 
 export function TranscriptView({
+  sessionId,
   target,
   folder,
   resume,
 }: {
+  sessionId: string;
   target: TargetRef;
   folder: string;
   resume?: string;
@@ -160,6 +164,15 @@ export function TranscriptView({
   // Only stick to the bottom when the reader is already there — yanking the view
   // down while someone is reading history is the worst thing a live log can do.
   const pinnedRef = useRef(true);
+
+  // The transcript only grows when Claude produces output, so this is driven by
+  // the session's status edges (finished a turn, or paused for input) rather than
+  // a blind timer — an idle transcript re-reads nothing. Same signal the rail
+  // uses; see status-watch / ClaudePanel.
+  const status = useWorkspace((s) => s.runtime[sessionId]?.status ?? "idle");
+  // A refresh deferred because the reader had text selected; flushed when the
+  // selection clears.
+  const pendingRef = useRef(false);
 
   const load = useCallback(async () => {
     if (!isTauri()) {
@@ -182,26 +195,58 @@ export function TranscriptView({
     }
   }, [target, folder, resume, tail]);
 
-  useEffect(() => {
-    void load();
-    // Re-read while Claude is working. Cheap: it is a bounded `tail` on the far
-    // side, not a re-read of the file.
-    //
-    // **Skipped while the reader has text selected.** This was the whole reason
-    // selection "did not work" here: a five-second poll that re-rendered the
-    // list wiped the selection, and a drag that crossed a tick was cancelled
-    // outright — so the view behaved as though it were read-only. Nothing the
-    // operator did not ask for may move under their hands; a transcript that is
-    // a few seconds stale while they copy from it is the correct trade, and it
-    // catches up the moment they click away.
-    const timer = setInterval(() => {
-      const selecting = hasSelectionWithin(scrollRef.current);
-      setHeld(selecting);
-      if (selecting) return;
+  // A refresh that respects the reader's hands.
+  //
+  // **Deferred while the reader has text selected.** This was the whole reason
+  // selection "did not work" here: a re-render wiped the selection, and a drag
+  // that crossed a refresh was cancelled outright — so the view behaved as
+  // though it were read-only. Nothing the operator did not ask for may move
+  // under their hands; a transcript that is a few seconds stale while they copy
+  // from it is the correct trade, and it catches up the moment they let go
+  // (see the `selectionchange` effect below).
+  const refresh = useCallback(
+    (trigger: string) => {
+      if (hasSelectionWithin(scrollRef.current)) {
+        pendingRef.current = true;
+        setHeld(true);
+        return;
+      }
+      pendingRef.current = false;
+      setHeld(false);
+      bench(`fetch kind=transcript session=${sessionId} trigger=${trigger}`);
       void load();
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [load]);
+    },
+    [load, sessionId],
+  );
+
+  // Baseline on mount, and again whenever `load` changes identity — a reconnect
+  // (new `resume`) or a "load more" (bumped `tail`).
+  useEffect(() => {
+    refresh("open");
+  }, [refresh]);
+
+  // Claude finished a turn (`working → idle`) or paused for input
+  // (`→ waiting`): the transcript just grew, so re-read. No fetch while working
+  // — the count/text snaps to final when the turn ends.
+  useEffect(() => {
+    if (status === "idle" || status === "waiting") refresh(status);
+  }, [status, refresh]);
+
+  // Flush a deferred refresh once the reader lets go of their selection. Cheap:
+  // this fires only during user-driven selection changes and no-ops unless a
+  // refresh is actually waiting — no timer, no background wakeups.
+  useEffect(() => {
+    const onSelectionChange = () => {
+      if (pendingRef.current && !hasSelectionWithin(scrollRef.current)) {
+        pendingRef.current = false;
+        setHeld(false);
+        bench(`fetch kind=transcript session=${sessionId} trigger=flush`);
+        void load();
+      }
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => document.removeEventListener("selectionchange", onSelectionChange);
+  }, [load, sessionId]);
 
   const entries = useMemo(
     () => (transcript?.entries ?? []).filter((e) => showSystem || e.speaker !== "system"),

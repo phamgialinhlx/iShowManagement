@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api, isTauri, type LogStatus } from "../lib/api";
+import { debugLogging, setDebugLoggingEnabled } from "../lib/debug-log";
 
 /**
  * Getting the log out of the app.
@@ -27,6 +28,7 @@ export function DiagnosticsPanel() {
   const [exported, setExported] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debug, setDebug] = useState(debugLogging);
 
   const refresh = () => {
     if (!isTauri()) return;
@@ -128,6 +130,30 @@ export function DiagnosticsPanel() {
             {error}
           </p>
         )}
+      </div>
+
+      <div className="inset flex flex-col gap-3 p-4">
+        <label className="flex items-center gap-3" style={{ cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={debug}
+            onChange={(e) => {
+              setDebug(e.target.checked);
+              setDebugLoggingEnabled(e.target.checked);
+            }}
+            style={{ accentColor: "rgb(var(--primary))", width: 15, height: 15 }}
+          />
+          <span className="data text-[11px]" style={{ color: "var(--text)" }}>
+            Benchmark logging
+          </span>
+        </label>
+        <p className="data text-[10.5px] leading-[1.5]" style={{ color: "var(--text-faint)" }}>
+          Records detailed poller and SSH-timing lines (each prefixed{" "}
+          <span className="micro">BENCH</span>) into the log, so the effect of the
+          polling work can be measured from an export. Off by default, applies
+          immediately, and costs nothing while off. Turn it on, reproduce the behaviour,
+          then Export log above.
+        </p>
       </div>
 
       {/* Said before the file is sent, not after. */}

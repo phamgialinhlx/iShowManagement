@@ -223,7 +223,12 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
 
         {active === "transcript" && (
           <BackView label="TRANSCRIPT" onBack={() => setView("claude")}>
-            <TranscriptView target={target} folder={folder} resume={session.resume} />
+            <TranscriptView
+              sessionId={session.id}
+              target={target}
+              folder={folder}
+              resume={session.resume}
+            />
           </BackView>
         )}
 

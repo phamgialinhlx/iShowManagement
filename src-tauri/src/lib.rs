@@ -254,6 +254,8 @@ pub fn run() {
             glass::set_glass,
             logs::log_status,
             logs::log_export,
+            logs::set_debug_logging,
+            logs::log_event,
             theme::theme_state,
             theme::theme_save,
             theme::theme_set_active,

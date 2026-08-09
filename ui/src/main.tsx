@@ -8,6 +8,7 @@ import { Settings } from "./screens/Settings";
 import { applyAppearance } from "./components/AppearancePanel";
 import { applyUserCss } from "./lib/user-css";
 import { applyCachedThemeEarly, initTheme } from "./lib/theme-runtime";
+import { bench, syncDebugLogging } from "./lib/debug-log";
 
 // Before the first paint: applying these in an effect would flash the defaults
 // on every launch. The theme applies its localStorage paint-cache synchronously
@@ -61,9 +62,17 @@ const isSettingsWindow =
  */
 const syncVisibility = () => {
   document.body.dataset.hidden = String(document.hidden);
+  // Timestamp the transition in the benchmark log (workbench only): the gap in
+  // metrics-poll lines between a `hidden` and the next `visible` is what proves
+  // the visibility gate. A no-op unless debug logging is on.
+  if (!isSettingsWindow) bench(`visibility state=${document.hidden ? "hidden" : "visible"}`);
 };
 document.addEventListener("visibilitychange", syncVisibility);
 syncVisibility();
+
+// Push the stored benchmark-logging preference to Rust once, so the Rust-side
+// metrics instrumentation respects it even before the Settings window is opened.
+if (!isSettingsWindow) syncDebugLogging();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

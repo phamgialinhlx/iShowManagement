@@ -49,19 +49,71 @@ impl MetricsStore {
     }
 }
 
+/// A short host label for benchmark lines (never a connection target).
+fn target_label(id: &TargetId) -> String {
+    match id {
+        TargetId::Local => "local".to_owned(),
+        TargetId::Ssh(host) => host.alias.clone(),
+    }
+}
+
+/// Keep a polled target's persistent transport warm, off the store mutex.
+///
+/// The collector `sample`/`processes` calls already run under `monitored`'s
+/// lock, so re-asserting the master there too would serialise a rare full
+/// master revive — up to the SSH connect timeout — in front of *every* other
+/// host's poll. Clone the `Arc` out, release the lock, then keep it warm.
+/// Best-effort: a sample still succeeds without it, just via a fresh handshake.
+async fn warm_master(store: &MetricsStore, id: &TargetId) {
+    let target = {
+        let monitored = store.monitored.lock().await;
+        monitored.get(id).map(|m| m.target.clone())
+    };
+    let Some(target) = target else { return };
+    let t0 = std::time::Instant::now();
+    let outcome = target.ensure_ready().await;
+    if let Err(e) = &outcome {
+        tracing::debug!(error = %e, "could not warm the metrics control master");
+    }
+    // A warm ride is tens of ms (a local `ssh -O check`); a revive is hundreds+
+    // (a fresh handshake). The duration is the tell, so no warm/cold flag needs
+    // threading through the trait.
+    if crate::logs::debug_enabled() {
+        crate::logs::bench(&format!(
+            "warm host={} dur_ms={} ok={}",
+            target_label(id),
+            t0.elapsed().as_millis(),
+            outcome.is_ok()
+        ));
+    }
+}
+
 #[tauri::command]
 pub async fn metrics_sample(
     store: State<'_, MetricsStore>,
     target: TargetRef,
 ) -> Result<Sample, String> {
     let id = store.ensure(&target).await?;
-    let mut monitored = store.inner().monitored.lock().await;
+    warm_master(store.inner(), &id).await;
 
-    let entry = monitored.get_mut(&id).expect("just inserted");
-    // Borrow both fields at once: `sample` needs &mut the collector and & the
-    // target, which a single `get_mut` on a tuple would not allow cleanly.
-    let Monitored { target, collector } = entry;
-    collector.sample(target.as_ref()).await.map_err(|e| e.to_string())
+    let t0 = std::time::Instant::now();
+    let result = {
+        let mut monitored = store.inner().monitored.lock().await;
+        let entry = monitored.get_mut(&id).expect("just inserted");
+        // Borrow both fields at once: `sample` needs &mut the collector and & the
+        // target, which a single `get_mut` on a tuple would not allow cleanly.
+        let Monitored { target, collector } = entry;
+        collector.sample(target.as_ref()).await.map_err(|e| e.to_string())
+    };
+    if crate::logs::debug_enabled() {
+        crate::logs::bench(&format!(
+            "metrics kind=sample host={} dur_ms={} ok={}",
+            target_label(&id),
+            t0.elapsed().as_millis(),
+            result.is_ok()
+        ));
+    }
+    result
 }
 
 /// The heaviest processes on a host.
@@ -78,12 +130,25 @@ pub async fn metrics_processes(
     limit: Option<usize>,
 ) -> Result<Vec<Process>, String> {
     let id = store.ensure(&target).await?;
-    let mut monitored = store.inner().monitored.lock().await;
+    warm_master(store.inner(), &id).await;
 
-    let entry = monitored.get_mut(&id).expect("just inserted");
-    let Monitored { target, collector } = entry;
-    // Five is what the donut can label without the callouts colliding.
-    collector.processes(target.as_ref(), by, limit.unwrap_or(5)).await.map_err(|e| e.to_string())
+    let t0 = std::time::Instant::now();
+    let result = {
+        let mut monitored = store.inner().monitored.lock().await;
+        let entry = monitored.get_mut(&id).expect("just inserted");
+        let Monitored { target, collector } = entry;
+        // Five is what the donut can label without the callouts colliding.
+        collector.processes(target.as_ref(), by, limit.unwrap_or(5)).await.map_err(|e| e.to_string())
+    };
+    if crate::logs::debug_enabled() {
+        crate::logs::bench(&format!(
+            "metrics kind=processes host={} dur_ms={} ok={}",
+            target_label(&id),
+            t0.elapsed().as_millis(),
+            result.is_ok()
+        ));
+    }
+    result
 }
 
 /// Signal a process on the target.
