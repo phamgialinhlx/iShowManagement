@@ -137,6 +137,25 @@ ui/                     React 19 + Tailwind 4 + motion
   handoff test had to move off `temp_dir()` to a short `/tmp` home: macOS's deep
   `/var/folders/…` plus a fingerprint crosses `sun_path`, `bind` fails with an error that never
   mentions length, and the shell simply never starts.
+- **Bumping the version *is* an agent change, and `build.rs` now refuses to build
+  without one.** The agent's version is checked on the host after upload, so a
+  release built without rerunning `scripts/build-agents.sh` cannot open a terminal
+  **anywhere** — the only symptom being `the uploaded agent reported "0.2.13",
+  expected 0.2.14`, which names the two versions and not the cause. That shipped:
+  signed, notarised and installed before anyone saw it, on a build whose every
+  other check was green.
+  The rule below already said this in prose, and prose was not enough — the person
+  who forgets to rebuild the agents is exactly the person not re-reading the
+  paragraph about rebuilding the agents. `scripts/build-agents.sh` now stamps
+  `src-tauri/agents/VERSION` **last** (so a half-finished build never claims to be
+  current), and `src-tauri/build.rs` panics when it disagrees with
+  `CARGO_PKG_VERSION`, in under a second, before the release compile and the two
+  notarisation round trips. Missing agents stay a *warning* — `agents/` is
+  git-ignored, a fresh clone legitimately has none, and rmux already falls back to
+  a direct login shell with a reason. **Absent means no persistence; stale means
+  silently wrong**, and only the second may stop a build.
+  A guard that lives in `build.rs` covers every path — `cargo build`, `tauri
+  build`, CI — which a step in one script would not.
 - **A fix that lives in the agent is not deployed until a *new daemon* runs it.** Three
   things all have to happen: `scripts/build-agents.sh` rebuilds the musl binaries,
   `pnpm tauri build` embeds them as resources, and the host must start a daemon from the new
