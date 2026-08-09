@@ -325,7 +325,7 @@ pub async fn claude_answer(
     fingerprint: String,
     key: String,
 ) -> Result<(), String> {
-    session(store.inner(), &id)?.answer(&fingerprint, &key).map_err(err)
+    session(store.inner(), &id)?.answer(&fingerprint, &key).await.map_err(err)
 }
 
 #[tauri::command]
