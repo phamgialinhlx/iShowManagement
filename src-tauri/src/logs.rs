@@ -23,6 +23,7 @@
 //! assembled here rather than asked for, because the person reporting a bug is
 //! the least able to answer those questions.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
@@ -108,6 +109,50 @@ pub struct LogStatus {
     pub bytes: u64,
     /// Whether a previous run's log is kept beside it.
     pub has_previous: bool,
+}
+
+/// Whether benchmark (`BENCH …`) lines are emitted.
+///
+/// Off by default. The file log already runs at `rmux=debug`, so a gated
+/// `tracing::info!` under this crate's target lands in the exportable log the
+/// moment it is switched on — no filter reload, no restart. The switch lives in
+/// Settings › Diagnostics and is synced here from the webview.
+static DEBUG: AtomicBool = AtomicBool::new(false);
+
+pub fn set_debug(on: bool) {
+    DEBUG.store(on, Ordering::Relaxed);
+}
+
+pub fn debug_enabled() -> bool {
+    DEBUG.load(Ordering::Relaxed)
+}
+
+/// Emit one benchmark line, but only while debug logging is on.
+///
+/// The `BENCH ` prefix is the grep handle; the target stays `rmux::logs`, which
+/// the default `rmux=debug` filter already passes, so the line reaches the file
+/// and the export with no other machinery.
+pub fn bench(msg: &str) {
+    if debug_enabled() {
+        tracing::info!("BENCH {msg}");
+    }
+}
+
+/// Turn benchmark logging on or off. Driven by the Diagnostics switch; also
+/// synced from the stored preference at startup.
+#[tauri::command]
+pub fn set_debug_logging(on: bool) {
+    set_debug(on);
+    tracing::info!("debug logging {}", if on { "enabled" } else { "disabled" });
+}
+
+/// Append a benchmark line from the webview.
+///
+/// A no-op unless debug logging is on — the webview also gates before calling,
+/// so this is a defence in depth rather than the primary switch.
+#[tauri::command]
+pub fn log_event(msg: String) {
+    bench(&msg);
 }
 
 #[tauri::command]

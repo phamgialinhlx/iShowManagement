@@ -187,6 +187,39 @@ impl ControlMaster {
         anyhow::bail!("timed out waiting for ssh master to {}", self.host.alias)
     }
 
+    /// Guarantee a live master, reviving one that has died.
+    ///
+    /// Unlike [`ensure_started`], this does **not** trust the cached `Running`
+    /// state. A master killed by a dropped link or a `ServerAlive` timeout
+    /// leaves the state reading `Running` while the socket is dead — and
+    /// `ensure_started` would then short-circuit on that state and never
+    /// restart it. Verifying with [`check_alive`] first, and clearing a stale
+    /// `Running` when the socket is gone, is what lets a *polled* caller (the
+    /// metrics widget) keep the master warm instead of paying a full handshake
+    /// on every tick.
+    ///
+    /// [`ensure_started`]: ControlMaster::ensure_started
+    /// [`check_alive`]: ControlMaster::check_alive
+    pub async fn ensure_alive(&self) -> anyhow::Result<MasterState> {
+        if !Self::is_supported() {
+            return Ok(MasterState::Unsupported);
+        }
+        if self.check_alive().await {
+            *self.state.lock() = MasterState::Running;
+            return Ok(MasterState::Running);
+        }
+        // The socket is gone (or never came up). Drop a stale `Running` so
+        // `ensure_started` restarts rather than short-circuiting — but leave a
+        // genuine `Starting` alone, so a concurrent start is not disturbed.
+        {
+            let mut state = self.state.lock();
+            if *state == MasterState::Running {
+                *state = MasterState::Stopped;
+            }
+        }
+        self.ensure_started().await
+    }
+
     /// Ask OpenSSH whether the master is live (`ssh -O check`).
     pub async fn check_alive(&self) -> bool {
         if !Self::is_supported() || !self.socket.exists() {
@@ -377,7 +410,37 @@ mod tests {
         if !ControlMaster::is_supported() {
             assert_eq!(master.state(), MasterState::Unsupported);
             assert_eq!(master.ensure_started().await.unwrap(), MasterState::Unsupported);
+            // The warm-keep path degrades the same way, so the metrics poller
+            // does not error every tick on a host with no multiplexing.
+            assert_eq!(master.ensure_alive().await.unwrap(), MasterState::Unsupported);
         }
+    }
+
+    #[tokio::test]
+    async fn ensure_alive_does_not_trust_a_stale_running_state() {
+        // The bug this guards: a master dies (dropped link, ServerAlive timeout)
+        // but the cached state still reads `Running`. `ensure_started` alone
+        // short-circuits on that and never restarts — so a metrics poll then
+        // pays a full handshake forever. `ensure_alive` must verify the socket
+        // is actually live and clear the stale state before it tries again.
+        if !ControlMaster::is_supported() {
+            return;
+        }
+        // An unresolvable host, so the restart attempt fails fast rather than
+        // dialling anything real; bounded by a timeout so a pathological ssh
+        // config cannot hang the suite either way.
+        let master = ControlMaster::new(SshHostId::new("rmux.invalid.example.test"));
+        assert!(!master.check_alive().await, "no socket, so nothing is alive");
+        *master.state.lock() = MasterState::Running; // pretend a dead master left this behind
+
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(20), master.ensure_alive()).await;
+
+        assert_ne!(
+            master.state(),
+            MasterState::Running,
+            "a dead socket must not leave the cached state reading Running",
+        );
     }
 }
 

@@ -47,11 +47,34 @@ export function Metrics({ target }: { target: TargetRef }) {
       }
     };
 
-    void tick();
-    const id = setInterval(tick, 2000);
+    // Poll only while the window is on screen. Each tick is an SSH round trip,
+    // and this view is not visible when the window is hidden — so stand the
+    // timer down entirely (not merely skip the body) to drop the wakeups.
+    // Mirrors ClaudePanel's status poll.
+    let id: number | undefined;
+    const start = () => {
+      if (id === undefined && !cancelled) {
+        void tick();
+        id = window.setInterval(() => void tick(), 2000);
+      }
+    };
+    const stop = () => {
+      if (id !== undefined) {
+        window.clearInterval(id);
+        id = undefined;
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    if (document.visibilityState === "visible") start();
+
     return () => {
       cancelled = true;
-      clearInterval(id);
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [target]);
 

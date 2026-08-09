@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion, Reorder, useDragControls } from "motion/react";
 
 import { HostStatus } from "./widgets/HostStatus";
@@ -25,6 +25,7 @@ import { basename } from "../lib/workspace-model";
 import { useRailWidth } from "../lib/rail-width";
 import { RailGrip } from "./RailGrip";
 import { useWorkspace } from "../lib/workspace";
+import { bench } from "../lib/debug-log";
 
 /**
  * What the instruments need from the active session, flattened.
@@ -208,11 +209,36 @@ function useHostSample(target: TargetRef, enabled: boolean) {
       }
     };
 
-    void tick();
-    const timer = setInterval(tick, 2000);
+    // Poll only while the window is on screen. Each tick is an SSH round trip,
+    // and nothing renders this reading when the window is hidden — so stand the
+    // timer down entirely (not merely skip the body) to actually drop the
+    // wakeups. Mirrors ClaudePanel's status poll.
+    let timer: number | undefined;
+    const start = () => {
+      if (timer === undefined && !cancelled) {
+        bench(`gate host=${target.host ?? "local"} action=start`);
+        void tick();
+        timer = window.setInterval(() => void tick(), 2000);
+      }
+    };
+    const stop = () => {
+      if (timer !== undefined) {
+        bench(`gate host=${target.host ?? "local"} action=stop`);
+        window.clearInterval(timer);
+        timer = undefined;
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    if (document.visibilityState === "visible") start();
+
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
     // `enabled` belongs here, not just in the early return: without it the
     // effect never re-runs when an instrument is switched back on, so the rail
@@ -302,31 +328,39 @@ function UsageWidget({
 }) {
   const [usage, setUsage] = useState<TokenUsage | null>(null);
   const [status, setStatus] = useState<ClaudeStatus | null>(null);
+  // Token spend only moves when Claude produces output, so this is driven by the
+  // session's status edges rather than a timer — an idle or backgrounded session
+  // reads nothing. Same signal the rail uses; see status-watch / ClaudePanel.
+  const sessionStatus = useWorkspace((s) => s.runtime[session.id]?.status ?? "idle");
 
-  useEffect(() => {
+  const tick = useCallback(async () => {
     if (!isTauri()) return;
-    let cancelled = false;
-
-    const tick = async () => {
-      try {
-        // A small tail: the widget needs recent turns, not the whole history,
-        // and this runs on a timer against a file that can be hundreds of MB.
-        const t = await api.claudeTranscript(session.target, session.folder, session.resume, 256 * 1024);
-        if (cancelled) return;
-        setUsage(t.usage);
-        setStatus(t.status);
-      } catch {
-        // Not worth reporting in a widget — the Claude tab already shows why.
-      }
-    };
-
-    void tick();
-    const timer = setInterval(tick, 15_000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    try {
+      // A small tail: the widget needs recent turns, not the whole history, and
+      // this reads a file that can be hundreds of MB.
+      const t = await api.claudeTranscript(session.target, session.folder, session.resume, 256 * 1024);
+      setUsage(t.usage);
+      setStatus(t.status);
+    } catch {
+      // Not worth reporting in a widget — the Claude tab already shows why.
+    }
   }, [session.target, session.folder, session.resume]);
+
+  // Baseline on mount, and on reconnect (new resume/target/folder).
+  useEffect(() => {
+    bench(`fetch kind=token session=${session.id} trigger=open`);
+    void tick();
+  }, [tick, session.id]);
+
+  // Refresh only when Claude finished a turn (`working → idle`) or paused for
+  // input (`→ waiting`) — the moments spend changes. `working` is skipped: no
+  // new tokens land at the start of a turn.
+  useEffect(() => {
+    if (sessionStatus === "idle" || sessionStatus === "waiting") {
+      bench(`fetch kind=token session=${session.id} trigger=${sessionStatus}`);
+      void tick();
+    }
+  }, [sessionStatus, tick, session.id]);
 
   return (
     <Widget title="TOKEN SPEND" onDragStart={onDragStart}>

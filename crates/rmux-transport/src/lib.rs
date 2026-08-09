@@ -286,6 +286,17 @@ pub trait Target: Send + Sync + 'static {
 
     /// The target's OS, if known yet.
     fn platform(&self) -> Option<Platform>;
+
+    /// Re-assert any persistent transport this target keeps warm (for SSH, the
+    /// shared control master).
+    ///
+    /// Cheap and idempotent; the default is a no-op, correct for a target that
+    /// holds nothing open. Polled callers invoke this each tick so a master
+    /// that died is revived here rather than every poll paying a fresh
+    /// handshake. Best-effort: producing a result must not depend on it.
+    async fn ensure_ready(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Quote a string for a POSIX shell using single quotes.

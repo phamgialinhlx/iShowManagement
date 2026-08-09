@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { isTauri } from "./api";
+import { bench } from "./debug-log";
 import { useWorkspace } from "./workspace";
 import type { SessionStatus } from "./workspace-model";
 
@@ -133,7 +134,10 @@ export function startStatusWatch(): () => void {
     const status = mapStatus(ev.status);
     // Pass the host-clock stamp through so the unseen watermark is skew-free and
     // survives a restart — the whole reason for the watermark over an edge flag.
-    if (status) state.setStatus(match.id, status, ev.updatedAt);
+    if (status) {
+      state.setStatus(match.id, status, ev.updatedAt);
+      bench(`status session=${match.id} status=${status} source=push`);
+    }
   };
 
   const onEvent = (ev: StatusEvent) => {
@@ -180,7 +184,9 @@ export function startStatusWatch(): () => void {
             { id: claudeId },
           );
           if (next.exited != null) return;
-          setStatus(session.id, next.prompt ? "waiting" : next.working ? "working" : "idle");
+          const s = next.prompt ? "waiting" : next.working ? "working" : "idle";
+          setStatus(session.id, s);
+          bench(`status session=${session.id} status=${s} source=fallback`);
         } catch {
           // The handle is gone; the panel owns recovery.
         }

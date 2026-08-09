@@ -428,6 +428,14 @@ impl Target for SshTarget {
     fn platform(&self) -> Option<Platform> {
         *self.platform.read()
     }
+
+    async fn ensure_ready(&self) -> anyhow::Result<()> {
+        // Keep the shared control master warm. On Windows/unsupported this is a
+        // no-op (`ensure_alive` returns `Unsupported`), so the russh path is
+        // untouched.
+        self.master.ensure_alive().await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
