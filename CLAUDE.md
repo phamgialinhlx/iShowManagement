@@ -211,7 +211,10 @@ sessions in it.
   is not enough when headers, controls and a long path can exceed a short window
   on their own.
 - Existing ceilings: the transcript, SENT, the Jira picker, today's list, the
-  task list, the host-wide resume list. Anything added beside them needs one.
+  task list, the host-wide resume list, and the running-sessions picker — a host
+  routinely holds more than fits, because every rebuilt agent leaves its
+  predecessor's daemon running and `list` unions them all. Anything added beside
+  them needs one.
 
 ## Release notes are for the people installing it
 

@@ -5,6 +5,7 @@ import { useRailWidth } from "../lib/rail-width";
 import { isSessionUnseen, useWorkspace } from "../lib/workspace";
 import { MenuDivider, MenuItem, MenuSurface, type MenuAt } from "./Menu";
 import { api } from "../lib/api";
+import { RunningSessions } from "./RunningSessions";
 import { RailGrip } from "./RailGrip";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
 import { QuickAdd } from "./QuickAdd";
@@ -791,6 +792,7 @@ function ServerNode({
   onNewProject: (serverId: string) => void;
 }) {
   const [menu, setMenu] = useState<MenuAt | null>(null);
+  const [attaching, setAttaching] = useState(false);
   /** What the last disconnect did, shown beside the control that did it. */
   const [note, setNote] = useState<string | null>(null);
   // Select the stable arrays and derive with useMemo — filtering *inside* the
@@ -843,35 +845,45 @@ function ServerNode({
                 because "disconnect" sitting above "remove server" invites
                 reading them as degrees of the same thing. */}
             <MenuItem
+              label="Attach a running session…"
+              onClick={() => {
+                setMenu(null);
+                setAttaching(true);
+              }}
+            />
+            <MenuDivider />
+            {/* **Disconnect keeps the server here.** The hint says so, because
+                the row not changing was read as the command doing nothing —
+                and the note below now stays until something else happens,
+                rather than fading before it has been read. */}
+            <MenuItem
               label="Disconnect"
-              hint="sessions keep running"
+              hint="stays in the list"
               onClick={() => {
                 setMenu(null);
                 setNote("disconnecting…");
                 void api
                   .serverDisconnect(server.target)
-                  .then((r) => {
+                  .then((r) =>
                     setNote(
                       r.closed
-                        ? "disconnected"
+                        ? "disconnected · sessions still running · reconnects on next use"
                         : r.evicted > 0
-                          ? "forgotten (nothing was open)"
+                          ? "forgotten · nothing was open"
                           : "was not connected",
-                    );
-                    // A success may fade; an error below does not, because it
-                    // is still true until something is done about it.
-                    setTimeout(() => setNote(null), 2500);
-                  })
+                    ),
+                  )
                   .catch((e) => setNote(e instanceof Error ? e.message : String(e)));
               }}
             />
-            <MenuDivider />
+            {/* Removal lives on the hover ✕ too, but this is where it was looked
+                for. Same confirmation either way — one flow, two doors. */}
             <MenuItem
-              label="Attach a running session…"
-              hint="HOST ▸ SESSIONS"
+              label="Remove server…"
+              destructive
               onClick={() => {
                 setMenu(null);
-                openHost(server.id);
+                setConfirming(true);
               }}
             />
           </MenuSurface>
@@ -931,6 +943,15 @@ function ServerNode({
         press — "3 sessions" is the difference between tidying the rail and
         ending three running conversations, and nothing else on screen says it.
       */}
+      {attaching && (
+        <RunningSessions
+          serverId={server.id}
+          target={server.target}
+          label={serverLabel(server)}
+          onClose={() => setAttaching(false)}
+        />
+      )}
+
       {/* Every mutating control reports its outcome inline. PR #9's Disconnect
           is fire-and-forget with no catch and no feedback, which on a host that
           was never connected is indistinguishable from a dead menu item. */}
