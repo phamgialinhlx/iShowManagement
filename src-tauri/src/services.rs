@@ -305,16 +305,6 @@ pub async fn docker_action(
     container_action(t.as_ref(), &id, action).await.map_err(|e| e.to_string())
 }
 
-/// Sessions `rmux-agent` is holding on the host, with what they are consuming.
-///
-/// The list comes from the daemon rather than from `ps`, because that is the
-/// only thing that knows a session's *name* — from the outside a Claude session
-/// is a login shell, indistinguishable from any other. `ps` is then asked for
-/// the resource figures in the same round trip.
-///
-/// Dead sessions are already excluded by `rmux-agent list`: their pid may have
-/// been reused, and reporting one sends the operator to kill something else.
-
 /// One row of `rmux-agent list`, tolerant of both column counts.
 ///
 /// The agent gained an alias column, and the host may be running **either**
@@ -357,6 +347,15 @@ fn parse_agent_row(row: &str) -> Option<AgentSession> {
     })
 }
 
+/// Sessions `rmux-agent` is holding on the host, with what they are consuming.
+///
+/// The list comes from the daemon rather than from `ps`, because that is the
+/// only thing that knows a session's *name* — from the outside a Claude session
+/// is a login shell, indistinguishable from any other. `ps` is then asked for
+/// the resource figures in the same round trip.
+///
+/// Dead sessions are already excluded by `rmux-agent list`: their pid may have
+/// been reused, and reporting one sends the operator to kill something else.
 pub async fn agent_sessions(target: &dyn Target, program: &str) -> anyhow::Result<Vec<AgentSession>> {
     let line = format!(
         "{} list 2>/dev/null || true; echo __PS__; ps -eo pid=,rss=,pcpu= 2>/dev/null || true",
