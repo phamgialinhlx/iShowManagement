@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from "motion/react";
 
 import { useRailWidth } from "../lib/rail-width";
 import { isSessionUnseen, useWorkspace } from "../lib/workspace";
+import { MenuDivider, MenuItem, MenuSurface, type MenuAt } from "./Menu";
+import { api } from "../lib/api";
 import { RailGrip } from "./RailGrip";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
 import { QuickAdd } from "./QuickAdd";
@@ -326,7 +328,9 @@ function SessionRow({
 }) {
   const [confirming, setConfirming] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [menu, setMenu] = useState<MenuAt | null>(null);
   const rename = useWorkspace((s) => s.renameSession);
+  const detach = useWorkspace((s) => s.detachSession);
   const status = useWorkspace((s) => s.statusOf(session.id));
   // Subscribed to the derived boolean, so the mark clears the moment the session
   // is opened (its watermark advances) or lights when a newer change arrives.
@@ -341,7 +345,52 @@ function SessionRow({
       : undefined;
 
   return (
-    <div className="group relative" style={surface}>
+    <div
+      className="group relative"
+      style={surface}
+      // Right-click *adds* to the row; the hover ✕ and its counted confirmation
+      // are untouched. PR #9 moves removal into the menu and turns ✕ into
+      // detach — a quieter default, but it relocates the destructive action
+      // someone already knows where to find.
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
+    >
+      {menu && (
+        <MenuSurface at={menu} onClose={() => setMenu(null)} minWidth={210}>
+          <MenuItem
+            label="Rename"
+            onClick={() => {
+              setMenu(null);
+              setEditing(true);
+            }}
+            hint="double-click"
+          />
+          <MenuDivider />
+          {/* Not destructive, so not red — the work keeps running. The hint
+              says where it went, because a row vanishing without one reads as
+              having closed the session. */}
+          <MenuItem
+            label="Detach"
+            hint="stays running"
+            onClick={() => {
+              setMenu(null);
+              detach(session.id);
+            }}
+          />
+          <MenuItem
+            label="Close session"
+            destructive
+            onClick={() => {
+              // The menu closes so the row's own confirmation — which names
+              // what ends, on the server — is not hidden underneath it.
+              setMenu(null);
+              setConfirming(true);
+            }}
+          />
+        </MenuSurface>
+      )}
       {editing ? (
         <div className="flex items-center gap-2 px-3 py-[6px] pl-3">
           {session.kind === "claude" ? (
@@ -448,6 +497,9 @@ function ProjectNode({
   const addSession = useWorkspace((s) => s.addSession);
   const removeSession = useWorkspace((s) => s.removeSession);
   const removeProject = useWorkspace((s) => s.removeProject);
+  const renameProject = useWorkspace((s) => s.renameProject);
+  const [menu, setMenu] = useState<MenuAt | null>(null);
+  const [editing, setEditing] = useState(false);
   const target = useWorkspace((s) => s.targetOfProject(project.id));
   const allServers = useWorkspace((s) => s.servers);
   // Stated, never assumed: two projects can share a folder name on different
@@ -494,19 +546,79 @@ function ProjectNode({
     <div>
       {/* Group header — the "▾ TMUX" band: caret, an uppercase label, then the
           verbs: open files (folder), new terminal (+), new Claude (✦). */}
-      <div className="group/prj flex items-center gap-1.5 py-[5px] pl-4 pr-2">
+      <div
+        className="group/prj flex items-center gap-1.5 py-[5px] pl-4 pr-2"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
+        {menu && (
+          <MenuSurface at={menu} onClose={() => setMenu(null)} minWidth={210}>
+            {/* Rename finally has a way in. `renameProject` has been in the
+                store all along with nothing calling it, so a project's label
+                could be set once from the folder basename and never changed. */}
+            <MenuItem
+              label="Rename"
+              onClick={() => {
+                setMenu(null);
+                setEditing(true);
+              }}
+            />
+          </MenuSurface>
+        )}
         <button type="button" className="shrink-0" onClick={onToggle} aria-expanded={!folded} title={project.folder}>
           <Chevron folded={folded} />
         </button>
-        <button
-          type="button"
-          className="data min-w-0 flex-1 truncate text-left text-[10px]"
-          style={{ color: "var(--text-soft)", fontWeight: 600, letterSpacing: "0.09em", textTransform: "uppercase" }}
-          onClick={() => openFiles(project.id)}
-          title={`${project.folder}\nOpen files`}
-        >
-          {project.label}
-        </button>
+        {editing ? (
+          <input
+            autoFocus
+            defaultValue={project.label}
+            spellCheck={false}
+            className="data inset min-w-0 flex-1 px-1 py-[1px] text-[10px] outline-none"
+            style={{
+              border: "1px solid var(--border-strong)",
+              color: "var(--text)",
+              textTransform: "uppercase",
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={(e) => {
+              const next = e.currentTarget.value.trim();
+              if (next && next !== project.label) renameProject(project.id, next);
+              setEditing(false);
+            }}
+            onKeyDown={(e) => {
+              // Enter commits through the blur handler above, so there is one
+              // path that writes. Escape restores by leaving without one.
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") {
+                e.currentTarget.value = project.label;
+                e.currentTarget.blur();
+              }
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            className="data min-w-0 flex-1 truncate text-left text-[10px]"
+            style={{
+              // A synthetic bucket is dimmer than a folder someone chose: it is
+              // a container for sessions adopted from the host, not a project.
+              color: project.running ? "var(--text-faint)" : "var(--text-soft)",
+              fontWeight: 600,
+              letterSpacing: "0.09em",
+              textTransform: "uppercase",
+            }}
+            onClick={() => openFiles(project.id)}
+            title={
+              project.running
+                ? "Sessions adopted from this host"
+                : `${project.folder}\nOpen files`
+            }
+          >
+            {project.label}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => openFiles(project.id)}
@@ -678,6 +790,9 @@ function ServerNode({
   onToggleProject: (id: string) => void;
   onNewProject: (serverId: string) => void;
 }) {
+  const [menu, setMenu] = useState<MenuAt | null>(null);
+  /** What the last disconnect did, shown beside the control that did it. */
+  const [note, setNote] = useState<string | null>(null);
   // Select the stable arrays and derive with useMemo — filtering *inside* the
   // selector returns a new array every call, which breaks useSyncExternalStore's
   // cache and spins into "Maximum update depth exceeded" (a white screen).
@@ -713,11 +828,54 @@ function ServerNode({
       {/* Server card — accent bar, status dot, bold name; the HOST / + verbs. */}
       <div
         className="group/srv relative mx-1.5 mt-1.5 flex items-center gap-1.5 py-[7px] pl-2.5 pr-2"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
         style={{
           background: "color-mix(in srgb, var(--text) 6%, transparent)",
           boxShadow: "inset 3px 0 0 var(--text-soft)",
         }}
       >
+        {menu && (
+          <MenuSurface at={menu} onClose={() => setMenu(null)} minWidth={230}>
+            {/* Not destructive: the sessions keep running. The hint says so,
+                because "disconnect" sitting above "remove server" invites
+                reading them as degrees of the same thing. */}
+            <MenuItem
+              label="Disconnect"
+              hint="sessions keep running"
+              onClick={() => {
+                setMenu(null);
+                setNote("disconnecting…");
+                void api
+                  .serverDisconnect(server.target)
+                  .then((r) => {
+                    setNote(
+                      r.closed
+                        ? "disconnected"
+                        : r.evicted > 0
+                          ? "forgotten (nothing was open)"
+                          : "was not connected",
+                    );
+                    // A success may fade; an error below does not, because it
+                    // is still true until something is done about it.
+                    setTimeout(() => setNote(null), 2500);
+                  })
+                  .catch((e) => setNote(e instanceof Error ? e.message : String(e)));
+              }}
+            />
+            <MenuDivider />
+            <MenuItem
+              label="Attach a running session…"
+              hint="HOST ▸ SESSIONS"
+              onClick={() => {
+                setMenu(null);
+                openHost(server.id);
+              }}
+            />
+          </MenuSurface>
+        )}
         <button type="button" className="shrink-0" onClick={onToggle} aria-expanded={!folded}>
           <Chevron folded={folded} />
         </button>
@@ -773,6 +931,14 @@ function ServerNode({
         press — "3 sessions" is the difference between tidying the rail and
         ending three running conversations, and nothing else on screen says it.
       */}
+      {/* Every mutating control reports its outcome inline. PR #9's Disconnect
+          is fire-and-forget with no catch and no feedback, which on a host that
+          was never connected is indistinguishable from a dead menu item. */}
+      {note && (
+        <p className="micro mx-1.5 px-2.5 pb-1" style={{ color: "var(--text-soft)" }}>
+          {note.toUpperCase()}
+        </p>
+      )}
       {confirming && (
         <div className="mx-1.5 flex flex-col gap-1 px-2.5 py-2">
           <span className="micro leading-relaxed" style={{ color: "var(--text-soft)" }}>
