@@ -197,6 +197,8 @@ type State = Core & {
     hostName: string,
     kind: SessionKind,
     alias?: string | null,
+    /** The session's real working directory on the host, when known. */
+    cwd?: string | null,
   ) => string;
   removeProject: (id: ProjectId) => void;
   removeServer: (id: ServerId) => void;
@@ -490,7 +492,7 @@ export const useWorkspace = create<State>((set, get) => ({
     schedulePersist(get);
   },
 
-  adoptServerSession: (serverId, hostName, kind, alias) => {
+  adoptServerSession: (serverId, hostName, kind, alias, cwd) => {
     // **Already here? Open it, do not adopt it again.** Adopting twice would put
     // two rows in front of one shell, and the second would attach to the same
     // PTY the first is already showing.
@@ -500,20 +502,32 @@ export const useWorkspace = create<State>((set, get) => ({
       return existing.id;
     }
 
-    // A session running on a host has a working directory rmux did not choose
-    // and may never have seen — it may have been started from another machine.
-    // It still needs somewhere in the tree, so it gets a synthetic project.
+    // **Where does an adopted session belong in the tree?**
     //
-    // The folder is a **sentinel that cannot be a real one**: every genuine
-    // project is created from an absolute path, so `(running)` collides with
-    // nothing, and the project id derived from it dedupes this bucket for free.
-    // PR #9 used `~` and deduped on the flag instead, which stamps "running"
-    // onto a real project belonging to anyone who opened one at their home
-    // directory — a common thing to do.
-    const projectId = get().createProject(serverId, RUNNING_FOLDER, "running");
-    set((s) => ({
-      projects: s.projects.map((p) => (p.id === projectId ? { ...p, running: true } : p)),
-    }));
+    // In the project for the folder it is actually working in. The host reports
+    // that (`AgentSession.cwd`, read from procfs), so an adopted session joins
+    // the project you already have for that directory — or creates it — and its
+    // files pane, git pane and future terminals all point somewhere real.
+    //
+    // The first version of this dropped every adopted session into a synthetic
+    // bucket whose folder was a sentinel. Claude resumed correctly and the files
+    // pane then said **"cannot open directory"**, because the pane was faithfully
+    // trying to list a folder named `(running)`. Reported with a screenshot.
+    //
+    // The bucket survives as the fallback for when the directory genuinely
+    // cannot be determined — a host without procfs, or a process owned by
+    // someone else. Its folder is a sentinel that no real project can have
+    // (every real one is created from an absolute path), so the project id
+    // derived from it dedupes the bucket for free.
+    const real = cwd?.trim();
+    const projectId = real
+      ? get().createProject(serverId, real)
+      : get().createProject(serverId, RUNNING_FOLDER, "running");
+    if (!real) {
+      set((s) => ({
+        projects: s.projects.map((p) => (p.id === projectId ? { ...p, running: true } : p)),
+      }));
+    }
 
     // The row is named by its alias when the host has one — that is the name a
     // person chose, possibly on another machine — and by the raw session name

@@ -151,6 +151,9 @@ export type AgentSession = {
   command: string;
   memory: number | null;
   cpu: number | null;
+  /** Where the session is working, read from the host's procfs. Absent when it
+   *  could not be determined — a foreign process, or a host without procfs. */
+  cwd?: string | null;
 };
 
 export type GitChange = {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { dayKey, record } from "../lib/activity";
+import { dayKey, daySummary, record } from "../lib/activity";
 import { DayBars, GoalRing, HourClock, SessionSplit, StreakGrid } from "../components/ProgressCharts";
 import { JiraToday } from "../components/JiraToday";
 import {
@@ -104,6 +104,21 @@ export function Dashboard({ onClose }: { onClose: () => void }) {
   const isToday = day === dayKey();
   const minutes = Math.round(data.totals.seconds / 60);
 
+  /**
+   * Tasks finished **on this day**, which is what a daily target means.
+   *
+   * The ring used to read `data.tasks.done` — the number of ticked boxes on the
+   * board, all-time, across every note. Against a target of 10 that showed
+   * `12 · met` on a day nothing had been ticked at all, and it could never go
+   * down. Reported as the graph being wrong, which it was.
+   *
+   * `activity.ts` records a completion at the moment it happens for exactly this
+   * reason: a note stores only the *current* state of its checkboxes, so "tasks
+   * finished today" is unknowable from the notes alone. It is the same series
+   * the 14-day chart below already plots.
+   */
+  const tasksToday = useMemo(() => daySummary(day).tasksDone, [day, version]);
+
   return (
     <div className="progress-page flex min-h-0 flex-1 flex-col">
       <header
@@ -130,7 +145,7 @@ export function Dashboard({ onClose }: { onClose: () => void }) {
           <section className="flex flex-wrap items-center gap-8">
             <GoalRing
               label="TASKS"
-              value={data.tasks.done}
+              value={tasksToday}
               target={goals.tasks}
               format={(n) => String(Math.round(n))}
             />

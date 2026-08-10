@@ -60,6 +60,14 @@ pub struct AgentSession {
     /// Resident memory of the session's process tree, in bytes.
     pub memory: Option<u64>,
     pub cpu: Option<f32>,
+    /// Where the session is actually working.
+    ///
+    /// Read from procfs rather than from the agent, so it is available for
+    /// sessions held by an older daemon too — which are precisely the ones worth
+    /// adopting. Absent on a host without procfs, or for a process that is not
+    /// ours to inspect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// `docker ps` joined with `docker stats`, or a reason there is nothing to show.
@@ -344,6 +352,7 @@ fn parse_agent_row(row: &str) -> Option<AgentSession> {
         command: rest.get(3).unwrap_or(&"").trim().to_owned(),
         memory: None,
         cpu: None,
+        cwd: None,
     })
 }
 
@@ -357,12 +366,39 @@ fn parse_agent_row(row: &str) -> Option<AgentSession> {
 /// Dead sessions are already excluded by `rmux-agent list`: their pid may have
 /// been reused, and reporting one sends the operator to kill something else.
 pub async fn agent_sessions(target: &dyn Target, program: &str) -> anyhow::Result<Vec<AgentSession>> {
+    // Three answers in one round trip: what the agent holds, what those
+    // processes are consuming, and **where each one is**.
+    //
+    // The working directory is read from `/proc/<pid>/cwd` rather than asked of
+    // the daemon, and that is deliberate: a host routinely runs several agent
+    // builds at once — an upgrade leaves the old daemon serving its live
+    // sessions — so anything the *protocol* reports is unavailable for exactly
+    // the older sessions most worth adopting. procfs answers for all of them.
+    // `readlink` on another user's process fails silently, which is the right
+    // outcome: their directory is not ours to report.
     let line = format!(
-        "{} list 2>/dev/null || true; echo __PS__; ps -eo pid=,rss=,pcpu= 2>/dev/null || true",
+        "{} list 2>/dev/null || true; echo __PS__; ps -eo pid=,rss=,pcpu= 2>/dev/null || true; \
+         echo __CWD__; for d in /proc/[0-9]*; do \
+         printf '%s\\t%s\\n' \"${{d##*/}}\" \"$(readlink \"$d/cwd\" 2>/dev/null)\"; \
+         done 2>/dev/null || true",
         shell_quote(program)
     );
     let out = target.exec(&CommandSpec::login_shell().arg("-c").arg(line)).await?;
-    let (listing, ps) = out.stdout.split_once("__PS__").unwrap_or((out.stdout.as_str(), ""));
+    let (listing, rest) = out.stdout.split_once("__PS__").unwrap_or((out.stdout.as_str(), ""));
+    let (ps, cwds) = rest.split_once("__CWD__").unwrap_or((rest, ""));
+
+    // pid → working directory, for the sessions we are about to describe.
+    let mut where_ = std::collections::HashMap::new();
+    for row in cwds.lines() {
+        if let Some((pid, dir)) = row.split_once('\t')
+            && let Ok(pid) = pid.trim().parse::<u32>()
+        {
+            let dir = dir.trim();
+            if !dir.is_empty() {
+                where_.insert(pid, dir.to_owned());
+            }
+        }
+    }
 
     // pid → (resident bytes, percent of one CPU)
     let mut usage = std::collections::HashMap::new();
@@ -381,7 +417,8 @@ pub async fn agent_sessions(target: &dyn Target, program: &str) -> anyhow::Resul
     for row in listing.lines().filter(|l| !l.trim().is_empty()) {
         let Some(parsed) = parse_agent_row(row) else { continue };
         let (memory, cpu) = parsed.pid.and_then(|p| usage.get(&p)).copied().unzip();
-        sessions.push(AgentSession { memory, cpu, ..parsed });
+        let cwd = parsed.pid.and_then(|p| where_.get(&p)).cloned();
+        sessions.push(AgentSession { memory, cpu, cwd, ..parsed });
     }
     Ok(sessions)
 }

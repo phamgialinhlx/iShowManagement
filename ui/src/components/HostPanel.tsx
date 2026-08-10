@@ -748,6 +748,7 @@ function Sessions({ target, serverId }: { target: TargetRef; serverId: ServerId 
                   s.name,
                   isClaudeSession(s.command) ? "claude" : "terminal",
                   s.alias,
+                  s.cwd,
                 );
                 setAttaching(null);
               }}

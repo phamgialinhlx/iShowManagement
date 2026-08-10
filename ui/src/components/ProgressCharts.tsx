@@ -400,6 +400,10 @@ export function GoalRing({
   const R = 26;
   const C = 2 * Math.PI * R;
   const met = target > 0 && ratio >= 1;
+  // Stated, not drawn. The arc is clamped at a full turn — a second lap would
+  // overwrite the first and read as *less* progress the further past the target
+  // you got — so the surplus is a number instead.
+  const over = met ? Math.round(value - target) : 0;
 
   return (
     <div className="flex items-center gap-3">
@@ -410,7 +414,11 @@ export function GoalRing({
           cy="32"
           r={R}
           fill="none"
-          stroke={met ? "var(--text-soft)" : "rgb(var(--busy))"}
+          // **Met is the brightest state.** It was `--text-soft`, a muted chalk
+          // barely above the track, so finishing a goal made the ring dimmer
+          // than being halfway through it — the reward for completing was the
+          // display going quiet.
+          stroke={met ? "var(--text)" : "rgb(var(--busy))"}
           strokeWidth="5"
           strokeDasharray={`${C * clamped} ${C}`}
           // Square caps and a start at twelve o'clock: the design system has no
@@ -431,11 +439,11 @@ export function GoalRing({
         </span>
         <span className="micro">{label}</span>
         <span className="data text-[10px]" style={{ color: "var(--text-faint)" }}>
-          {target > 0 ? (
-            met ? `target ${format(target)} · met` : `of ${format(target)}`
-          ) : (
-            "no target set"
-          )}
+          {target > 0
+            ? met
+              ? `target ${format(target)} · met${over > 0 ? ` · +${format(over)}` : ""}`
+              : `of ${format(target)}`
+            : "no target set"}
         </span>
       </div>
     </div>

@@ -179,10 +179,11 @@ export function RunningSessions({
                           {s.alias ?? s.name}
                         </span>
                         <span className="micro truncate" style={{ color: "var(--text-faint)" }}>
-                          {s.alias ? `${s.name} · ` : ""}
+                          {/* The folder first: with several shells on one host
+                              it is the only thing that tells them apart. */}
+                          {s.cwd ? `${s.cwd} · ` : ""}
                           {isClaudeSession(s.command) ? "claude" : "shell"} ·{" "}
                           {s.attached ? "attached" : "detached"} · {age(s.ageSeconds)}
-                          {s.pid ? ` · pid ${s.pid}` : ""}
                         </span>
                       </div>
 
@@ -203,6 +204,10 @@ export function RunningSessions({
                               s.name,
                               isClaudeSession(s.command) ? "claude" : "terminal",
                               s.alias,
+                              // So the adopted session joins the project for the
+                              // folder it is actually in, rather than a bucket
+                              // whose files pane cannot be opened.
+                              s.cwd,
                             );
                             onClose();
                           }}
