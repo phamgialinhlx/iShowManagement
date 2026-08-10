@@ -545,6 +545,11 @@ export function AppearancePanel() {
   );
 
   return (
+    // No bottom margin or padding here: the sticky Apply bar needs this box to
+    // reach the scrollport, and `Settings.tsx` drops the scroller's bottom
+    // padding for exactly that reason. Adding either back reopens the gap the
+    // bar used to float above — and padding on *this* element does nothing,
+    // because sticky clamps to the containing block's content box. Measured.
     <section className="flex max-w-[560px] flex-col gap-5">
       <header className="flex flex-col gap-1">
         <h2 className="kicker">APPEARANCE</h2>
@@ -870,12 +875,16 @@ function ApplyBar({
 }) {
   return (
     <div
-      className="sticky bottom-0 -mx-6 -mb-6 mt-1 flex flex-col gap-2 px-6 pb-6 pt-3"
+      // No `-mb-6` here any more: the section now cancels the scroller's bottom
+      // padding, and doing it in both places pulled the bar's own box up by 24px
+      // again — the gap simply moved.
+      className="sticky bottom-0 -mx-6 mt-1 flex flex-col gap-2 px-6 pb-6 pt-3"
       style={{
         borderTop: "1px solid var(--border-strong)",
-        // Near-opaque: this is a sticky footer, so the panel content scrolls
-        // under it — at 88% the text behind bled through and read as a smudge.
-        background: "color-mix(in srgb, var(--app-panel) 97%, transparent)",
+        // Opaque. Content scrolls *under* a sticky footer, so any transparency
+        // is text showing through the bar — at 88% it read as a smudge, and at
+        // 97% a bright swatch still ghosted. A footer is a surface, not a veil.
+        background: "var(--app-panel)",
       }}
     >
       <div className="flex items-center gap-3">
