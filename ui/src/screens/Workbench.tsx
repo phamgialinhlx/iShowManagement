@@ -9,7 +9,10 @@ import { WorkspaceRail } from "../components/WorkspaceRail";
 import { WidgetRail, type Active } from "../components/WidgetRail";
 import { AlertStack } from "../components/AlertStack";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
-import { DECKS, deckId } from "../lib/grid";
+import { DECKS, deckCells, deckId } from "../lib/grid";
+import { readHandsFree, useHandsFree, writeHandsFree } from "../lib/hands-free";
+import type { SessionStatus } from "../lib/workspace-model";
+import { requestTerminalFocus } from "../lib/shortcuts";
 import { useWorkspace } from "../lib/workspace";
 import { startAttentionWatch } from "../lib/attention";
 import { useShortcuts } from "../lib/use-shortcuts";
@@ -60,6 +63,8 @@ export function Workbench({
   const activeId = useWorkspace((s) => s.activeSession);
   const runtime = useWorkspace((s) => s.runtime);
   const activate = useWorkspace((s) => s.activate);
+  const panes = useWorkspace((s) => s.panes);
+  const focusCell = useWorkspace((s) => s.focusCell);
   const deck = useWorkspace((s) => s.deck);
   const setDeck = useWorkspace((s) => s.setDeck);
   const railCollapsed = useWorkspace((s) => s.railCollapsed);
@@ -72,6 +77,7 @@ export function Workbench({
 
   const [newMode, setNewMode] = useState<NewMode | null>(null);
   const [dashboard, setDashboard] = useState(false);
+  const [handsFree, setHandsFree] = useState(readHandsFree);
 
   // The keyboard, bound once for the whole workbench. See `use-shortcuts.ts`
   // for why it is one listener and why it bubbles rather than captures.
@@ -81,6 +87,32 @@ export function Workbench({
   const activeProject = active ? projectOf(active.id) : undefined;
   const activeTarget = active ? targetOf(active.id) : undefined;
   const activeHost = active ? serverOf(active.id)?.target.host : undefined;
+
+  /**
+   * Hands-free: the keyboard follows whichever session next needs a person.
+   *
+   * The statuses are mapped to a plain record first so the hook re-runs when a
+   * *status* changes rather than on every write to `runtime` — which carries an
+   * error field and a timestamp that move far more often.
+   */
+  const statuses = useMemo(() => {
+    const out: Record<string, SessionStatus | undefined> = {};
+    for (const s of sessions) out[s.id] = runtime[s.id]?.status;
+    return out;
+  }, [sessions, runtime]);
+
+  useHandsFree({
+    enabled: handsFree,
+    panes,
+    statuses,
+    activeSession: activeId,
+    cells: deckCells(deck),
+    onGo: (id, cell) => {
+      activate(id);
+      focusCell(cell);
+      requestTerminalFocus(id);
+    },
+  });
 
   const waitingIds = useMemo(
     () =>
@@ -281,6 +313,32 @@ export function Workbench({
                 {waitingIds.length} waiting
               </button>
             )}
+
+            {/* Hands-free. In the footer beside the other whole-workbench
+                switches, because it changes how the app behaves rather than
+                what a pane shows — and because a mode you cannot see the state
+                of is a mode you turn on by accident and never find again. */}
+            <button
+              type="button"
+              className="chip"
+              aria-pressed={handsFree}
+              onClick={() => {
+                const next = !handsFree;
+                setHandsFree(next);
+                writeHandsFree(next);
+              }}
+              title={
+                handsFree
+                  ? "Hands-free is on — the cursor moves to a session as it finishes or asks. It waits while you are typing."
+                  : "Hands-free: put the cursor in a grid session as soon as it finishes or asks you something"
+              }
+              style={{
+                color: handsFree ? "var(--text)" : undefined,
+                background: handsFree ? "var(--hover)" : undefined,
+              }}
+            >
+              HANDS-FREE
+            </button>
 
             <button
               type="button"
