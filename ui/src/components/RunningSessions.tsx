@@ -82,6 +82,21 @@ export function RunningSessions({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  /**
+   * Put the keyboard on the first action once the list has arrived.
+   *
+   * A picker that can only be driven with a mouse is a picker you have to leave
+   * the keyboard for, in an app whose whole surface is terminals. Landing on the
+   * first ATTACH makes Tab and Enter enough — and it waits for `rows` rather
+   * than firing on mount, because focusing a skeleton would move the cursor to
+   * something that is about to be replaced.
+   */
+  useEffect(() => {
+    if (!rows?.length) return;
+    const first = document.querySelector<HTMLButtonElement>("[data-attach-first]");
+    first?.focus();
+  }, [rows]);
+
   return (
     <AnimatePresence>
       <motion.div
@@ -133,8 +148,13 @@ export function RunningSessions({
               </p>
             ) : (
               <ul className="flex flex-col">
-                {rows.map((s) => {
+                {rows.map((s, i) => {
                   const here = alreadyHere.has(s.name);
+                  // The first row that can actually be attached — not merely the
+                  // first row, which may already be in the rail and carry no
+                  // control to focus.
+                  const firstAttachable =
+                    !here && !rows.slice(0, i).some((r) => !alreadyHere.has(r.name));
                   return (
                     <li
                       key={s.name}
@@ -176,6 +196,7 @@ export function RunningSessions({
                         <button
                           type="button"
                           className="chip shrink-0"
+                          {...(firstAttachable ? { "data-attach-first": "" } : {})}
                           onClick={() => {
                             adoptServerSession(
                               serverId,

@@ -374,7 +374,7 @@ function SessionRow({
               having closed the session. */}
           <MenuItem
             label="Detach"
-            hint="stays running"
+            hint="→ HOST ▸ SESSIONS"
             onClick={() => {
               setMenu(null);
               detach(session.id);
@@ -832,6 +832,11 @@ function ServerNode({
         className="group/srv relative mx-1.5 mt-1.5 flex items-center gap-1.5 py-[7px] pl-2.5 pr-2"
         onContextMenu={(e) => {
           e.preventDefault();
+          // Clear the last outcome as a new interaction starts. "Disconnected"
+          // is true when it is printed and quietly stops being true the moment
+          // anything reconnects — and a status line that is right for a second
+          // and wrong for an hour is worse than none.
+          setNote(null);
           setMenu({ x: e.clientX, y: e.clientY });
         }}
         style={{

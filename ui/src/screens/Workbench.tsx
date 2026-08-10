@@ -78,6 +78,15 @@ export function Workbench({
   const [newMode, setNewMode] = useState<NewMode | null>(null);
   const [dashboard, setDashboard] = useState(false);
   const [handsFree, setHandsFree] = useState(readHandsFree);
+  /**
+   * The session hands-free last moved to, shown briefly on its own chip.
+   *
+   * Focus moving on its own is startling without a reason. The rail highlight
+   * and the pane outline both follow, so *something* visibly changes — what is
+   * missing is **why**, and the control that caused it is the honest place to
+   * say so.
+   */
+  const [wentTo, setWentTo] = useState<string | null>(null);
 
   // The keyboard, bound once for the whole workbench. See `use-shortcuts.ts`
   // for why it is one listener and why it bubbles rather than captures.
@@ -111,6 +120,8 @@ export function Workbench({
       activate(id);
       focusCell(cell);
       requestTerminalFocus(id);
+      setWentTo(sessions.find((s) => s.id === id)?.name ?? id);
+      window.setTimeout(() => setWentTo(null), 2600);
     },
   });
 
@@ -337,7 +348,10 @@ export function Workbench({
                 background: handsFree ? "var(--hover)" : undefined,
               }}
             >
-              HANDS-FREE
+              {/* Names where it went, then goes quiet. A mode that narrates
+                  every move becomes noise; one that never explains a jump
+                  leaves you wondering what you pressed. */}
+              {wentTo ? `→ ${wentTo}` : "HANDS-FREE"}
             </button>
 
             <button
