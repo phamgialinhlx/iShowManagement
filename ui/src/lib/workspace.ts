@@ -171,6 +171,8 @@ type State = Core & {
     >,
   ) => string;
   removeSession: (id: string) => void;
+  /** Drop this machine's view; the session keeps running on the host. */
+  detachSession: (id: string) => void;
   removeProject: (id: ProjectId) => void;
   removeServer: (id: ServerId) => void;
 
@@ -400,6 +402,63 @@ export const useWorkspace = create<State>((set, get) => ({
     const { [id]: _l, [companionKey(id)]: _c, ...live } = state.live;
     // Prune the watermark too, or `seen` grows without bound as sessions come and
     // go — it shares the localStorage quota with everything else.
+    const { [id]: _s, ...seen } = state.seen;
+    if (Object.keys(seen).length !== Object.keys(state.seen).length) persistSeen(seen);
+    set({ ...ws, runtime, live, seen });
+    schedulePersist(get);
+  },
+
+  /**
+   * Stop watching a session without ending it.
+   *
+   * The twin of `removeSession`, and the whole difference is what is *not* sent:
+   * no `claude_end_session`, no `terminal_close`. Both of those carry an
+   * `agent kill` to the host. Detaching drops only this machine's view — the
+   * shell and the conversation keep running under `rmux-agent`, which is the
+   * reason the agent exists.
+   *
+   * The structural half is identical, so it reuses `removeSession`'s reducer
+   * rather than a copy of it: the row goes, its panes clear, and the active
+   * session hands off. A second reducer with the same body would be two things
+   * to keep in step forever, and they would not stay in step.
+   *
+   * **The row disappearing is the deliberate part.** The alternative — leaving
+   * it dimmed in the rail — was the original design on the branch this comes
+   * from, and that branch abandoned it. A rail that accumulates rows for every
+   * session anyone ever detached, on any machine, stops answering the question
+   * it exists to answer. The way back is HOST ▸ SESSIONS, which lists what is
+   * genuinely running rather than what this machine happens to remember.
+   *
+   * **The companion shell must be detached too.** It is a real terminal under
+   * the agent and it is not in the rail, so nothing else would ever reach it —
+   * the unreachable leak `rmux-agent list` exists to make findable. But its
+   * preferences are *kept* (no `forgetCompanion`): re-attaching should restore
+   * the split the operator was working in, and forgetting would silently reset
+   * their layout as a side effect of stepping away.
+   */
+  detachSession: (id) => {
+    const state = get();
+    const session = state.sessions.find((s) => s.id === id);
+    if (session && isTauri()) {
+      // These take the **live handle**, not the session id: they are dropping a
+      // local PTY, not naming something on the host. There is deliberately no
+      // target and no session name in either call — a detach has nothing to say
+      // to the far side, and no path that could end a shell.
+      const pty = state.live[id];
+      if (pty) {
+        if (session.kind === "claude") void api.claudeStop(pty).catch(() => {});
+        else void api.terminalDetach(pty).catch(() => {});
+      }
+      const companion = state.live[companionKey(id)];
+      if (companion) void api.terminalDetach(companion).catch(() => {});
+    }
+
+    const ws = rRemoveSession(coreOf(state), id);
+    const { [id]: _r, ...runtime } = state.runtime;
+    const { [id]: _l, [companionKey(id)]: _c, ...live } = state.live;
+    // Pruned for the same quota reason as `removeSession`: the row is gone, and
+    // a watermark for a session no longer listed would accumulate for every
+    // detach anyone ever makes.
     const { [id]: _s, ...seen } = state.seen;
     if (Object.keys(seen).length !== Object.keys(state.seen).length) persistSeen(seen);
     set({ ...ws, runtime, live, seen });

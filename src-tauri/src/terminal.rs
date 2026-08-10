@@ -268,7 +268,33 @@ pub async fn terminal_resize(
     terminal.resize(TermSize { cols, rows }).map_err(err)
 }
 
-/// Kill a terminal and forget it.
+/// Drop the local view of a terminal and **leave the shell running**.
+///
+/// This is `terminal_close` without the `agent kill` — and that one omission is
+/// the entire difference between the two. Killing the local attach client only
+/// ever detaches; the shell lives in the daemon on the target, which is what
+/// makes a session survive quitting the app, losing the network, or closing the
+/// lid.
+///
+/// `terminal_close` follows the kill because closing a tab means the operator is
+/// finished with it, and without that every closed tab leaks a shell nothing can
+/// reach again. Detaching says the opposite: keep it, I am coming back. The way
+/// back is HOST ▸ SESSIONS, which lists exactly these.
+///
+/// Deliberately takes no target and no session name: there is nothing to say to
+/// the far side. That asymmetry with `terminal_close` is the safety property —
+/// this command has no path that can end a shell.
+#[tauri::command]
+pub async fn terminal_detach(store: State<'_, TerminalStore>, id: String) -> Result<(), String> {
+    if let Some(terminal) = store.inner().terminals.lock().remove(&id) {
+        // Already exited is success, not an error: the operator asked to stop
+        // watching it, and it has stopped.
+        let _ = terminal.kill();
+    }
+    Ok(())
+}
+
+/// Kill a terminal and forget it — on this machine *and* on the target.
 #[tauri::command]
 pub async fn terminal_close<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

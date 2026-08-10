@@ -725,6 +725,29 @@ export const api = {
   claudeEndSession: (target: TargetRef, sessionName: string) =>
     call<void>("claude_end_session", { target, sessionName }),
 
+  /**
+   * Detach: drop this machine's view and leave the work running.
+   *
+   * Both take a **live handle** rather than a session name, and neither takes a
+   * target. That is the safety property, not an oversight — a detach has nothing
+   * to say to the host, so there is no argument through which one could end a
+   * session. Compare `claudeEndSession` and `terminal_close`, which both name a
+   * session on a target precisely because they carry a kill.
+   */
+  claudeStop: (id: string) => call<void>("claude_stop", { id }),
+  terminalDetach: (id: string) => call<void>("terminal_detach", { id }),
+
+  /**
+   * Close a server's connection, keeping its sessions running on the host.
+   *
+   * Returns what it actually did: how many of rmux's caches were holding the
+   * host, and whether a transport was asked to close. Reported rather than
+   * assumed, because a disconnect that half-worked is indistinguishable from one
+   * that did nothing.
+   */
+  serverDisconnect: (target: TargetRef) =>
+    call<{ evicted: number; closed: boolean }>("server_disconnect", { target }),
+
   claudeAccountStatus: () => call<ClaudeAccount>("claude_account_status"),
   claudeAccountSave: (token: string) => call<ClaudeAccount>("claude_account_save", { token }),
   claudeAccountForget: () => call<ClaudeAccount>("claude_account_forget"),

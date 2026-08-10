@@ -244,6 +244,7 @@ pub fn run() {
             claude::claude_stop,
             claude_status::claude_status_watch,
             server::server_disconnect,
+            terminal::terminal_detach,
             claude_status::claude_status_unwatch,
             files::fs_join,
             files::fs_parent,
