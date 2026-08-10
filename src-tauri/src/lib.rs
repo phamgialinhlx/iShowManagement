@@ -236,7 +236,6 @@ pub fn run() {
             claude_login::claude_login_cancel,
             claude::claude_attach,
             claude::claude_state,
-            claude::claude_answer,
             claude::claude_send,
             claude::claude_interrupt,
             claude::claude_resize,

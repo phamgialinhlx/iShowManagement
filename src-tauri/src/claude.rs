@@ -349,20 +349,6 @@ pub async fn claude_state(
     Ok(PolledState { state: session.state(), exited: session.terminal().exit_code() })
 }
 
-/// Answer the prompt identified by `fingerprint`.
-///
-/// The fingerprint is required, not optional: it is what stops an answer landing
-/// on a question that has already been replaced.
-#[tauri::command]
-pub async fn claude_answer(
-    store: State<'_, ClaudeStore>,
-    id: String,
-    fingerprint: String,
-    key: String,
-) -> Result<(), String> {
-    session(store.inner(), &id)?.answer(&fingerprint, &key).await.map_err(err)
-}
-
 #[tauri::command]
 pub async fn claude_send(
     store: State<'_, ClaudeStore>,

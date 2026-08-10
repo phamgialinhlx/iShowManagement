@@ -1006,64 +1006,38 @@ because `/tui fullscreen` persists, so anyone who ran it once carries the proble
   so it would trade real capability for scrolling. Keeping the real TUI is what guarantees
   parity — it *is* the CLI.
 
-## A decision card needs a cursor, not just numbers
+## The decision card is gone, and that is the right shape
 
-`parse_state` (`crates/rmux-claude/src/screen.rs`) turns Claude's screen into a prompt. It used
-to accept any two numbered lines, so **"1. … 2. … 3. …" in ordinary prose became a decision
-card** — measured on a live session, a six-point security summary rendered as a six-option card
-drawn over the terminal. A test asserted this ("documenting current behaviour, not endorsing
-it") for months.
+rmux used to detect Claude's multiple-choice dialogs from the rendered screen
+and draw its **own** card over the terminal, with buttons that pressed the keys.
+It was removed, and the reasoning is worth keeping because it applies to
+anything else tempted to reimplement part of the TUI.
 
-It went unreported for so long only because a *second* bug hid it: the card computed
-`position: relative` and was clipped to a 12px sliver, which was reported as a black bar. Fixing
-the position exposed the misdetection underneath.
+- **Claude already draws that UI, and it is the authority.** Ours was a second
+  interface over the first, so every Claude release could change the thing being
+  scraped while our copy went on looking confident. Reported as "why do we even
+  need this, it is buggy and Claude Code already have an UI to select and
+  answer" — which is the whole argument in one sentence.
+- **Detecting a dialog from prose is not reliably possible.** Requiring the
+  selection caret killed the worst false positives (a six-point security summary
+  became a six-option card) but not all of them: a markdown *table* of numbered
+  tasks was still read as a dialog, and the card then reported `option 2 could
+  not be selected` — a control offering an action it could not perform.
+- **Answering was two problems, not one.** Some dialogs commit on the digit and
+  some need Enter, so answering safely meant pressing a key, reading the screen
+  back, and confirming only once the caret was observed to move. That machinery
+  was correct and is still no substitute for the operator pressing `2`.
+- **What was kept is the *signal*.** `parse_state` still reports that a prompt is
+  on screen, because the rail's "this one needs you" mark is genuinely useful and
+  works on hosts with no agent. The authoritative source is better still: Claude
+  writes `status ∈ busy|shell|idle|waiting` to `~/.claude/sessions/<pid>.json`,
+  which `rmux-agent watch-status` streams — a fact reported by Claude rather than
+  inferred from its pixels.
 
-- **The signal is the selection caret, not the frame.** The code's own suggested mitigation —
-  require the box-drawing frame — is wrong: Claude's **trust prompt is not framed**, it uses a
-  horizontal rule, so a frame check would stop detecting the one dialog that blocks a session
-  from ever starting. Both real captures carry `❯` on the highlighted option, because that is
-  how the operator knows what Enter will pick. Prose has no cursor.
-- **A frame is still accepted as an alternative**, so a repaint landing mid-frame — options
-  drawn, caret not yet — does not flicker the card out.
-- **Synthetic fixtures must draw a caret.** Three tests wrote `  1. Yes` with no marker, which
-  is not a screen Claude ever produces; they encoded the bug into the suite.
-
-## Answering a card: two dialogs, and never the wrong option
-
-Claude draws at least two kinds of dialog and **they commit differently**. The
-permission prompt commits on the digit. The question card does not — it prints
-`Enter to select · ↑↓ to navigate · n to add notes` along its bottom, and a digit
-there is navigation at most. `keys::choose` sent the digit alone, so that card was
-**completely inert**: reported as "I can't click the first answer and it keeps
-showing the question again", with nothing on screen to suggest a keystroke had
-been delivered and ignored.
-
-- **Enter is sent only once the caret is *observed* on the option that was asked
-  for.** Appending it unconditionally is the obvious fix and it is unsafe: if a
-  digit is a no-op in some dialog, Enter commits whatever happens to be
-  highlighted, so a click on option 3 answers option 1. Failing to answer is
-  recoverable and visible; answering the wrong thing is neither. So `answer`
-  writes the digit, reads the screen back, and confirms only on a match —
-  otherwise it reports that the option could not be selected. Pinned in both
-  directions, including a fake whose caret never moves.
-- **Rule 1 in `keys` still holds.** The *selection* is made by the digit, never by
-  counting arrow presses against a highlight that moves on its own. What changed
-  is that confirming is a separate, evidence-gated step.
-- **An option label stops where a neighbouring panel starts.** Claude runs inline,
-  so a redraw paints only the columns it writes and whatever an earlier message
-  left further right stays on the row. Options and a leftover diagram then share
-  rows, and reading to the end of the line swallows the neighbour —
-  `Cap the answer shape │ turn starts`, measured on a real session.
-  **The damage is not cosmetic**: the fingerprint is the question plus every
-  label, so a neighbour that changes as Claude streams changes the labels, changes
-  the fingerprint, and makes every answer refused as "no longer on screen". That
-  is the second half of the same bug report, and it looks nothing like its cause.
-  `cut_at_neighbour` cuts at U+2500–U+257F, which an option label never contains.
-  The **ASCII pipe is deliberately excluded** — `Use A | B` is an ordinary label,
-  and truncating it would invent a new bug while fixing this one.
-- **This lives in the app, not the agent**, so a plain rebuild ships it — no
-  `build-agents.sh`, no redeploy. Worth knowing before chasing a fix that "did
-  not take".
+The rule this leaves behind: **rmux may observe the TUI, and must not
+reimplement it.** Reading the screen to say *something is happening over there*
+is a summary. Drawing controls that duplicate what is already on screen is a
+second UI, and the second one is always the one that is wrong.
 
 ## rmux is a backend, and the browser is not part of it
 

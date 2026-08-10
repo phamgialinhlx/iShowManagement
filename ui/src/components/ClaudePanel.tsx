@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { motion, AnimatePresence } from "motion/react";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -230,7 +229,6 @@ export function ClaudePanel({
   const [claudeId, setClaudeId] = useState<string | null>(null);
   const [state, setState] = useState<ClaudeState>({ prompt: null, working: false });
   const [error, setError] = useState<string | null>(null);
-  const [answering, setAnswering] = useState(false);
   // Image paste. `dropping` only drives the overlay; `sending` is what the
   // operator needs to see, because a screenshot to a remote host takes long
   // enough that silence reads as nothing having happened.
@@ -708,25 +706,6 @@ export function ClaudePanel({
     };
   }, [claudeId, sessionId, cwd, target, adoptTitle]);
 
-  const answer = async (choice: Choice) => {
-    if (!claudeId || !state.prompt) return;
-    setAnswering(true);
-    setError(null);
-    try {
-      await invoke("claude_answer", {
-        id: claudeId,
-        fingerprint: state.prompt.fingerprint,
-        key: choice.key,
-      });
-      // Clear optimistically; the next poll confirms.
-      setState((s) => ({ ...s, prompt: null }));
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-    } finally {
-      setAnswering(false);
-    }
-  };
-
   return (
     <div
       className="relative flex h-full flex-col"
@@ -1003,53 +982,7 @@ export function ClaudePanel({
           </div>
         )}
 
-        {/* The decision card, over the live screen. */}
-        <AnimatePresence>
-          {state.prompt && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 6 }}
-              transition={{ type: "spring", stiffness: 280, damping: 26 }}
-              className="window corner absolute inset-x-3 bottom-3 p-4"
-            >
-              <p className="data mb-3 text-[12px] leading-relaxed">{state.prompt.question}</p>
-
-              <div className="flex flex-col gap-1">
-                {state.prompt.choices.map((choice) => (
-                  <button
-                    key={choice.key}
-                    type="button"
-                    disabled={answering}
-                    onClick={() => void answer(choice)}
-                    className="data flex items-center gap-2 px-2 py-[5px] text-left text-[11px]"
-                    style={{
-                      background: choice.selected ? "var(--hover)" : "transparent",
-                      color: "var(--text)",
-                    }}
-                  >
-                    <span className="micro" style={{ minWidth: 12 }}>
-                      {choice.key}
-                    </span>
-                    {choice.label}
-                  </button>
-                ))}
-              </div>
-
-              {error && (
-                <p
-                  role="alert"
-                  className="data mt-2 text-[10px]"
-                  style={{ color: "rgb(var(--primary))" }}
-                >
-                  {error}
-                </p>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {error && !state.prompt && (
+        {error && (
           <p
             role="alert"
             className="data absolute inset-x-0 top-0 p-3 text-[11px]"

@@ -21,14 +21,6 @@ pub fn choose(key: &str) -> Vec<u8> {
     key.as_bytes().to_vec()
 }
 
-/// Confirm the highlighted option.
-///
-/// Only ever sent once the caret has been *observed* on the option that was
-/// asked for — see `Session::answer`. Sending it on faith would commit whatever
-/// happened to be highlighted, which is how a click on option 3 would answer
-/// option 1.
-pub const CONFIRM: &[u8] = b"\r";
-
 /// Bytes to interrupt whatever Claude is doing.
 pub const fn interrupt() -> &'static [u8] {
     // Escape. Claude prints "esc to interrupt" precisely because this is it.
