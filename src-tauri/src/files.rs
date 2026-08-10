@@ -23,6 +23,23 @@ pub struct FsStore {
     filesystems: Mutex<HashMap<TargetId, Arc<dyn FileSystem>>>,
 }
 
+impl FsStore {
+    /// Forget this target's cached handle.
+    ///
+    /// Returns whether there was one. Dropping rmux's handle is only half of a
+    /// disconnect — the transport is closed by the caller, because a cache that
+    /// merely forgets leaves the connection up if any other clone survives.
+    pub fn evict_target(&self, id: &TargetId) -> bool {
+        self.filesystems.lock().remove(id).is_some()
+    }
+
+    /// Insert a resolved handle directly. Tests only: the real path needs a
+    /// live host, which a unit test must not require.
+    pub fn insert_for_test(&self, id: TargetId, value: Arc<dyn FileSystem>) {
+        self.filesystems.lock().insert(id, value);
+    }
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }

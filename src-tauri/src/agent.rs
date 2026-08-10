@@ -23,6 +23,25 @@ pub struct AgentStore {
     by_target: Mutex<HashMap<TargetId, Arc<OnceCell<Installed>>>>,
 }
 
+impl AgentStore {
+    /// Forget that the agent was provisioned on this host.
+    ///
+    /// Returns whether there was a record. Named `forget` rather than
+    /// `evict_target` because it drops a *fact* rather than a connection: the
+    /// binary is still installed over there. All this costs is that the next use
+    /// re-probes it — which is the right outcome after a disconnect, since the
+    /// host may have been upgraded, or be a different machine behind the same
+    /// alias, by the time anyone reconnects.
+    pub fn forget(&self, id: &TargetId) -> bool {
+        self.by_target.lock().remove(id).is_some()
+    }
+
+    /// Insert a provisioning cell directly. Tests only.
+    pub fn insert_for_test(&self, id: TargetId, cell: Arc<OnceCell<Installed>>) {
+        self.by_target.lock().insert(id, cell);
+    }
+}
+
 /// Ensure the agent is installed on `target`, uploading it if this is the first
 /// time rmux has seen this host.
 pub async fn ensure_agent<R: tauri::Runtime>(

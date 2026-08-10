@@ -57,6 +57,34 @@ pub struct ClaudeStatusStore {
     watchers: Mutex<HashMap<TargetId, tokio::task::JoinHandle<()>>>,
 }
 
+impl ClaudeStatusStore {
+    /// Stop watching this host, and **abort the task**.
+    ///
+    /// Dropping a `JoinHandle` does not cancel what it is running — the task
+    /// keeps going, detached, with nothing left holding it. This one runs
+    /// `rmux-agent watch-status` over SSH in a reconnect loop, so a merely
+    /// forgotten watcher would notice its connection drop and dial straight back
+    /// out. A disconnect would then close the master and something would
+    /// immediately re-open it: the operator sees a server that refuses to
+    /// disconnect, and nothing on screen names the watcher as the cause.
+    ///
+    /// This is the store PR #9 does not evict, because it did not exist yet.
+    pub fn evict_target(&self, id: &TargetId) -> bool {
+        match self.watchers.lock().remove(id) {
+            Some(handle) => {
+                handle.abort();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Insert a watcher handle directly. Tests only.
+    pub fn insert_for_test(&self, id: TargetId, handle: tokio::task::JoinHandle<()>) {
+        self.watchers.lock().insert(id, handle);
+    }
+}
+
 /// Start (or confirm) a status watcher for `target`. Idempotent — safe to call
 /// whenever an agent-hosted Claude session opens, and on repeat.
 #[tauri::command]

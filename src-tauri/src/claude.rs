@@ -23,6 +23,31 @@ pub struct ClaudeStore {
     targets: Mutex<HashMap<TargetId, Arc<dyn Target>>>,
 }
 
+impl ClaudeStore {
+    /// The cached target for `id`, if this store has one.
+    ///
+    /// Taken before a disconnect evicts it: once the caches are dropped there is
+    /// nothing left to ask to close its connection.
+    pub fn cached_target(&self, id: &TargetId) -> Option<Arc<dyn Target>> {
+        self.targets.lock().get(id).cloned()
+    }
+
+    /// Forget this target's cached handle.
+    ///
+    /// Returns whether there was one. Dropping rmux's handle is only half of a
+    /// disconnect — the transport is closed by the caller, because a cache that
+    /// merely forgets leaves the connection up if any other clone survives.
+    pub fn evict_target(&self, id: &TargetId) -> bool {
+        self.targets.lock().remove(id).is_some()
+    }
+
+    /// Insert a resolved handle directly. Tests only: the real path needs a
+    /// live host, which a unit test must not require.
+    pub fn insert_for_test(&self, id: TargetId, value: Arc<dyn Target>) {
+        self.targets.lock().insert(id, value);
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartedSession {

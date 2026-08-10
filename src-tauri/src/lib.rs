@@ -17,10 +17,10 @@ mod uplink;
 mod userpath;
 mod tunnels;
 pub mod agent;
-mod claude;
+pub mod claude;
 mod claude_account;
 mod claude_login;
-mod claude_status;
+pub mod claude_status;
 mod auth;
 mod commands;
 mod face_models;
@@ -37,6 +37,7 @@ mod ssh_keys;
 mod theme;
 pub mod files;
 pub mod metrics;
+pub mod server;
 pub mod terminal;
 
 /// A target as the UI sees it.
@@ -242,6 +243,7 @@ pub fn run() {
             claude::claude_write,
             claude::claude_stop,
             claude_status::claude_status_watch,
+            server::server_disconnect,
             claude_status::claude_status_unwatch,
             files::fs_join,
             files::fs_parent,

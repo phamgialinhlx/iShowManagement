@@ -27,6 +27,27 @@ pub struct MetricsStore {
 }
 
 impl MetricsStore {
+    /// Forget this target, and with it the CPU baseline.
+    ///
+    /// Losing the baseline is correct rather than unfortunate: CPU percent is a
+    /// difference between two samples, and the next one after a reconnect has
+    /// nothing to difference against. Keeping the old collector would report a
+    /// figure derived from before the gap.
+    ///
+    /// `async` because this map is behind a tokio mutex — the collector is held
+    /// across await points while a sample is in flight.
+    pub async fn evict_target(&self, id: &TargetId) -> bool {
+        self.monitored.lock().await.remove(id).is_some()
+    }
+
+    /// Insert a monitored target directly. Tests only.
+    pub async fn insert_for_test(&self, id: TargetId, target: Arc<dyn Target>) {
+        self.monitored
+            .lock()
+            .await
+            .insert(id, Monitored { target, collector: Collector::new() });
+    }
+
     /// Resolve a target once and keep it, so the CPU baseline survives.
     async fn ensure(&self, target: &TargetRef) -> Result<TargetId, String> {
         let id = target.id();

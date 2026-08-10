@@ -436,6 +436,17 @@ impl Target for SshTarget {
         self.master.ensure_alive().await?;
         Ok(())
     }
+
+    /// Close the shared control master.
+    ///
+    /// `ssh -O exit` rather than dropping this target and hoping: the master
+    /// outlives any one `Arc`, and a disconnect that quietly leaves the
+    /// connection up is indistinguishable from one that never ran. On Windows
+    /// there is no master and `stop` is a no-op, which is correct — every
+    /// command there is its own connection and there is nothing to tear down.
+    async fn disconnect(&self) {
+        self.master.stop().await;
+    }
 }
 
 #[cfg(test)]

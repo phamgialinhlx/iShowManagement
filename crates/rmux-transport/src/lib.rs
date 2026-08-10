@@ -297,6 +297,25 @@ pub trait Target: Send + Sync + 'static {
     async fn ensure_ready(&self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Tear down any persistent transport this target keeps open.
+    ///
+    /// The counterpart of [`Target::ensure_ready`], and the reason it exists as
+    /// a trait method rather than a downcast: whether a target *has* a
+    /// connection to close is a property of the target, so the branch belongs in
+    /// the impl. A local target holds nothing, hence the default.
+    ///
+    /// **Not merely dropping the last `Arc`.** The SSH master does die when its
+    /// owner is dropped, but relying on that means a disconnect silently fails
+    /// whenever a single clone survives anywhere — in a cache nobody remembered,
+    /// in an in-flight task — and a connection that is still up looks exactly
+    /// like a feature that does not work. Asking the master to exit says so
+    /// regardless of who else is holding it.
+    ///
+    /// Best-effort and idempotent: disconnecting something already disconnected
+    /// is not an error, and a failure here must not stop the caller forgetting
+    /// the target.
+    async fn disconnect(&self) {}
 }
 
 /// Quote a string for a POSIX shell using single quotes.
