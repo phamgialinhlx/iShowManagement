@@ -104,9 +104,23 @@ export const isMac = (): boolean =>
  *
  * `Mod+1..4` for views because the numbers are free in both a shell and
  * Claude's TUI, and because "the first tab" is what a number key means
- * everywhere else. `Mod+Alt+Arrow` for the grid rather than plain `Mod+Arrow`:
- * ⌘← and ⌘→ are line-start and line-end in every macOS text field, including
- * the composer this app is full of.
+ * everywhere else.
+ *
+ * **`Mod+Shift+Arrow` for the grid**, not plain `Mod+Arrow`: ⌘← and ⌘→ are
+ * line-start and line-end in every macOS text field, including the composer this
+ * app is full of. Shift rather than Alt because ⌥ chords are the ones a shell
+ * uses for word movement, and because ⌘⇧← is the shape people already know from
+ * every tiling window manager.
+ *
+ * Measured, not assumed — `shortcut-terminal-check.ts` prints the survey:
+ *
+ * ```text
+ * Mod+Shift+   Left=free       Right=free       Up=free  Down=free
+ * Ctrl+Shift+  Left="\e[1;6D"  Right="\e[1;6C"  …        ← taken
+ * ```
+ *
+ * Which is exactly why the non-mac set below cannot use the same chord: there
+ * `Mod` **is** Ctrl.
  *
  * Deliberately avoided: ⌘W, ⌘Q, ⌘N, ⌘M — macOS binds those in the app menu, so
  * a shortcut here would either lose or, worse, win and close the window.
@@ -118,10 +132,10 @@ const MAC_DEFAULTS: Record<ActionId, string> = {
   "view.jira": "Mod+4",
   "view.git": "Mod+5",
   "session.terminal": "Mod+T",
-  "pane.left": "Mod+Alt+ArrowLeft",
-  "pane.right": "Mod+Alt+ArrowRight",
-  "pane.up": "Mod+Alt+ArrowUp",
-  "pane.down": "Mod+Alt+ArrowDown",
+  "pane.left": "Mod+Shift+ArrowLeft",
+  "pane.right": "Mod+Shift+ArrowRight",
+  "pane.up": "Mod+Shift+ArrowUp",
+  "pane.down": "Mod+Shift+ArrowDown",
   progress: "Mod+P",
 };
 
@@ -227,6 +241,25 @@ const ALWAYS_ENCODED = new Set([
   "Enter", "Tab", "Escape", "Backspace", " ",
 ]);
 
+/**
+ * Keys that type **even under ⌘**, where everything else is suppressed.
+ *
+ * The macOS defaults rest on "xterm encodes nothing for a ⌘ chord", and that is
+ * true of every *modifier-encoded* key — measured, ⌘⇧← and ⌘⌥← both put nothing
+ * on the wire, while ⇧← sends `\e[1;2D`. It is **not** true of a key that is a
+ * character in its own right: ⌘ does not stop Enter being Enter.
+ *
+ * Measured on a real xterm:
+ *
+ * ```text
+ * Mod+        Enter="\r"  Tab="\t"    Escape="\e"  Backspace=free  Space=free
+ * Mod+Shift+  Enter="\r"  Tab="\e[Z"  Escape="\e"  Backspace=free  Space=free
+ * ```
+ *
+ * Backspace and Space are deliberately absent — ⌘ does suppress those.
+ */
+const TYPES_UNDER_CMD = new Set(["Enter", "Tab", "Escape"]);
+
 /** Ctrl+<digit> that maps to a control code. `Ctrl+1`, `Ctrl+9` and `Ctrl+0` do not. */
 const CTRL_DIGITS = new Set(["2", "3", "4", "5", "6", "7", "8"]);
 
@@ -249,6 +282,11 @@ export function reachesTerminal(binding: string): boolean {
   const key = parts.pop() ?? "";
   if (!key) return false;
   const mods = new Set(parts);
+
+  // A character key types whatever is held down with it, so this is decided
+  // before any modifier is considered. Putting it after the gate below is what
+  // made the model claim ⌘⏎ was free while a real xterm sent `\r`.
+  if (TYPES_UNDER_CMD.has(key)) return true;
 
   const mac = isMac();
   // ⌘ is not a terminal modifier — xterm encodes nothing for it. That is the

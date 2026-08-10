@@ -119,6 +119,47 @@ setTimeout(() => {
   // reports. A control key that must encode proves the measurement is live.
   check(`the probe registers a known control key (Ctrl+C → ${show(bytesFor("Ctrl+C"))})`, bytesFor("Ctrl+C") === "\x03");
 
+
+  // ── candidate grid chords, measured on both modifier maps ─────────────────
+  //
+  // The module note says every *arrow* chord is taken, which is what pushed the
+  // non-mac grid onto H/J/K/L. That was measured with `Mod` as Ctrl. On macOS
+  // `Mod` is ⌘, and xterm encodes nothing for ⌘ — so the same chord can be
+  // taken on one platform and free on the other. Printed rather than asserted,
+  // because this is the evidence a default is chosen *from*.
+  {
+    const arrows = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
+    const shapes = ["Mod+Shift+", "Mod+Alt+", "Ctrl+Shift+", "Shift+"];
+    console.log(`%c chord survey %c on ${isMac() ? "macOS (Mod = Cmd)" : "this platform (Mod = Ctrl)"}`,
+      "background:#458;color:#fff", "");
+    for (const shape of shapes) {
+      const line = arrows
+        .map((a) => `${a.replace("Arrow", "")}=${bytesFor(shape + a) ? show(bytesFor(shape + a)) : "free"}`)
+        .join("  ");
+      console.log(`  ${shape.padEnd(12)} ${line}`);
+    }
+
+    // **Does ⌘ suppress this key, or does the key type anyway?**
+    //
+    // The two are not the same, and the difference decides how the collision
+    // model has to be written. ⌘ suppresses an *arrow* (measured free above)
+    // but not Enter — Enter is a character, and holding ⌘ still types it.
+    const typed = ["Enter", "Tab", "Escape", "Backspace", " "];
+    const named = (k: string) => (k === " " ? "Space" : k);
+    console.log(
+      "  Mod+        " +
+        typed
+          .map((k) => `${named(k)}=${bytesFor("Mod+" + k) ? show(bytesFor("Mod+" + k)) : "free"}`)
+          .join("  "),
+    );
+    console.log(
+      "  Mod+Shift+  " +
+        typed
+          .map((k) => `${named(k)}=${bytesFor("Mod+Shift+" + k) ? show(bytesFor("Mod+Shift+" + k)) : "free"}`)
+          .join("  "),
+    );
+  }
+
   // ── every default, measured ────────────────────────────────────────────────
   const collisions: string[] = [];
   for (const [action, binding] of Object.entries(DEFAULTS)) {
