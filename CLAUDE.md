@@ -630,6 +630,117 @@ to make.
   in the real browser instead of a button that would fail — never show a control that cannot
   work.
 
+## Closing a view is not ending the work
+
+`removeSession` kills; **`detachSession` does not**, and the difference is which
+arguments the command even has. `terminal_detach` takes neither a target nor a
+session name — there is nothing to say to the far side — while `terminal_close`
+takes both precisely because it carries an `agent kill`. That asymmetry is the
+safety property, not an oversight.
+
+- **The hover ✕ still kills, and still names the count.** `ENDS 3 SESSIONS AND 2
+  PROJECTS ON THE SERVER` is what makes a confirmation worth reading; a generic
+  "its sessions will be ended" is a sentence people click past. Detach lives in
+  the right-click menu instead of replacing ✕, so the destructive action stays
+  where someone already knows to find it.
+- **Detach removes the row**, and the way back is HOST ▸ SESSIONS ▸ ATTACH. A
+  rail that accumulates a dimmed row for every session anyone ever detached, on
+  any machine, stops answering the question it exists to answer.
+- **The companion shell detaches with its conversation** but keeps its
+  preferences — no `forgetCompanion` — so re-attaching restores the split rather
+  than silently resetting a layout as a side effect of stepping away.
+- **`reattachName` prefers `hostName`.** An adopted session was named by whoever
+  started it, possibly on another machine; there is no derivation that recovers
+  that. Attaching to a name the daemon does not hold **creates** one, so a
+  mis-derived name does not fail — it starts a second shell beside the one being
+  adopted and leaves the original running with nothing pointing at it. Deciding
+  it in one function beats `session.hostName ?? …` at every call site.
+- **The bucket for adopted sessions is keyed by a sentinel folder** (`(running)`)
+  that no real project can have, so the project id dedupes it for free. Guessing
+  the bucket from a folder like `~` stamps it onto a project someone genuinely
+  opened there.
+
+## Disconnecting a server
+
+Six caches hold a resolved target — terminal, claude, files, metrics, agent and
+**claude_status** — and one survivor keeps the connection up. A disconnect that
+half-worked is indistinguishable from one that did nothing, so `server_disconnect`
+returns how many it evicted.
+
+- **The status watcher is aborted, not dropped.** Dropping a `JoinHandle` does
+  not cancel the task; it runs `watch-status` in a reconnect loop and would dial
+  straight back out, re-opening the connection just closed. The operator sees a
+  server that refuses to disconnect and nothing names the cause.
+- **`ssh -O exit`, not a hopeful `Arc` drop.** `Target::disconnect` is a trait
+  method with a no-op default rather than a downcast, because whether a target
+  has a connection to close is a property of the target — the same shape as
+  `ensure_ready`, and the same reason: the branch belongs in the impl.
+- A test that spawns a long sleep and asserts it did not finish proves nothing —
+  a task nobody cancelled has not finished either. A guard inside the future runs
+  its `Drop` exactly on cancellation.
+
+## Renaming a session: an alias file, not a protocol change
+
+A rail row's name is local to one machine, which is fine until the same host is
+opened from a second computer. `~/.rmux/aliases.json` on the host (`0600`, atomic
+write, pruned on every write) gives every client the same name.
+
+- **`attach` resolves the alias to a key *before* it sends `Hello`**, so the
+  daemon never learns aliases exist and an older daemon serves a renamed session
+  unmodified. That is what makes this cost no wire change.
+- **A daemon-memory map would have been wrong twice**: the daemon owns the
+  sessions, so its map dies exactly when they do; and a rebuilt agent runs beside
+  the older build until its sessions end while `list` unions them, so a
+  per-daemon map shows a raw key under one build and a name under another.
+- `kill` resolves too, or renaming a session makes it unkillable by the only name
+  the operator can see.
+- **`parse_agent_row` reads five columns or six**, told apart by whether the
+  second field parses as a number. Reading the new format from an old daemon
+  takes the pid as the alias and the age as the pid — every row silently wrong
+  rather than absent, which is the worse failure.
+
+## One context menu, and placement that survives being run twice
+
+`Menu.tsx` (`MenuSurface`, `MenuItem`, `MenuDivider`) is the only context menu;
+`TreeMenu` is a caller. A second copy was tried on a feature branch and the two
+had already drifted before review.
+
+- **Flip before clamp**, with the scale *measured* (`rect.height / offsetHeight`).
+  Clamping slides the list under a stationary cursor, so the pointer lands on
+  whichever item happens to be there — which is how someone deletes a file they
+  meant to rename.
+- **Placement must be idempotent.** Deriving overflow from
+  `getBoundingClientRect().bottom` reads a box that already reflects the previous
+  placement: the first run flips the menu up, the second sees no overflow and
+  puts it back. Invisible while placement ran once per content change, and broken
+  the moment it could repeat. Compute from `offsetWidth`/`offsetHeight` and the
+  click point, neither of which moves with the result.
+- **The surface observes its own size** rather than taking a dependency array, so
+  a caller cannot forget to re-measure when a rename field or a confirmation
+  makes the menu taller.
+
+## The keyboard follows the pane
+
+- **A pane switch must move `document.activeElement`**, not just the focus ring.
+  Moving the highlight while the cursor stays behind is worse than not moving:
+  the screen says one thing and the keystrokes do another. `FOCUS_EVENT` is
+  addressed by session id, like `VIEW_EVENT`, because the terminal is mounted
+  inside a pane the shortcut handler cannot reach.
+- **The companion opts out** (`answersFocusRequests={false}`). It shares its
+  conversation's id, so otherwise both answer and whichever mounted last wins.
+- **Two frames of grace before focusing**: a tile may still be laying out, and
+  `focus()` on a `display:none` element does nothing at all.
+- **Hands-free moves on the *edge*, and never while someone is typing.** Acting
+  on "is idle" drags the cursor to the same pane forever; taking the keyboard
+  mid-sentence sends the rest of it elsewhere. A recent keystroke suppresses the
+  move rather than deferring it — a deferred jump lands in the pause where
+  someone stopped to think.
+- **Defaults are measured, not reasoned about.** `shortcut-terminal-check` prints
+  the survey: on macOS `Mod+Shift+Arrow` is free while `Ctrl+Shift+Arrow` sends
+  `\e[1;6D`, which is exactly why the two platforms cannot share the chord. And
+  ⌘ suppresses an *arrow* but not Enter, Tab or Escape — those are characters,
+  and are decided before any modifier is looked at.
+
 ## Keyboard shortcuts, in an app made of terminals
 
 `ui/src/lib/shortcuts.ts`. The governing constraint is that rmux is mostly two full-screen
