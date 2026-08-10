@@ -9,7 +9,7 @@ import { WorkspaceRail } from "../components/WorkspaceRail";
 import { WidgetRail, type Active } from "../components/WidgetRail";
 import { AlertStack } from "../components/AlertStack";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
-import { DECKS, deckCells, deckId } from "../lib/grid";
+import { DECKS, deckCells, deckId, layoutPanes } from "../lib/grid";
 import { readHandsFree, useHandsFree, writeHandsFree } from "../lib/hands-free";
 import type { SessionStatus } from "../lib/workspace-model";
 import { requestTerminalFocus } from "../lib/shortcuts";
@@ -106,13 +106,36 @@ export function Workbench({
    */
   const statuses = useMemo(() => {
     const out: Record<string, SessionStatus | undefined> = {};
-    for (const s of sessions) out[s.id] = runtime[s.id]?.status;
+    // **A session with no runtime entry is idle**, which is what `statusOf` says
+    // and what the rail draws. Runtime is never persisted, so every session
+    // restored at launch has none until something publishes one — reading the
+    // raw record left them `undefined`, nothing was answerable, and hands-free
+    // had no candidates on exactly the sessions that had been sitting there
+    // longest. One default, in one place, or the app disagrees with itself.
+    for (const s of sessions) out[s.id] = runtime[s.id]?.status ?? "idle";
     return out;
   }, [sessions, runtime]);
 
+  /**
+   * What is **actually on screen**, not what the store has assigned.
+   *
+   * `layoutPanes` auto-fills empty cells with sessions that were never
+   * explicitly placed, so a grid showing four conversations routinely sits on a
+   * `panes` array of `[null]`. Hands-free read the store directly and therefore
+   * found no sessions at all — reported as the mode doing nothing whatsoever.
+   *
+   * This is the same derivation the deck renders from, which is the rule the
+   * rail already follows: two sources for one fact is two chances to drift, and
+   * this was the drift.
+   */
+  const onScreen = useMemo(
+    () => layoutPanes(panes, sessions, activeId, deck),
+    [panes, sessions, activeId, deck],
+  );
+
   useHandsFree({
     enabled: handsFree,
-    panes,
+    panes: onScreen,
     statuses,
     activeSession: activeId,
     cells: deckCells(deck),
@@ -122,6 +145,12 @@ export function Workbench({
       requestTerminalFocus(id);
       setWentTo(sessions.find((s) => s.id === id)?.name ?? id);
       window.setTimeout(() => setWentTo(null), 2600);
+    },
+    // Switching it on and getting silence reads as a broken switch, so say when
+    // there was simply nothing to go to.
+    onNothingWaiting: (reason) => {
+      setWentTo(reason === "focus-view" ? "needs a grid view" : "nothing waiting");
+      window.setTimeout(() => setWentTo(null), 3200);
     },
   });
 

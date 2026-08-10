@@ -84,6 +84,75 @@ const target = (before: S, after: S, activeSession: string | null = null) =>
   check("a session that just started working is not a destination", t === null, JSON.stringify(t));
 }
 
+// 8. **Switching it on acts on the state, not on an edge.**
+//
+//    The reported bug: turn it on with a grid of idle sessions, type, and the
+//    letters go nowhere. There is no transition to react to, so the edge rule —
+//    correct while the mode runs — meant nothing was ever focused.
+{
+  const idle: S = { a: "idle", b: "idle" };
+  check(
+    "with no edge, the running mode stays put",
+    target(idle, idle) === null,
+    "unchanged statuses",
+  );
+  const armed = nextHandsFreeTarget({
+    panes,
+    before: idle,
+    after: idle,
+    activeSession: null,
+    arm: true,
+  });
+  check(
+    "but arming takes the first answerable session",
+    armed?.id === "a" && armed.cell === 0,
+    JSON.stringify(armed),
+  );
+}
+
+// 9. Arming still prefers a question, and still refuses the pane you are in.
+{
+  const now: S = { a: "idle", b: "waiting" };
+  const armed = nextHandsFreeTarget({
+    panes,
+    before: now,
+    after: now,
+    activeSession: null,
+    arm: true,
+  });
+  check("arming prefers a waiting session", armed?.id === "b", JSON.stringify(armed));
+
+  const inA = nextHandsFreeTarget({
+    panes,
+    before: { a: "idle" },
+    after: { a: "idle" },
+    activeSession: "a",
+    arm: true,
+  });
+  check("arming skips the active session", inA === null, JSON.stringify(inA));
+}
+
+// 10. **The pane list must be what is on screen.**
+//
+//     `layoutPanes` auto-fills empty cells, so a grid showing four sessions sits
+//     on a stored `panes` of `[null]`. Reading the store directly found nothing
+//     and the mode silently did nothing at all — the actual reported failure.
+{
+  const stored: (PaneRef | null)[] = [null, null];
+  const armed = nextHandsFreeTarget({
+    panes: stored,
+    before: { a: "idle" },
+    after: { a: "idle" },
+    activeSession: null,
+    arm: true,
+  });
+  check(
+    "an unassigned pane array yields nothing — so the caller must pass the laid-out one",
+    armed === null,
+    "this is why Workbench derives with layoutPanes",
+  );
+}
+
 console.log(
   failures === 0
     ? "%c ALL PASS %c hands-free moves on the edge, prefers a question, and stays put otherwise"

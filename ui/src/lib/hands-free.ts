@@ -53,8 +53,18 @@ export function nextHandsFreeTarget(opts: {
   after: Record<string, SessionStatus | undefined>;
   /** The session the operator is already in — never worth jumping to. */
   activeSession: string | null;
+  /**
+   * Take anything answerable *now*, rather than only what just became so.
+   *
+   * Used when the mode is switched on. Everything below is built around edges,
+   * which is right while it runs and wrong at the moment it starts: turning it
+   * on when four panes are already sitting idle produced no edge and therefore
+   * no move, so the switch looked broken. A deliberate click is an instruction
+   * to act on the state as it is.
+   */
+  arm?: boolean;
 }): { id: string; cell: number } | null {
-  const { panes, before, after, activeSession } = opts;
+  const { panes, before, after, activeSession, arm } = opts;
 
   // A plain loop rather than `forEach`: inside a callback TypeScript widens the
   // accumulator to `never` after the first assignment, and working around that
@@ -71,15 +81,17 @@ export function nextHandsFreeTarget(opts: {
 
     const was = before[id];
     const now = after[id];
-    // The edge, not the state. A session that was already answerable at the
-    // previous evaluation has been sitting there, and moving to it now would be
-    // moving to it every time this ran.
-    if (!answerable(now) || answerable(was)) continue;
-    // No previous status means this hook is seeing the session for the first
-    // time — on mount, or when a pane was just filled. That is not an edge the
-    // operator caused, and treating it as one makes the mode grab the keyboard
-    // the instant it is switched on.
-    if (was === undefined) continue;
+    if (!answerable(now)) continue;
+    if (!arm) {
+      // The edge, not the state. A session that was already answerable at the
+      // previous evaluation has been sitting there, and moving to it now would
+      // be moving to it every time this ran.
+      if (answerable(was)) continue;
+      // No previous status means this hook is seeing the session for the first
+      // time — on mount, or when a pane was just filled. Not an edge the
+      // operator caused.
+      if (was === undefined) continue;
+    }
 
     const rank = now === "waiting" ? 0 : 1;
     if (rank < bestRank) {
@@ -106,13 +118,63 @@ export function useHandsFree(opts: {
   activeSession: string | null;
   cells: number;
   onGo: (id: string, cell: number) => void;
+  /** Why switching it on did nothing, so the control can say so. */
+  onNothingWaiting?: (reason: "focus-view" | "nothing-waiting") => void;
 }): void {
-  const { enabled, panes, statuses, activeSession, cells, onGo } = opts;
+  const { enabled, panes, statuses, activeSession, cells, onGo, onNothingWaiting } = opts;
 
   const previous = useRef<Record<string, SessionStatus | undefined>>({});
   const lastTyped = useRef(0);
+  const wasEnabled = useRef(false);
   const go = useRef(onGo);
   go.current = onGo;
+  const nothing = useRef(onNothingWaiting);
+  nothing.current = onNothingWaiting;
+
+  // Everything the arming pass needs, without putting any of it in the effect's
+  // dependency list — otherwise a status change would re-run the *arm*, and the
+  // mode would behave as though it had just been switched on every few seconds.
+  const latest = useRef({ panes, statuses, activeSession, cells });
+  latest.current = { panes, statuses, activeSession, cells };
+
+  /**
+   * Switching the mode on is itself an instruction.
+   *
+   * Reported as: turned it on, typed, and the letters went nowhere. Correct —
+   * the mode waits for a session to *become* answerable, and a grid of sessions
+   * that were already idle never produces that transition, so nothing was ever
+   * focused and the keystrokes went to whatever had focus before, which was the
+   * button. A control that does nothing when clicked is indistinguishable from
+   * one that is broken.
+   *
+   * The typing guard is bypassed here on purpose: the click *is* the operator
+   * asking for this, so there is nothing to protect them from.
+   */
+  useEffect(() => {
+    const armed = enabled && !wasEnabled.current;
+    wasEnabled.current = enabled;
+    if (!armed) return;
+
+    const { panes, statuses, activeSession, cells } = latest.current;
+    // One tile is not a grid — there is nowhere to move the keyboard *to*, and
+    // the pane is already in front of you. Said out loud rather than ignored:
+    // switching a mode on and getting silence is indistinguishable from a
+    // broken switch, and this is the most likely way to meet that silence.
+    if (cells <= 1) {
+      nothing.current?.("focus-view");
+      return;
+    }
+
+    const target = nextHandsFreeTarget({
+      panes,
+      before: previous.current,
+      after: statuses,
+      activeSession,
+      arm: true,
+    });
+    if (target) go.current(target.id, target.cell);
+    else nothing.current?.("nothing-waiting");
+  }, [enabled]);
 
   // Capture, because xterm stops propagation on the keys it handles — which is
   // most of them, and precisely the ones that mean someone is mid-sentence.
