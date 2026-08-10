@@ -14,6 +14,7 @@
 //! The same binary serves local and remote sessions, so a session resumes the
 //! same way either way.
 
+pub mod alias;
 pub mod attach;
 pub mod daemon;
 pub mod ipc;

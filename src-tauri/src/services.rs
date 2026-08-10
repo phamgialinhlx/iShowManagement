@@ -47,6 +47,10 @@ pub struct Container {
 #[serde(rename_all = "camelCase")]
 pub struct AgentSession {
     pub name: String,
+    /// A display name set on the host, if one was. Shown instead of `name` —
+    /// the person who renamed it may have been at a different computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     pub pid: Option<u32>,
     pub age_seconds: u64,
     /// Whether a client is currently attached — the difference between a
@@ -310,6 +314,49 @@ pub async fn docker_action(
 ///
 /// Dead sessions are already excluded by `rmux-agent list`: their pid may have
 /// been reused, and reporting one sends the operator to kill something else.
+
+/// One row of `rmux-agent list`, tolerant of both column counts.
+///
+/// The agent gained an alias column, and the host may be running **either**
+/// build: a rebuilt client talks to whichever daemon still owns a live session,
+/// and old daemons deliberately keep serving until their sessions end. Reading
+/// the new format from an old daemon would take the pid as the alias and the age
+/// as the pid — every row silently wrong rather than absent, which is the worse
+/// failure.
+///
+/// The two are told apart by whether the second field parses as a number: an
+/// alias never does, because a numeric one would be refused as ambiguous with a
+/// pid at exactly this point.
+fn parse_agent_row(row: &str) -> Option<AgentSession> {
+    let f: Vec<&str> = row.split('\t').collect();
+    let name = f.first()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    // `-` is the agent's "absent" marker in every column.
+    let dash = |v: &str| {
+        let v = v.trim();
+        (!v.is_empty() && v != "-").then(|| v.to_owned())
+    };
+
+    // Six columns: name, alias, pid, age, attached, command.
+    // Five columns: name, pid, age, attached, command.
+    let six = f.len() >= 6 && f.get(1).is_some_and(|v| v.trim().parse::<u32>().is_err());
+    let (alias, rest) = if six { (dash(f[1]), &f[2..]) } else { (None, &f[1..]) };
+
+    Some(AgentSession {
+        name: name.to_owned(),
+        alias,
+        pid: rest.first().and_then(|v| v.trim().parse::<u32>().ok()),
+        age_seconds: rest.get(1).and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+        attached: rest.get(2).is_some_and(|v| v.trim() == "attached"),
+        command: rest.get(3).unwrap_or(&"").trim().to_owned(),
+        memory: None,
+        cpu: None,
+    })
+}
+
 pub async fn agent_sessions(target: &dyn Target, program: &str) -> anyhow::Result<Vec<AgentSession>> {
     let line = format!(
         "{} list 2>/dev/null || true; echo __PS__; ps -eo pid=,rss=,pcpu= 2>/dev/null || true",
@@ -333,23 +380,9 @@ pub async fn agent_sessions(target: &dyn Target, program: &str) -> anyhow::Resul
 
     let mut sessions = Vec::new();
     for row in listing.lines().filter(|l| !l.trim().is_empty()) {
-        let mut f = row.split('\t');
-        let (Some(name), Some(pid), Some(age), Some(attached)) =
-            (f.next(), f.next(), f.next(), f.next())
-        else {
-            continue;
-        };
-        let pid = pid.trim().parse::<u32>().ok();
-        let (memory, cpu) = pid.and_then(|p| usage.get(&p)).copied().unzip();
-        sessions.push(AgentSession {
-            name: name.trim().to_string(),
-            pid,
-            age_seconds: age.trim().parse().unwrap_or(0),
-            attached: attached.trim() == "attached",
-            command: f.next().unwrap_or_default().trim().to_string(),
-            memory,
-            cpu,
-        });
+        let Some(parsed) = parse_agent_row(row) else { continue };
+        let (memory, cpu) = parsed.pid.and_then(|p| usage.get(&p)).copied().unzip();
+        sessions.push(AgentSession { memory, cpu, ..parsed });
     }
     Ok(sessions)
 }
@@ -432,5 +465,54 @@ fc4a0701b555\t0.01%\t204.3MiB / 62.79GiB\n";
         assert_eq!(c.ports, "");
         assert_eq!(c.status, "Up 25 hours");
         assert_eq!(c.cpu, Some(0.0));
+    }
+}
+
+#[cfg(test)]
+mod agent_list_parsing {
+    use super::parse_agent_row;
+
+    /// The new six-column form, from an agent that knows about aliases.
+    #[test]
+    fn a_renamed_session_reports_its_alias() {
+        let row = parse_agent_row("term-1\twebapp\t4131\t900\tattached\tbash").expect("a row");
+        assert_eq!(row.name, "term-1", "the key is what reattaches");
+        assert_eq!(row.alias.as_deref(), Some("webapp"));
+        assert_eq!(row.pid, Some(4131));
+        assert_eq!(row.age_seconds, 900);
+        assert!(row.attached);
+        assert_eq!(row.command, "bash");
+    }
+
+    #[test]
+    fn an_unnamed_session_has_no_alias() {
+        let row = parse_agent_row("term-1\t-\t4131\t900\tdetached\tbash").expect("a row");
+        assert_eq!(row.alias, None, "`-` is absent, not a name");
+        assert!(!row.attached);
+    }
+
+    /// **The compatibility case.** An old daemon still serving its live sessions
+    /// prints five columns. Read as six, its pid would become the alias and its
+    /// age the pid — every row wrong in a way that still renders.
+    #[test]
+    fn an_older_daemons_five_columns_still_parse() {
+        let row = parse_agent_row("term-1\t4131\t900\tattached\tbash").expect("a row");
+        assert_eq!(row.alias, None);
+        assert_eq!(row.pid, Some(4131), "the pid must not be read as an alias");
+        assert_eq!(row.age_seconds, 900);
+        assert_eq!(row.command, "bash");
+    }
+
+    #[test]
+    fn a_dead_session_has_no_pid() {
+        let row = parse_agent_row("term-1\t-\t-\t10\tdetached\t").expect("a row");
+        assert_eq!(row.pid, None);
+        assert_eq!(row.command, "");
+    }
+
+    #[test]
+    fn a_row_with_no_name_is_skipped() {
+        assert!(parse_agent_row("").is_none());
+        assert!(parse_agent_row("\t-\t1\t2\tattached\tbash").is_none());
     }
 }

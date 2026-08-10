@@ -707,8 +707,14 @@ function Sessions({ target, serverId }: { target: TargetRef; serverId: ServerId 
             style={{ width: 7, height: 7, background: s.attached ? "rgb(var(--busy))" : "var(--text-faint)" }}
           />
           <div className="flex min-w-0 flex-1 flex-col">
-            <span className="data truncate text-[12px]" style={{ color: "var(--text)" }}>{s.name}</span>
+            {/* The alias leads when there is one — it is the name a person
+                chose, possibly at another computer — with the key underneath,
+                because the key is what `rmux-agent kill` and a bug report need. */}
+            <span className="data truncate text-[12px]" style={{ color: "var(--text)" }}>
+              {s.alias ?? s.name}
+            </span>
             <span className="micro truncate" style={{ color: "var(--text-faint)" }}>
+              {s.alias ? `${s.name} · ` : ""}
               {s.attached ? "attached" : "detached"} · {age(s.ageSeconds)}
               {s.pid ? ` · pid ${s.pid}` : ""}
             </span>
@@ -737,7 +743,12 @@ function Sessions({ target, serverId }: { target: TargetRef; serverId: ServerId 
                 // Kind comes from the command the daemon reports: an adopted
                 // session's *name* was chosen by whoever started it and carries
                 // no reliable prefix.
-                adoptServerSession(serverId, s.name, isClaudeSession(s.command) ? "claude" : "terminal");
+                adoptServerSession(
+                  serverId,
+                  s.name,
+                  isClaudeSession(s.command) ? "claude" : "terminal",
+                  s.alias,
+                );
                 setAttaching(null);
               }}
             >

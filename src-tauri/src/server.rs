@@ -101,3 +101,45 @@ pub async fn server_disconnect(
 
     Ok(Disconnected { evicted, closed })
 }
+
+/// Rename a session on the host.
+///
+/// The name a *rail row* shows is local to this machine, which is fine until two
+/// people — or one person and their other laptop — look at the same host and see
+/// `term-01K9…` for something that was named hours ago. This writes the name
+/// where every client can read it.
+///
+/// It is an **alias**, never a rename of the key: the key is how the daemon holds
+/// the session and how every client reattaches, so changing it would orphan
+/// running work.
+#[tauri::command]
+pub async fn server_alias<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: State<'_, ClaudeStore>,
+    target: TargetRef,
+    key: String,
+    alias: String,
+) -> Result<(), String> {
+    let resolved = crate::claude::resolve(store.inner(), &target).await?;
+    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+
+    let spec = rmux_transport::CommandSpec::new(&installed.program)
+        .arg("alias")
+        .arg(&key)
+        .arg(&alias)
+        .tty(rmux_transport::Tty::None);
+
+    let out = resolved.exec(&spec).await.map_err(|e| e.to_string())?;
+    if out.status != 0 {
+        // The agent explains itself on stderr — "already running", "no running
+        // session". Passing that through beats inventing a message here, since
+        // the rules live over there.
+        let reason = out.stderr.trim();
+        return Err(if reason.is_empty() {
+            format!("rename failed (status {})", out.status)
+        } else {
+            reason.to_owned()
+        });
+    }
+    Ok(())
+}

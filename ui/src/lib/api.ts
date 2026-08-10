@@ -143,6 +143,8 @@ export type DockerReport = { containers: Container[] } | { unavailable: { reason
 
 export type AgentSession = {
   name: string;
+  /** A host-side display name, if one was set. Shown instead of `name`. */
+  alias?: string | null;
   pid: number | null;
   ageSeconds: number;
   attached: boolean;
@@ -747,6 +749,16 @@ export const api = {
    */
   serverDisconnect: (target: TargetRef) =>
     call<{ evicted: number; closed: boolean }>("server_disconnect", { target }),
+
+  /**
+   * Give a running session a display name every client can see.
+   *
+   * An **alias**, never a rename of the key: the key is how the daemon holds the
+   * session and how every client reattaches, so changing it would orphan running
+   * work.
+   */
+  serverAlias: (target: TargetRef, key: string, alias: string) =>
+    call<void>("server_alias", { target, key, alias }),
 
   claudeAccountStatus: () => call<ClaudeAccount>("claude_account_status"),
   claudeAccountSave: (token: string) => call<ClaudeAccount>("claude_account_save", { token }),

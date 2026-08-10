@@ -551,14 +551,46 @@ export const useWorkspace = create<State>((set, get) => ({
     schedulePersist(get);
   },
 
+  /**
+   * Rename a session here, and — where it means anything — on the host too.
+   *
+   * A rail row's name is local to this machine, which is fine until the same
+   * host is opened from a second computer and everything reads `term-01K9…`
+   * again. So a **terminal** also gets a host-side alias, written to a file the
+   * agent reads: `rmux-agent list` then reports the chosen name, and so does
+   * every other client.
+   *
+   * Claude sessions are deliberately local-only. Their rail name is frequently
+   * the conversation's own title, adopted automatically, and pushing every one
+   * of those to the host would fill the alias file with names nobody chose.
+   *
+   * The local rename is applied **first and unconditionally**. The host half is
+   * a nicety, and a host that is unreachable must not stop someone renaming a
+   * row in their own sidebar.
+   */
   renameSession: (id, name) => {
+    const clean = name.trim();
+    if (!clean) return;
+    const session = get().sessions.find((x) => x.id === id);
+    if (!session || session.name === clean) return;
+
     set((s) => ({
       sessions: s.sessions.map((x) =>
         // `renamed` latches: Claude's own title is ignored from here on.
-        x.id === id ? { ...x, name: name.trim() || x.name, renamed: true } : x,
+        x.id === id ? { ...x, name: clean, renamed: true } : x,
       ),
     }));
     schedulePersist(get);
+
+    if (session.kind !== "terminal" || !isTauri()) return;
+    const target = get().targetOf(id);
+    void api
+      .serverAlias(target, reattachName(session), clean)
+      .then(() => get().setSessionError(id, null))
+      // Surfaced rather than swallowed, because the row now shows a name the
+      // host does not know — and the next machine to look will disagree with
+      // this one. The local rename stands; this says the other half did not.
+      .catch((e) => get().setSessionError(id, e instanceof Error ? e.message : String(e)));
   },
 
   adoptClaudeTitle: (id, title) => {

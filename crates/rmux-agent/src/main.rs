@@ -11,7 +11,7 @@
 
 use std::process::ExitCode;
 
-use rmux_agent::{Hello, attach, daemon, status};
+use rmux_agent::{Hello, alias, attach, daemon, status};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -37,13 +37,18 @@ async fn main() -> ExitCode {
         }
 
         "attach" => {
-            let hello = match parse_attach(&args[1..]) {
+            let mut hello = match parse_attach(&args[1..]) {
                 Ok(hello) => hello,
                 Err(e) => {
                     eprintln!("rmux-agent: {e}");
                     return ExitCode::FAILURE;
                 }
             };
+            // **Resolved here, before `Hello`.** That is what keeps aliases out
+            // of the wire protocol entirely: the daemon only ever sees session
+            // keys, so an older daemon needs no changes to serve a renamed
+            // session. A name that is not an alias passes through unchanged.
+            hello.session = alias::resolve(&hello.session);
             match attach::attach(hello, true).await {
                 Ok(code) => code,
                 Err(e) => {
@@ -54,7 +59,7 @@ async fn main() -> ExitCode {
         }
 
         "kill" => {
-            let name = args.get(1).cloned().unwrap_or_default();
+            let name = args.get(1).map(|n| alias::resolve(n)).unwrap_or_default();
             if name.is_empty() {
                 eprintln!("rmux-agent: kill needs a session name");
                 return ExitCode::FAILURE;
@@ -102,10 +107,14 @@ async fn main() -> ExitCode {
         "list" => {
             match attach::list().await {
                 Ok(sessions) => {
+                    // Joined from the file rather than carried on the wire, so
+                    // sessions held by an older daemon still show their names.
+                    let aliases = alias::load();
                     for s in sessions {
                         println!(
-                            "{}\t{}\t{}\t{}\t{}",
+                            "{}\t{}\t{}\t{}\t{}\t{}",
                             s.name,
+                            aliases.get(&s.name).cloned().unwrap_or_else(|| "-".into()),
                             s.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
                             s.age_seconds,
                             if s.attached { "attached" } else { "detached" },
@@ -132,13 +141,41 @@ async fn main() -> ExitCode {
             }
         },
 
+        // Rename a running session. Writes the host-side alias file; no daemon
+        // is contacted, which is why this works across agent builds.
+        "alias" => {
+            let (Some(key), Some(name)) = (args.get(1), args.get(2)) else {
+                eprintln!("rmux-agent: alias needs a session name and a new name");
+                return ExitCode::FAILURE;
+            };
+            // The live set decides both whether the target exists and whether
+            // the new name would shadow something. Listing unions every daemon,
+            // so a session held by another build still counts.
+            let live: Vec<String> = match attach::list().await {
+                Ok(sessions) => sessions.into_iter().map(|s| s.name).collect(),
+                Err(e) => {
+                    eprintln!("rmux-agent: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Resolved so renaming twice works: the second rename names the
+            // session by the alias the first one gave it.
+            match alias::set(&alias::resolve(key), name, &live) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("rmux-agent: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
         "version" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
 
         _ => {
-            eprintln!("usage: rmux-agent <attach|daemon|kill|list|setenv|watch-status|version> [--session NAME] [--cwd DIR]");
+            eprintln!("usage: rmux-agent <attach|alias|daemon|kill|list|setenv|watch-status|version> [--session NAME] [--cwd DIR]");
             ExitCode::FAILURE
         }
     }
