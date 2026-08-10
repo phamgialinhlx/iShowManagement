@@ -3,6 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { record } from "../../lib/activity";
+import { linesForBlocks, lineOfOffset, offsetOfLine } from "../../lib/note-lines";
 import { MARKDOWN_COMPONENTS } from "../../lib/markdown-code";
 import { continueList, noteTasks, taskProgress, toggleTask } from "../../lib/note-tasks";
 
@@ -67,6 +68,19 @@ export function Note({ sessionId }: { sessionId: string }) {
   const timer = useRef<number | undefined>(undefined);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /**
+   * The line the reader was on, carried across the switch between the two faces
+   * of this note.
+   *
+   * Rendered markdown and raw source are **different scrollers with different
+   * content**, so a scroll offset does not survive the switch: the textarea is
+   * `h-full` and scrolls inside itself, while the rendered note makes the box
+   * around it scroll. Neither knows the other's position, which is why clicking
+   * to edit opened at the top and clicking away went back to the top. A *line*
+   * survives where a pixel offset cannot.
+   */
+  const enterAt = useRef<number | null>(null);
+  const leaveAt = useRef<number | null>(null);
 
   /**
    * Put the scroller back where this session left it.
@@ -87,6 +101,60 @@ export function Note({ sessionId }: { sessionId: string }) {
     // that no longer exists.
     el.scrollTop = Math.min(at, Math.max(0, el.scrollHeight - el.clientHeight));
   }, [sessionId, text, editing, height]);
+
+  /**
+   * Label each rendered block with the source line it came from, and put the
+   * reader back on the line they were editing.
+   *
+   * The labelling is done here rather than in the markdown components because
+   * `react-markdown` **strips `node.position`** — measured in this file already,
+   * where the task checkboxes had to fall back to document order for the same
+   * reason. Document order is parse order, so the blocks are matched against the
+   * source in order, forward only (`linesForBlocks`).
+   *
+   * A layout effect, so the scroll lands in the frame the content is laid out
+   * in: with a plain effect the note paints at the top first and the restore
+   * reads as a jump — the same reason the offset restore below is one.
+   */
+  useLayoutEffect(() => {
+    if (editing) return;
+    const root = scrollRef.current?.querySelector<HTMLElement>(".note-rendered");
+    if (!root) return;
+
+    // Leaf blocks only. A loose list renders `li > p`, and counting both would
+    // consume two source lines for one block and drag every later match out of
+    // step.
+    const all = [...root.querySelectorAll<HTMLElement>("p, li, h1, h2, h3, h4, h5, h6, pre, blockquote")];
+    const blocks = all.filter((el) => !all.some((other) => other !== el && el.contains(other)));
+
+    const lines = linesForBlocks(text, blocks.map((el) => el.textContent ?? ""));
+    blocks.forEach((el, i) => {
+      const line = lines[i]!;
+      if (line >= 0) el.dataset.line = String(line);
+      else delete el.dataset.line;
+    });
+
+    const want = leaveAt.current;
+    leaveAt.current = null;
+    if (want === null) return;
+
+    // The nearest labelled block at or above the line being edited — a blank
+    // line, or one inside a fenced block, has no element of its own.
+    let best: HTMLElement | null = null;
+    for (const el of blocks) {
+      const line = Number(el.dataset.line);
+      if (Number.isFinite(line) && line <= want) best = el;
+    }
+    const scroller = scrollRef.current;
+    if (!best || !scroller) return;
+
+    const top =
+      best.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top +
+      scroller.scrollTop;
+    scroller.scrollTop = Math.max(0, top - 8);
+    scrollOf.set(sessionId, scroller.scrollTop);
+  }, [editing, text, sessionId, height]);
 
   // Reloaded per session, and *not* merged: switching sessions must show the
   // other note, never this one's text under the other one's name.
@@ -121,6 +189,19 @@ export function Note({ sessionId }: { sessionId: string }) {
     [sessionId],
   );
 
+  /**
+   * Remember the line the caret is on, before the editor goes away.
+   *
+   * Called from **every** exit — blur, DONE, Escape — because a note that keeps
+   * your place from one of the three and loses it from the others is harder to
+   * trust than one that never keeps it. Read at the moment of leaving, since the
+   * textarea is unmounted immediately afterwards.
+   */
+  const rememberCaret = () => {
+    const el = areaRef.current;
+    if (el) leaveAt.current = lineOfOffset(el.value, el.selectionStart);
+  };
+
   const change = (value: string) => {
     setText(value);
     save(value);
@@ -146,9 +227,18 @@ export function Note({ sessionId }: { sessionId: string }) {
     if (!editing) return;
     const el = areaRef.current;
     if (!el) return;
-    el.focus();
-    const at = el.value.length;
+
+    const line = enterAt.current;
+    enterAt.current = null;
+    const at = line === null ? el.value.length : offsetOfLine(el.value, line);
+
+    // **Selection first, focus second.** A textarea scrolls to its caret when it
+    // *gains* focus; setting the range afterwards moves the caret without moving
+    // the view, which is how the editor opened at the top with the caret
+    // somewhere off-screen. This order also handles wrapped lines correctly,
+    // which arithmetic on a line height does not.
     el.setSelectionRange(at, at);
+    el.focus();
   }, [editing]);
 
   /**
@@ -206,6 +296,7 @@ export function Note({ sessionId }: { sessionId: string }) {
     // Escape renders. A note in a narrow rail can be fiddly to click out of, and
     // there should always be a keyboard way back to reading it.
     if (e.key === "Escape") {
+      rememberCaret();
       setEditing(false);
       return;
     }
@@ -289,6 +380,7 @@ export function Note({ sessionId }: { sessionId: string }) {
           // it straight back on.
           onMouseDown={(e) => {
             e.preventDefault();
+            if (editing) rememberCaret();
             setEditing((on) => !on);
           }}
           title={editing ? "Render the markdown" : "Edit the raw markdown"}
@@ -315,7 +407,10 @@ export function Note({ sessionId }: { sessionId: string }) {
             onKeyDown={onKeyDown}
             // Clicking away renders it — the behaviour asked for, and the one
             // people already expect from an inline editor.
-            onBlur={() => setEditing(false)}
+            onBlur={() => {
+              rememberCaret();
+              setEditing(false);
+            }}
             className="data h-full w-full resize-none bg-transparent text-[11px] leading-relaxed outline-none"
             style={{ color: "var(--text)" }}
           />
@@ -326,6 +421,11 @@ export function Note({ sessionId }: { sessionId: string }) {
             // gesture; the effect above takes it deliberately instead.
             onMouseDown={(e) => {
               e.preventDefault();
+              // The line under the pointer, so the editor opens where the eye
+              // already is rather than at the top or the end.
+              const block = (e.target as HTMLElement).closest<HTMLElement>("[data-line]");
+              const line = block ? Number(block.dataset.line) : NaN;
+              enterAt.current = Number.isFinite(line) ? line : null;
               setEditing(true);
             }}
           >
