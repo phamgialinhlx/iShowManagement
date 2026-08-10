@@ -4,6 +4,7 @@ import { deckCells } from "./grid";
 import {
   match,
   moveFocus,
+  requestTerminalFocus,
   readBindings,
   requestView,
   type ActionId,
@@ -89,7 +90,14 @@ export function useShortcuts(options: {
           // real destination — you move into it to open something there — so it
           // takes the focus and simply leaves the active session alone.
           const landed = panes[to];
-          if (landed?.kind === "session") state.activate(landed.id);
+          if (landed?.kind === "session") {
+            state.activate(landed.id);
+            // **And give it the keyboard.** Moving the focus ring without moving
+            // the cursor means the next thing typed goes to the pane just left,
+            // which is worse than not moving at all — the screen says one thing
+            // and the keystrokes do another.
+            requestTerminalFocus(landed.id);
+          }
           return;
         }
 

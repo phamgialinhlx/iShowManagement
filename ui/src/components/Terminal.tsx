@@ -11,6 +11,7 @@ import { record } from "../lib/activity";
 import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
 import { gpuRendering, terminalTheme } from "../lib/terminal-theme";
+import { FOCUS_EVENT } from "../lib/shortcuts";
 import { readMonoStack } from "../lib/fonts";
 import { scaledFontSize } from "../lib/terminal-font";
 
@@ -45,11 +46,21 @@ export function TerminalView({
   ptyId,
   onOpened,
   onExit,
+  answersFocusRequests = true,
 }: {
   target: TargetRef;
   cwd?: string;
   /** The rmux session this shell belongs to, for the activity tally only. */
   sessionId?: string;
+  /**
+   * Whether a pane-switch should put the keyboard here.
+   *
+   * True for the terminal that *is* a session. False for a **companion** shell,
+   * which shares its conversation's id: without this both would answer the same
+   * event and whichever mounted last would win, so switching to a Claude pane
+   * would land the cursor in the side shell about half the time.
+   */
+  answersFocusRequests?: boolean;
   /**
    * Stable name for the shell on the target.
    *
@@ -349,6 +360,25 @@ export function TerminalView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Take the keyboard when a pane switch lands here.
+   *
+   * The mousedown handler below does this for a click; this does it for the
+   * keyboard, which otherwise moved the focus ring and left the cursor behind.
+   * Two frames of grace, because a tile may still be laying out when the event
+   * arrives and `focus()` on a hidden element does nothing.
+   */
+  useEffect(() => {
+    if (!answersFocusRequests || !sessionId) return;
+    const onFocus = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId: string }>).detail;
+      if (detail?.sessionId !== sessionId) return;
+      requestAnimationFrame(() => requestAnimationFrame(() => termRef.current?.focus()));
+    };
+    window.addEventListener(FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(FOCUS_EVENT, onFocus);
+  }, [answersFocusRequests, sessionId]);
 
   return (
     <div

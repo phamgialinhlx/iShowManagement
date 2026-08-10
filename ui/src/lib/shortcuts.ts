@@ -443,3 +443,27 @@ export type ViewName = "claude" | "files" | "transcript" | "jira" | "git";
 export function requestView(sessionId: string, view: ViewName): void {
   window.dispatchEvent(new CustomEvent(VIEW_EVENT, { detail: { sessionId, view } }));
 }
+
+/**
+ * Ask a session's terminal to take the keyboard.
+ *
+ * Moving between tiles used to change only *state* — the focus ring moved, the
+ * rail followed, and the keyboard stayed wherever it was. So you could switch to
+ * a pane, start typing, and watch the characters go to the pane you had just
+ * left. Reported as switching the focus but not the cursor.
+ *
+ * Addressed by session id and dispatched on `window`, the same shape as
+ * `VIEW_EVENT`, and for the same reason: the terminal that must take focus is
+ * mounted inside a pane this code cannot reach, and a ref threaded up through
+ * the deck would have to be kept in step with every layout change. A pane that
+ * is not the addressee ignores it — which is also what stops one chord focusing
+ * sixteen terminals in a 4x4.
+ *
+ * A tile holding files, a host, or nothing has no terminal and simply does not
+ * answer. That is correct: there is nothing there to type into.
+ */
+export const FOCUS_EVENT = "rmux:focus-terminal";
+
+export function requestTerminalFocus(sessionId: string): void {
+  window.dispatchEvent(new CustomEvent(FOCUS_EVENT, { detail: { sessionId } }));
+}

@@ -17,6 +17,7 @@ import { scaledFontSize } from "../lib/terminal-font";
 /** The size at 100%. Scaled by TEXT SIZE through xterm's own option. */
 const TERM_FONT_BASE = 12;
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
+import { FOCUS_EVENT } from "../lib/shortcuts";
 import { ContextMeter } from "./ContextMeter";
 import { BrowserReports } from "./BrowserReports";
 import { record } from "../lib/activity";
@@ -279,6 +280,28 @@ export function ClaudePanel({
       setSending(null);
     }
   };
+
+  /**
+   * Take the keyboard when a pane switch lands on this session.
+   *
+   * Moving between tiles changed only *state* — the focus ring moved and the
+   * rail followed, while the keyboard stayed where it was. So you could switch
+   * pane, type, and watch the characters arrive in the pane you had just left.
+   *
+   * Two frames of grace before focusing: the tile may still be laid out (or
+   * un-hidden) when the event arrives, and `focus()` on a `display:none`
+   * element does nothing at all — the switch would silently fail to move the
+   * cursor, which is the bug being fixed.
+   */
+  useEffect(() => {
+    const onFocus = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId: string }>).detail;
+      if (detail?.sessionId !== sessionId) return;
+      requestAnimationFrame(() => requestAnimationFrame(() => xtermRef.current?.focus()));
+    };
+    window.addEventListener(FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(FOCUS_EVENT, onFocus);
+  }, [sessionId]);
 
   useEffect(() => {
     const host = hostRef.current;

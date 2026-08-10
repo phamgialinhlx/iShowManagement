@@ -284,6 +284,10 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
               // after a restart rather than a second one being spawned.
               session={companionName(session.id)}
               sessionId={session.id}
+              // Shares the conversation's id, so it would answer the same
+              // focus request. Switching to a Claude pane means the
+              // conversation, not the shell beside it.
+              answersFocusRequests={false}
               ptyId={live}
               onOpened={(id) => setLive(companionKey(session.id), id)}
               onExit={() => clearLive(companionKey(session.id))}
