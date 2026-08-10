@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api, type TargetRef } from "../lib/api";
+import { MenuItem, MenuSurface } from "./Menu";
 import { describe, uploadFiles } from "../lib/upload";
 
 export type MenuTarget = {
@@ -47,21 +48,6 @@ export function TreeMenu({
     if (prompt) inputRef.current?.focus();
   }, [prompt]);
 
-  // Dismiss on outside click or Escape, like every context menu.
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest("[data-tree-menu]")) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
 
   // Which path was just copied, so the menu can say so where it happened.
   const [copied, setCopied] = useState<"full" | "relative" | null>(null);
@@ -175,80 +161,9 @@ export function TreeMenu({
     );
   };
 
-  /**
-   * Keep the menu inside the window.
-   *
-   * A right-click near the bottom of a long file tree — which is most of them —
-   * put half the items below the edge of the app, unreachable and with no
-   * indication anything was missing. Delete was simply gone.
-   *
-   * **Flip before clamping.** A menu that grows *upward* from the cursor keeps
-   * the pointer on its edge, where the hand already is. Clamping instead slides
-   * the whole thing up so the cursor lands in the middle of the list, over
-   * whichever item happens to be there — which is how someone deletes a file
-   * they meant to rename. Clamping is the fallback for a menu too tall to fit
-   * either way.
-   *
-   * The scale is *measured* rather than assumed. Interface scale is `zoom` on
-   * `#root`, so `getBoundingClientRect` (viewport pixels) and the `top`/`left`
-   * this component writes (the zoomed coordinate space) are in different units.
-   * Dividing the rect by the element's own `offsetHeight` recovers the factor
-   * without this component needing to know where zoom is applied, or that it
-   * exists at all.
-   */
-  const menuRef = useRef<HTMLDivElement>(null);
-  const [placed, setPlaced] = useState({ x: menu.x, y: menu.y });
-  const [measured, setMeasured] = useState(false);
-
-  useLayoutEffect(() => {
-    const el = menuRef.current;
-    if (!el) return;
-
-    const rect = el.getBoundingClientRect();
-    // Falls back to 1 for a zero-height element, which would otherwise divide
-    // by zero and place the menu at NaN — i.e. nowhere.
-    const scale = el.offsetHeight > 0 ? rect.height / el.offsetHeight : 1;
-    const margin = 8;
-
-    let x = menu.x;
-    let y = menu.y;
-
-    const overflowY = rect.bottom - (window.innerHeight - margin);
-    if (overflowY > 0) {
-      const height = rect.height / scale;
-      const above = (menu.y * scale - margin) / scale;
-      // Flip if there is room above; otherwise clamp as far up as fits.
-      y = height <= above ? menu.y - height : Math.max(margin / scale, y - overflowY / scale);
-    }
-
-    const overflowX = rect.right - (window.innerWidth - margin);
-    if (overflowX > 0) {
-      const width = rect.width / scale;
-      x = Math.max(margin / scale, menu.x - width);
-    }
-
-    setPlaced({ x, y });
-    setMeasured(true);
-    // Re-measured whenever the menu's own content changes height — opening the
-    // rename prompt or the delete confirmation makes it a different size, and a
-    // position computed for the previous one is wrong for this one.
-  }, [menu.x, menu.y, prompt, confirming, uploading, error]);
 
   return (
-    <div
-      ref={menuRef}
-      data-tree-menu
-      className="menu fixed z-[80] min-w-[190px] p-1"
-      style={{
-        left: placed.x,
-        top: placed.y,
-        // Hidden for the one frame between "rendered at the cursor" and
-        // "measured and moved". Without it the menu is visibly drawn off the
-        // bottom of the window and then jumps, which looks like a glitch even
-        // though the end state is right.
-        visibility: measured ? "visible" : "hidden",
-      }}
-    >
+    <MenuSurface at={menu} onClose={onClose}>
       {prompt ? (
         <form onSubmit={submitPrompt} className="flex flex-col gap-2 p-2">
           <span className="micro">
@@ -415,49 +330,7 @@ export function TreeMenu({
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function MenuItem({
-  label,
-  onClick,
-  destructive,
-  disabled,
-  hint,
-}: {
-  label: string;
-  onClick: () => void;
-  destructive?: boolean;
-  disabled?: boolean;
-  /** Secondary text — used to name where an action will land. */
-  hint?: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className="data flex items-baseline gap-2 px-3 py-[5px] text-left text-[11px]"
-      style={{
-        color: disabled
-          ? "var(--text-faint)"
-          : destructive
-            ? "rgb(var(--primary))"
-            : "var(--text)",
-      }}
-      onMouseEnter={(e) => {
-        if (!disabled) e.currentTarget.style.background = "var(--hover)";
-      }}
-      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-    >
-      <span className="truncate">{label}</span>
-      {hint && (
-        <span className="micro ml-auto shrink-0 truncate" style={{ maxWidth: "9rem" }}>
-          {hint}
-        </span>
-      )}
-    </button>
+    </MenuSurface>
   );
 }
 
