@@ -16,6 +16,58 @@
 
 use std::process::ExitCode;
 
+/// Hand the secret to `ssh`, and **survive a pipe that has already closed**.
+///
+/// This was `println!`, and that is a crash. `println!` panics when stdout is a
+/// broken pipe, and the workspace sets `panic = "abort"` (`Cargo.toml`) — so an
+/// EPIPE became **SIGABRT** rather than an error return.
+///
+/// The window is not exotic: `ssh` goes away while the dialog is still open
+/// whenever the app quits mid-prompt, a ControlMaster is torn down, or a
+/// credential is refused. The helper then died without delivering anything, the
+/// connection failed, and rmux asked again — which the operator experiences as a
+/// **password prompt that will not stop coming back**, with nothing anywhere
+/// naming a broken pipe.
+///
+/// Writing to the raw descriptor rather than through `Stdout` matters too: the
+/// buffered writer defers the failure to a flush that happens after this
+/// function has already reported success, so the error would arrive with nobody
+/// left to return it to.
+fn deliver(answer: &str) -> ExitCode {
+    // OpenSSH reads the first line of stdout as the secret.
+    let mut bytes = answer.as_bytes().to_vec();
+    bytes.push(b'\n');
+
+    match write_stdout(&bytes) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("rmux-askpass: could not deliver the answer: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_stdout(bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::io::FromRawFd;
+
+    // Borrowed, never owned: `File` closes on drop, and closing fd 1 out from
+    // under the process would break any later write to stdout.
+    let mut out = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(1) });
+    out.write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_stdout(bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    // A console handle returns ERROR_BROKEN_PIPE as an `Err` rather than raising
+    // SIGPIPE, so the ordinary handle is enough here.
+    let mut out = std::io::stdout().lock();
+    out.write_all(bytes)?;
+    out.flush()
+}
+
 #[cfg(unix)]
 fn main() -> ExitCode {
     // Imported here rather than at the top: on Windows the whole body below is
@@ -74,11 +126,7 @@ fn main() -> ExitCode {
     };
 
     match response.get("answer").and_then(|a| a.as_str()) {
-        Some(answer) => {
-            // OpenSSH takes the first line of stdout as the secret.
-            println!("{answer}");
-            ExitCode::SUCCESS
-        }
+        Some(answer) => deliver(answer),
         // The user dismissed the dialog. Non-zero tells ssh to give up rather
         // than retrying with an empty password.
         None => ExitCode::FAILURE,
@@ -174,10 +222,7 @@ fn main() -> ExitCode {
     };
 
     match response.get("answer").and_then(|a| a.as_str()) {
-        Some(answer) => {
-            println!("{answer}");
-            ExitCode::SUCCESS
-        }
+        Some(answer) => deliver(answer),
         None => ExitCode::FAILURE,
     }
 }
