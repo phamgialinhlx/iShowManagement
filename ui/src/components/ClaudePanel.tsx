@@ -126,6 +126,7 @@ export function ClaudePanel({
   fullscreen,
   skipPermissions,
   modelProfile,
+  agentSession,
   headerActions,
 }: {
   sessionId: string;
@@ -148,6 +149,20 @@ export function ClaudePanel({
    * selected would leave a session talking to the last provider used.
    */
   modelProfile?: string;
+  /**
+   * The daemon session name to start (or reattach) under.
+   *
+   * Defaults to `claude-<sessionId>`, which is right for a conversation this
+   * machine created. An **adopted** session passes the exact name the host
+   * already knows it by — there is no derivation that recovers a name chosen by
+   * whoever started it, possibly on another machine.
+   *
+   * Getting this wrong is not a cosmetic failure: attaching to a name nothing
+   * answers to *creates* a session, so a mis-derived name silently starts a
+   * second Claude beside the one being adopted, and leaves the original running
+   * with nothing pointing at it.
+   */
+  agentSession?: string;
 }) {
   const setStatus = useWorkspace((s) => s.setStatus);
   const setClaudeSession = useWorkspace((s) => s.setLive);
@@ -392,7 +407,7 @@ export function ClaudePanel({
             target,
             cwd,
             resume,
-            sessionName: `claude-${sessionId}`,
+            sessionName: agentSession ?? `claude-${sessionId}`,
             fullscreen,
             skipPermissions,
             modelProfile,

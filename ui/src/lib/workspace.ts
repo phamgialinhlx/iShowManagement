@@ -76,6 +76,17 @@ const IDLE: Runtime = { status: "idle", error: null };
  *  `statusUpdatedAt`); it replaces the earlier edge-recorded `finishedAt`. */
 const SEEN_KEY = "rmux.seen";
 
+/**
+ * The folder of the synthetic project holding sessions adopted from a host.
+ *
+ * Not a path, and deliberately not one that could be: every real project is
+ * created from an absolute folder, so this can never collide with one. The
+ * project id is derived from `(server, folder)`, which makes the bucket dedupe
+ * itself without a scan — and without the failure mode of guessing the bucket
+ * from a folder someone might genuinely have opened.
+ */
+const RUNNING_FOLDER = "(running)";
+
 function loadSeen(): Record<string, number> {
   try {
     const raw = storage?.getItem(SEEN_KEY);
@@ -167,12 +178,26 @@ type State = Core & {
         | "claudeAccount"
         | "jiraProject"
         | "contextWindow"
+        | "renamed"
+        | "hostName"
       >
     >,
   ) => string;
   removeSession: (id: string) => void;
   /** Drop this machine's view; the session keeps running on the host. */
   detachSession: (id: string) => void;
+  /**
+   * Take over a session already running on `serverId`, by its host name.
+   *
+   * Idempotent: a session already in the rail is opened rather than adopted
+   * twice. Returns the row's id.
+   */
+  adoptServerSession: (
+    serverId: ServerId,
+    hostName: string,
+    kind: SessionKind,
+    alias?: string | null,
+  ) => string;
   removeProject: (id: ProjectId) => void;
   removeServer: (id: ServerId) => void;
 
@@ -463,6 +488,45 @@ export const useWorkspace = create<State>((set, get) => ({
     if (Object.keys(seen).length !== Object.keys(state.seen).length) persistSeen(seen);
     set({ ...ws, runtime, live, seen });
     schedulePersist(get);
+  },
+
+  adoptServerSession: (serverId, hostName, kind, alias) => {
+    // **Already here? Open it, do not adopt it again.** Adopting twice would put
+    // two rows in front of one shell, and the second would attach to the same
+    // PTY the first is already showing.
+    const existing = get().sessions.find((s) => reattachName(s) === hostName);
+    if (existing) {
+      get().openSession(existing.id);
+      return existing.id;
+    }
+
+    // A session running on a host has a working directory rmux did not choose
+    // and may never have seen — it may have been started from another machine.
+    // It still needs somewhere in the tree, so it gets a synthetic project.
+    //
+    // The folder is a **sentinel that cannot be a real one**: every genuine
+    // project is created from an absolute path, so `(running)` collides with
+    // nothing, and the project id derived from it dedupes this bucket for free.
+    // PR #9 used `~` and deduped on the flag instead, which stamps "running"
+    // onto a real project belonging to anyone who opened one at their home
+    // directory — a common thing to do.
+    const projectId = get().createProject(serverId, RUNNING_FOLDER, "running");
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === projectId ? { ...p, running: true } : p)),
+    }));
+
+    // The row is named by its alias when the host has one — that is the name a
+    // person chose, possibly on another machine — and by the raw session name
+    // otherwise. `renamed` latches so a Claude title cannot overwrite it.
+    const label = alias?.trim();
+    const id = get().addSession(projectId, kind, {
+      name: label || hostName,
+      renamed: !!label,
+      hostName,
+    });
+    get().openSession(id);
+    schedulePersist(get);
+    return id;
   },
 
   removeProject: (id) => {

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { useWorkspace } from "../lib/workspace";
 import { VIEW_EVENT } from "../lib/shortcuts";
-import type { SessionV3 } from "../lib/workspace-model";
+import { reattachName, type SessionV3 } from "../lib/workspace-model";
 import { ClaudePanel } from "./ClaudePanel";
 import { TranscriptView } from "./TranscriptView";
 import { JiraPanel } from "./JiraPanel";
@@ -212,7 +212,10 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
           <ClaudePanel
             sessionId={session.id}
             target={target}
-            cwd={folder}
+            // An adopted session's folder belongs to whoever started it, and the
+            // synthetic project holding it has none worth passing.
+            cwd={session.hostName ? undefined : folder}
+            agentSession={reattachName(session)}
             resume={session.resume}
             fullscreen={session.fullscreen}
             skipPermissions={session.skipPermissions}

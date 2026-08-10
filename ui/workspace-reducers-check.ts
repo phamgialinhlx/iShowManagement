@@ -8,7 +8,7 @@ import {
   closePane,
   type Core,
 } from "./src/lib/workspace-reducers.ts";
-import { serverId } from "./src/lib/workspace-model.ts";
+import { isClaudeSession, reattachName, serverId } from "./src/lib/workspace-model.ts";
 
 /**
  * The invariants the workspace store's pure transitions must keep. The Zustand
@@ -91,6 +91,43 @@ export function run(log: (line: string) => void): boolean {
     check("close clears the tile", ws.panes[0] === null);
     check("the session still exists after closing its pane", ws.sessions.some((s) => s.id === "claude-1"));
     check("closing an out-of-range tile is a no-op", closePane(ws, 99) === ws);
+  }
+
+  // ── Adopting a session that is already running on the host ────────────────
+  //
+  // The whole risk of this feature is naming. Attaching to a name the daemon
+  // does not hold *creates* a session, so a mis-derived name does not fail — it
+  // silently starts a second shell beside the one being adopted and leaves the
+  // original running with nothing pointing at it. PR #9 needed three commits to
+  // settle this; these are the two pure functions it turns on.
+  {
+    check(
+      "an adopted session attaches by its host name, not a derived one",
+      reattachName({ id: "anything", kind: "terminal", hostName: "term-from-another-mac" }) ===
+        "term-from-another-mac",
+    );
+    check(
+      "and that holds for Claude too, where the derived name would be prefixed",
+      reattachName({ id: "s1", kind: "claude", hostName: "claude-elsewhere" }) ===
+        "claude-elsewhere",
+    );
+
+    // The migration guarantee: without a host name, nothing about the old
+    // scheme may change, or every existing session reattaches to a name the
+    // daemon has never heard of.
+    check("a Claude session with no host name is still claude-<id>",
+      reattachName({ id: "s1", kind: "claude" }) === "claude-s1");
+    check("a terminal with no host name is still its bare id",
+      reattachName({ id: "term-1", kind: "terminal" }) === "term-1");
+
+    // Kind comes from the daemon's `command`, because an adopted session's name
+    // was chosen by whoever started it and carries no reliable prefix.
+    check("a bare claude command is a conversation", isClaudeSession("claude"));
+    check("so is one with arguments", isClaudeSession("claude --resume abc"));
+    check("a shell is not", !isClaudeSession("bash"));
+    check("and neither is a shell that merely mentions it",
+      !isClaudeSession('git commit -m "claude"'));
+    check("an unknown command is not a conversation", !isClaudeSession(undefined) && !isClaudeSession(null));
   }
 
   log("");

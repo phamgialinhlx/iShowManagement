@@ -61,7 +61,22 @@ export type NewSession = {
   projectId: ProjectId;
   kind: SessionKind;
   name: string;
-} & Partial<Pick<SessionV3, "resume" | "fullscreen" | "skipPermissions" | "modelProfile" | "claudeAccount" | "jiraProject" | "contextWindow">>;
+} & Partial<
+  Pick<
+    SessionV3,
+    | "resume"
+    | "fullscreen"
+    | "skipPermissions"
+    | "modelProfile"
+    | "claudeAccount"
+    | "jiraProject"
+    | "contextWindow"
+    | "renamed"
+    // Carried explicitly rather than surviving by accident through the spread
+    // below: an adopted session that loses `hostName` starts a second one.
+    | "hostName"
+  >
+>;
 
 /** Append a Session and make it active. The id is minted by the caller (it needs
  *  a clock/counter, which is not pure) and must already carry the right prefix. */

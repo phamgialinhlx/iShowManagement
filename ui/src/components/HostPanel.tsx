@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PanelLoader } from "./PanelLoader";
+import { useWorkspace } from "../lib/workspace";
+import { isClaudeSession, reattachName, type ServerId } from "../lib/workspace-model";
 import {
   api,
   isTauri,
@@ -60,7 +62,7 @@ const TABS: { id: Tab; label: string }[] = [
  * mean only the visible one polls: each of these is an SSH round trip on a
  * timer, and stacking them meant paying for all of them to look at one.
  */
-export function HostPanel({ target }: { target: TargetRef }) {
+export function HostPanel({ target, serverId }: { target: TargetRef; serverId: ServerId }) {
   const [tab, setTab] = useState<Tab>("processes");
 
   return (
@@ -88,7 +90,7 @@ export function HostPanel({ target }: { target: TargetRef }) {
         {tab === "processes" && <Processes target={target} />}
         {tab === "ports" && <Ports target={target} />}
         {tab === "docker" && <Docker target={target} />}
-        {tab === "sessions" && <Sessions target={target} />}
+        {tab === "sessions" && <Sessions target={target} serverId={serverId} />}
       </div>
     </div>
   );
@@ -643,9 +645,33 @@ function Docker({ target }: { target: TargetRef }) {
  * "I am using this from my other machine" from "this was left behind three days
  * ago", which is the whole question.
  */
-function Sessions({ target }: { target: TargetRef }) {
+/**
+ * What is running on the host, and the way back into it.
+ *
+ * This list already existed; what is new is that its rows are **actionable**.
+ * A session started here, detached, or started from another machine entirely
+ * shows up the same way — the daemon does not care which laptop opened it — so
+ * this is also how you pick up work from a different computer.
+ *
+ * The alternative was a second picker reached from the rail, which is what
+ * PR #9 built. It would have meant a second command listing the same sessions
+ * and a second surface to keep in step with this one. A list of what is running
+ * is the natural place to put "attach to it".
+ */
+function Sessions({ target, serverId }: { target: TargetRef; serverId: ServerId }) {
   const [rows, setRows] = useState<AgentSession[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [attaching, setAttaching] = useState<string | null>(null);
+
+  const adoptServerSession = useWorkspace((s) => s.adoptServerSession);
+  // Selected whole, then derived — a selector that filters returns a fresh array
+  // every call, which loops `useSyncExternalStore` into a white screen. The rail
+  // carries the same warning for the same reason.
+  const sessions = useWorkspace((s) => s.sessions);
+  const attachedHere = useMemo(
+    () => new Set(sessions.map((s) => reattachName(s))),
+    [sessions],
+  );
 
   const load = useCallback(async () => {
     if (!isTauri()) return;
@@ -693,6 +719,31 @@ function Sessions({ target }: { target: TargetRef }) {
           <span className="data w-[76px] shrink-0 text-right text-[11px] tabular-nums" style={{ color: "var(--text-soft)" }}>
             {gb(s.memory)}
           </span>
+
+          {/* Present as a state, not a disabled button: a greyed ATTACH invites
+              "how do I enable this", while a plain label answers it. */}
+          {attachedHere.has(s.name) ? (
+            <span className="micro shrink-0" style={{ color: "var(--text-faint)" }}>
+              IN RAIL
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="chip shrink-0"
+              disabled={attaching !== null}
+              title={`Open ${s.name} in the rail — it keeps running either way`}
+              onClick={() => {
+                setAttaching(s.name);
+                // Kind comes from the command the daemon reports: an adopted
+                // session's *name* was chosen by whoever started it and carries
+                // no reliable prefix.
+                adoptServerSession(serverId, s.name, isClaudeSession(s.command) ? "claude" : "terminal");
+                setAttaching(null);
+              }}
+            >
+              {attaching === s.name ? "ATTACHING…" : "ATTACH"}
+            </button>
+          )}
         </div>
       ))}
     </div>

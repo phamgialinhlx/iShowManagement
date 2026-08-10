@@ -53,7 +53,9 @@ function SessionPane({ session }: { session: SessionV3 }) {
       <div className="min-h-0 flex-1">
         <TerminalView
           target={target}
-          cwd={project?.folder}
+          // Adopted sessions carry no folder of ours: the synthetic project
+          // that holds them is a container, not a directory anyone chose.
+          cwd={session.hostName ? undefined : project?.folder}
           session={reattachName(session)}
           sessionId={session.id}
           ptyId={live}
@@ -73,7 +75,7 @@ function HostPane({ serverId }: { serverId: string }) {
     <div className="flex h-full min-h-0 flex-col">
       <PaneHeader label={serverId} detail="host" />
       <div className="min-h-0 flex-1">
-        <HostPanel target={server.target} />
+        <HostPanel target={server.target} serverId={server.id} />
       </div>
     </div>
   );

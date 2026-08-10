@@ -45,6 +45,19 @@ export type Project = {
   label: string;
   /** Latches once the operator renames it, so `label` stops tracking basename. */
   renamed?: boolean;
+  /**
+   * A holder for sessions adopted from the host, not a folder anyone chose.
+   *
+   * A session already running on a server has a working directory rmux did not
+   * pick and may never have seen — it could have been started from another
+   * machine. It still needs *somewhere* in the tree, so it gets a synthetic
+   * project rather than being forced into an unrelated real one.
+   *
+   * Marked rather than inferred from the folder: guessing "a project at `~` is
+   * the running bucket" would stamp this flag onto a real project someone
+   * genuinely opened at their home directory, which is a common thing to do.
+   */
+  running?: boolean;
 };
 
 export type SessionKind = "terminal" | "claude";
@@ -63,6 +76,21 @@ export type SessionV3 = {
   kind: SessionKind;
   name: string;
   renamed?: boolean;
+
+  /**
+   * The daemon session name to attach to **verbatim**, for adopted sessions.
+   *
+   * Normally the host name is derived from the id (`reattachName`), which works
+   * because this machine minted that id when it created the session. A session
+   * adopted from the host was named by whoever started it — possibly another
+   * machine, possibly weeks ago — so there is no derivation that recovers it.
+   *
+   * Every attach path must prefer this over `reattachName`, or adopting a
+   * session **starts a second one** beside the one it meant to join: same host,
+   * same folder, a fresh shell under a minted name, and the original still
+   * running detached where nothing points at it.
+   */
+  hostName?: string;
 
   // ── claude-only ──────────────────────────────────────────────────────────
   resume?: string;
@@ -121,8 +149,26 @@ export function projectId(server: ServerId, folder: string): ProjectId {
  * and is used verbatim. Migration therefore preserves ids, and this function
  * yields the identical name it did before the upgrade.
  */
-export function reattachName(s: Pick<SessionV3, "id" | "kind">): string {
+export function reattachName(s: Pick<SessionV3, "id" | "kind" | "hostName">): string {
+  // An adopted session carries the name the host already knows it by. Deriving
+  // one instead would name a session that does not exist, and attaching to a
+  // name nothing answers to *creates* it — a second shell beside the one being
+  // adopted.
+  if (s.hostName) return s.hostName;
   return s.kind === "claude" ? `claude-${s.id}` : s.id;
+}
+
+/**
+ * Is this daemon session a Claude conversation rather than a shell?
+ *
+ * Decided from the command the daemon reports, because that is the only thing
+ * that distinguishes them on the host — an adopted session's *name* was chosen
+ * by whoever started it and carries no reliable prefix. Matching `claude` and
+ * `claude …` rather than a substring, so a shell that happens to be running
+ * `git commit -m "claude"` is still a shell.
+ */
+export function isClaudeSession(command: string | null | undefined): boolean {
+  return command === "claude" || command?.startsWith("claude ") === true;
 }
 
 /**
