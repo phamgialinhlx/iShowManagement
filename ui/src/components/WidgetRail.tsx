@@ -24,6 +24,7 @@ import { ContextMeter } from "./ContextMeter";
 import { basename } from "../lib/workspace-model";
 import { useRailWidth } from "../lib/rail-width";
 import { RailGrip } from "./RailGrip";
+import { Goals } from "./widgets/Goals";
 import { useWorkspace } from "../lib/workspace";
 import { bench } from "../lib/debug-log";
 
@@ -524,7 +525,7 @@ function SessionWidget({
  * widget added after someone first dragged one is invisible to them forever,
  * with nothing to suggest why.
  */
-const INSTRUMENTS = ["clock", "host", "processes", "uplink", "usage", "sent", "jira", "note", "session"] as const;
+const INSTRUMENTS = ["clock", "goals", "host", "processes", "uplink", "usage", "sent", "jira", "note", "session"] as const;
 type InstrumentId = (typeof INSTRUMENTS)[number];
 
 const ORDER_KEY = "rmux.widgetRail.order";
@@ -641,6 +642,12 @@ function Instrument({
         return (
           <Widget title="MISSION TIME" onDragStart={start}>
             <Clock />
+          </Widget>
+        );
+      case "goals":
+        return (
+          <Widget title="TODAY" onDragStart={start}>
+            <Goals />
           </Widget>
         );
       case "host":
@@ -782,6 +789,7 @@ function Instruments({ session, customising }: { session: Active; customising: b
 /** Names for the switch list. The instruments carry their own headers. */
 const LABELS: Record<InstrumentId, string> = {
   clock: "CLOCK",
+  goals: "TODAY · GOALS",
   host: "HOST",
   processes: "TOP PROCESSES",
   uplink: "UPLINK",
