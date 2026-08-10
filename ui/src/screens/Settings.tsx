@@ -119,7 +119,25 @@ export function Settings() {
           ))}
         </nav>
 
-        <main className="min-h-0 flex-1 overflow-y-auto p-6">
+        {/*
+          Bottom padding belongs to the panel, not to the scroller.
+
+          Appearance ends in a `sticky bottom-0` Apply bar, and a sticky box is
+          clamped to its containing block — which ends at this element's
+          *content* edge. With `p-6` here that edge sat 24px above the
+          scrollport, so the bar pinned 24px short and a strip of the page kept
+          scrolling underneath it: a footer that read as a card floating over the
+          content. Measured at bar bottom 963 against scrollport 987, and only
+          removing this padding closed it — padding on the panel itself does
+          nothing, because the clamp is to the content box.
+
+          Every other panel gets the same 24px back via `pb-6` below, so nothing
+          else moves.
+        */}
+        <main className="min-h-0 flex-1 overflow-y-auto px-6 pt-6">
+          {/* Appearance owns its own bottom edge — its sticky Apply bar must be
+              able to reach the scrollport. Everything else gets the 24px back. */}
+          <div className={section === "appearance" ? undefined : "pb-6"}>
           {/* Each section is boundaried on its own: a failure reading the Claude
               credential must not take the lock controls down with it. */}
           {section === "claude" && (
@@ -167,6 +185,7 @@ export function Settings() {
               <CoworkPanel session={session} onSession={setSession} />
             </ErrorBoundary>
           )}
+          </div>
         </main>
       </div>
     </div>

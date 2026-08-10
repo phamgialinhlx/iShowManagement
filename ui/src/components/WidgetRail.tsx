@@ -91,10 +91,13 @@ function Widget({
   title,
   children,
   onDragStart,
+  note,
 }: {
   title: string;
   children: React.ReactNode;
   onDragStart?: (event: React.PointerEvent) => void;
+  /** A short status beside the title — staleness, and nothing routine. */
+  note?: React.ReactNode;
 }) {
   return (
     <section className="inset" style={{ border: "1px solid var(--border)" }}>
@@ -109,7 +112,12 @@ function Widget({
         }}
         onPointerDown={onDragStart}
       >
-        <span className="micro">{title}</span>
+        <span className="flex min-w-0 items-baseline gap-2">
+          <span className="micro">{title}</span>
+          {/* Beside the title, so the warning is on the instrument it applies to
+              rather than in a corner the eye has to go looking for. */}
+          {note}
+        </span>
         {/* A tick mark, not an icon: it reads as instrument chrome. Grip bars
             when the widget can be moved, so the affordance is visible rather
             than something you have to try. */}
@@ -164,6 +172,20 @@ function Row({ label, value }: { label: string; value: string }) {
 function useHostSample(target: TargetRef, enabled: boolean) {
   const [sample, setSample] = useState<MetricsSample | null>(null);
   const [failed, setFailed] = useState(false);
+  /**
+   * When a reading last actually arrived.
+   *
+   * Without this a host that stops answering renders its **last good sample
+   * forever**, identical to a live one: `failed` was only ever surfaced when
+   * there was no sample at all, so the first failure was invisible and every
+   * one after it too. Reported as "why is the host widget freezing?" — which is
+   * exactly the right question and the widget had no way to answer it.
+   *
+   * Numbers on a dashboard carry an implicit claim about *when* they were true.
+   * A frozen reading breaks that claim silently, which is worse than an error:
+   * an error is at least visibly wrong.
+   */
+  const [lastOkAt, setLastOkAt] = useState<number | null>(null);
   const [cpuHistory, setCpuHistory] = useState<number[]>([]);
   const [ramHistory, setRamHistory] = useState<number[]>([]);
   // A rolling window of recent throughput, not an all-time maximum.
@@ -187,6 +209,7 @@ function useHostSample(target: TargetRef, enabled: boolean) {
         if (cancelled) return;
         setSample(next);
         setFailed(false);
+        setLastOkAt(Date.now());
 
         // A fixed-length window: the chart's x-axis is "the last 30 samples",
         // so an unbounded buffer would silently change what it means.
@@ -250,7 +273,42 @@ function useHostSample(target: TargetRef, enabled: boolean) {
   // either way, which is correct — an idle link *is* empty.
   const netPeak = Math.max(1, ...netHistory);
 
-  return { sample, failed, cpuHistory, ramHistory, netPeak };
+  return { sample, failed, lastOkAt, cpuHistory, ramHistory, netPeak };
+}
+
+/**
+ * How long since this reading was true — shown only once it stops being now.
+ *
+ * Its own ticker, because the whole point is that **nothing else is updating**:
+ * derived on render alone the age would freeze at whatever it was when the last
+ * poll failed, which is the same lie in smaller print. The timer exists only
+ * while the reading is actually stale, so a healthy widget adds no wakeups —
+ * the rule the host poller's own gating is there to serve.
+ */
+const STALE_AFTER_MS = 6000; // three missed 2s polls: one blip is not an outage
+
+function Staleness({ lastOkAt }: { lastOkAt: number | null }) {
+  const [, tick] = useState(0);
+  const age = lastOkAt === null ? null : Date.now() - lastOkAt;
+  const stale = age !== null && age > STALE_AFTER_MS;
+
+  useEffect(() => {
+    if (!stale) return;
+    const timer = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, [stale]);
+
+  if (!stale || age === null) return null;
+
+  const secs = Math.round(age / 1000);
+  const label = secs < 90 ? `${secs}S` : `${Math.round(secs / 60)}M`;
+  return (
+    // Accent, because this *is* the "you must act" case for an instrument: the
+    // machine it is describing has stopped answering.
+    <span className="micro" style={{ color: "rgb(var(--primary))" }} title={`No reading for ${secs}s`}>
+      STALE {label}
+    </span>
+  );
 }
 
 /** The host: name, uptime, CPU / RAM / NET, and their recent history. */
@@ -277,7 +335,7 @@ function HostWidget({
   }
 
   return (
-    <Widget title="HOST" onDragStart={onDragStart}>
+    <Widget title="HOST" onDragStart={onDragStart} note={<Staleness lastOkAt={host.lastOkAt} />}>
       <HostStatus
         sample={host.sample}
         cpuHistory={host.cpuHistory}
@@ -306,7 +364,13 @@ function ProcessesWidget({
     : 0;
 
   return (
-    <Widget title="TOP PROCESSES" onDragStart={onDragStart}>
+    <Widget
+      title="TOP PROCESSES"
+      onDragStart={onDragStart}
+      // Same poller as HOST, so the two freeze together — and did. Marking only
+      // one would leave the other looking authoritative while it was not.
+      note={<Staleness lastOkAt={host.lastOkAt} />}
+    >
       <TopProcesses
         target={target}
         hostname={sample.hostname}
