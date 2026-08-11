@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>terminal frame-rate throttle</title>
+<style>
+  html, body { margin: 0; background: #111; color: #eee; font: 14px ui-monospace, monospace; }
+  #hint { padding: 24px; line-height: 1.7; }
+  b { color: #e63b2e; }
+</style>
+<div id="hint">
+  Open the console.<br>
+  Drives the real <code>coalesceOutput</code> throttle with real
+  <code>requestAnimationFrame</code>. It checks the invariant that matters:
+  <b>no bytes are lost or reordered</b>, and the buffer flushes on dispose.
+</div>
+<script type="module" src="/terminal-fps-check.ts"></script>
