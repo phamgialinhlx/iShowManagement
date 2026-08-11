@@ -73,8 +73,18 @@ cp target/release/rmux-agent "$OUT/rmux-agent"
 #
 # `--timestamp` contacts Apple's timestamp server, and `--options runtime` is
 # the hardened runtime. Both are required; neither is the default.
+# **`|| true` is load-bearing.** Under `set -euo pipefail` a `grep` that matches
+# nothing exits 1, `pipefail` propagates that out of the pipeline, and the failed
+# command substitution kills the script. On a machine with no Developer ID —
+# every CI runner — this exited 1 the instant the last agent finished compiling,
+# so the Linux and Windows artefacts were built and then thrown away. CI had
+# failed at this step since 0.2.12 and the log ended on a successful `Finished
+# release profile`, which reads as a passing build.
+#
+# Not having a certificate is a normal state here: the agents are signed only so
+# the macOS bundle can be notarised, and the branch below already says so.
 IDENTITY="${APPLE_SIGNING_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
-  | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+  | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/' || true)}"
 
 if [ -n "$IDENTITY" ]; then
   echo "==> signing the host agent as $IDENTITY"
