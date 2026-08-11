@@ -151,7 +151,9 @@ async fn the_installed_key_is_what_authenticates() {
 
     // A real keypair, generated the way the offer generates it.
     let marker = format!("rmux-live-test-{}", std::process::id());
-    let key_file = rmux_ssh::keys::key_path(&home, &format!("livetest-{marker}"));
+    // **A dotted name on purpose.** The undotted case passed while every IP
+    // address failed, because `with_extension` ate the last segment.
+    let key_file = rmux_ssh::keys::key_path(&home, &format!("10.0.0.1-livetest-{marker}"));
     let public = rmux_ssh::keys::ensure_local_key(&key_file, &marker).expect("generate");
     rmux_ssh::keys::install_key(&ssh as &dyn Target, &public).await.expect("install");
 
@@ -177,7 +179,7 @@ async fn the_installed_key_is_what_authenticates() {
     // Clean up before asserting, so a failure does not leave the host altered.
     purge(&ssh as &dyn Target).await;
     let _ = std::fs::remove_file(&key_file);
-    let _ = std::fs::remove_file(key_file.with_extension("pub"));
+    let _ = std::fs::remove_file(rmux_ssh::keys::public_path(&key_file));
 
     assert!(
         stdout.contains("authenticated-by-key"),

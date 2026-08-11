@@ -40,7 +40,11 @@ pub async fn ssh_key_status(target: TargetRef) -> Result<KeyOffer, String> {
     };
     let path = keys::key_path(&home()?, &host.label());
     Ok(KeyOffer {
-        have_key: path.exists() && path.with_extension("pub").exists(),
+        // Same trap as in `ensure_local_key`: a host with dots — every IP
+        // address — made `with_extension` name a file nothing writes, so this
+        // reported "no key" for a host that had one and offered again on every
+        // connection.
+        have_key: path.exists() && keys::public_path(&path).exists(),
         path: path.to_string_lossy().into_owned(),
     })
 }

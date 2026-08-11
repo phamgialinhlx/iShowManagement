@@ -372,6 +372,16 @@ connection while the operator had been told the problem was solved.
   — a fix for one host that breaks every other.
 - **Silent when there is no key.** Naming a file that does not exist makes ssh
   warn on every connection, turning a working host into a noisy one.
+- **A host with dots is not a filename with an extension.** `ssh-keygen -f
+  <path>` appends `.pub` to the *whole* name; `Path::with_extension("pub")`
+  replaces everything after the last dot. So
+  `rmux_yitec_192.168.100.22_ed25519` became `rmux_yitec_192.168.100.pub` — a
+  file nothing writes — and the key was generated correctly, then read back with
+  a bare "No such file or directory (os error 2)". It failed for **every IP
+  address** while passing against an `ssh_config` alias, which is why the live
+  test missed it: `contabo2` has no dots. The same class of mistake as the agent
+  socket's `file_stem`, from the other direction. `ssh_key_status` had it too,
+  so a host that *did* have a key was told it had none and re-offered for ever.
 - **A key is offered only to the host it was made for.** Another host's key is a
   wasted authentication attempt, and on a server counting failures it is a step
   toward a lockout.

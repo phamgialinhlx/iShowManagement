@@ -85,6 +85,26 @@ pub fn identity_args_for(host: &str) -> Vec<String> {
     }
 }
 
+/// Where `ssh-keygen -f <path>` puts the public half.
+///
+/// **Appended, never `with_extension`.** `ssh-keygen` adds `.pub` to the whole
+/// filename; `Path::with_extension` *replaces* everything after the last dot.
+/// For a host with dots in it — which is to say every IP address —
+/// `rmux_yitec_192.168.100.22_ed25519` became `rmux_yitec_192.168.100.pub`,
+/// a file nothing ever writes. The key was generated correctly and reading it
+/// back failed with a bare "No such file or directory (os error 2)", so the
+/// offer looked broken on exactly the hosts most likely to need it, while
+/// working perfectly against an ssh_config alias like `devbox`.
+///
+/// This is the same trap as the agent socket's `file_stem`, recorded in
+/// CLAUDE.md, arrived at from the other direction: a name with dots is not a
+/// name with an extension.
+pub fn public_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".pub");
+    PathBuf::from(name)
+}
+
 /// Generate a keypair if one is not already there, and return the public half.
 ///
 /// **ed25519, not RSA.** Small, fast, and supported by every OpenSSH since 6.5
@@ -95,7 +115,7 @@ pub fn identity_args_for(host: &str) -> Vec<String> {
 /// re-generating would orphan the key already installed on other hosts and
 /// leave the operator locked out of every one of them.
 pub fn ensure_local_key(path: &Path, comment: &str) -> anyhow::Result<String> {
-    let public = path.with_extension("pub");
+    let public = public_path(path);
     if path.exists() && public.exists() {
         return Ok(std::fs::read_to_string(&public)?.trim().to_string());
     }
@@ -211,6 +231,71 @@ pub async fn install_key(target: &dyn Target, public_key: &str) -> anyhow::Resul
     } else {
         Installed::Added
     })
+}
+
+#[cfg(test)]
+mod public_path_tests {
+    use super::*;
+
+    /// **A host with dots is not a filename with an extension.**
+    ///
+    /// `ssh-keygen -f <path>` writes `<path>.pub`, appending to the whole name.
+    /// `Path::with_extension("pub")` *replaces* everything after the last dot,
+    /// so `rmux_yitec_192.168.100.22_ed25519` became
+    /// `rmux_yitec_192.168.100.pub` — a file nothing writes. Reading it back
+    /// failed with a bare "No such file or directory (os error 2)", so the key
+    /// offer was broken for **every IP address** while working perfectly
+    /// against an ssh_config alias.
+    ///
+    /// The same class of mistake as the agent socket's `file_stem`, which
+    /// CLAUDE.md already records. This is the version that pins it.
+    #[test]
+    fn the_public_half_is_appended_not_substituted() {
+        let path = Path::new("/home/x/.ssh/rmux_yitec_192.168.100.22_ed25519");
+        assert_eq!(
+            public_path(path).to_string_lossy(),
+            "/home/x/.ssh/rmux_yitec_192.168.100.22_ed25519.pub",
+            "ssh-keygen appends `.pub` to the whole name"
+        );
+
+        // What the bug did, stated so nobody reintroduces it thinking it is
+        // equivalent.
+        assert_ne!(
+            public_path(path),
+            path.with_extension("pub"),
+            "with_extension eats the last dotted segment — that was the bug"
+        );
+    }
+
+    #[test]
+    fn an_undotted_host_is_unaffected() {
+        let path = Path::new("/home/x/.ssh/rmux_devbox_ed25519");
+        assert_eq!(
+            public_path(path).to_string_lossy(),
+            "/home/x/.ssh/rmux_devbox_ed25519.pub",
+            "the case that always worked must keep working"
+        );
+    }
+
+    /// End to end against a real `ssh-keygen`: generate with a dotted host name
+    /// and read the public half back. This is the assertion the operator's
+    /// failure would have tripped — a unit test on paths alone could still be
+    /// wrong about what ssh-keygen actually writes.
+    #[test]
+    fn a_dotted_host_generates_and_reads_back() {
+        let dir = std::env::temp_dir().join(format!("rmux-keys-{}", std::process::id()));
+        let path = key_path(&dir, "yitec@192.168.100.22");
+
+        let public = ensure_local_key(&path, "rmux@test").expect("generate");
+        assert!(public.starts_with("ssh-ed25519 "), "got: {public}");
+
+        // Calling again must find the pair rather than regenerating it —
+        // regenerating would orphan the key already installed on every host.
+        let again = ensure_local_key(&path, "rmux@test").expect("second call");
+        assert_eq!(public, again, "a second call must return the same key");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
