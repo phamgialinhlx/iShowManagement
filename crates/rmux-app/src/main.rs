@@ -1,38 +1,25 @@
 //! rmux — native gpui shell (scaffold).
 //!
-//! This is the vendoring-validation entry point: it proves the copied Zed
-//! presentation stack builds and runs from this workspace. The real workspace
-//! shell (panes/docks/tabs) replaces `Scaffold` from here.
+//! Current milestone: one native terminal tab running a local login shell,
+//! emulated by `alacritty_terminal` and painted by gpui. The workspace shell
+//! (panes/docks/tabs) grows around this.
 
-use gpui::{
-    App, Bounds, Context, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
-};
+mod terminal;
+
+use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_platform::application;
 
-struct Scaffold;
-
-impl Render for Scaffold {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .size_full()
-            .bg(rgb(0x14110f))
-            .justify_center()
-            .items_center()
-            .text_color(rgb(0xe8e6e1))
-            .child("rmux — gpui vendoring works")
-    }
-}
+use crate::terminal::TerminalView;
 
 fn main() {
     application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(720.), px(480.)), cx);
+        let bounds = Bounds::centered(None, size(px(900.), px(600.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| Scaffold),
+            |window, cx| cx.new(|cx| TerminalView::new(window, cx)),
         )
         .unwrap();
         cx.activate(true);

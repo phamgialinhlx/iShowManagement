@@ -11,3 +11,7 @@ path = "src/main.rs"
 [dependencies]
 gpui = { path = "../../vendor/zed/crates/gpui" }
 gpui_platform = { path = "../../vendor/zed/crates/gpui_platform" }
+rmux-term.workspace = true
+rmux-transport.workspace = true
+alacritty_terminal.workspace = true
+anyhow.workspace = true

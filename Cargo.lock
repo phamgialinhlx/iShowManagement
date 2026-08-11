@@ -4838,8 +4838,12 @@ dependencies = [
 name = "rmux-app"
 version = "0.2.17"
 dependencies = [
+ "alacritty_terminal",
+ "anyhow",
  "gpui",
  "gpui_platform",
+ "rmux-term",
+ "rmux-transport",
 ]
 
 [[package]]
