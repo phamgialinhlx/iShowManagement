@@ -26,7 +26,11 @@ use rmux_transport::{CommandSpec, SshHostId, Target};
 /// in parallel each sees the other's key and the count assertion fails — while
 /// the code under test is fine. Measured: `got "2"` where one was expected.
 /// `persistence.rs` holds a mutex for the same reason, one directory over.
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// A **tokio** mutex rather than `std`: these tests await across the whole
+/// critical section, and a `std` guard held over an await blocks the runtime
+/// thread — which clippy rightly refuses.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Run a script and return **only what it printed**.
 ///
@@ -72,9 +76,10 @@ async fn a_key_is_installed_once_and_recognised_thereafter() {
         return;
     };
 
-    // Held for the whole test: the poison case is irrelevant here, since a
-    // panicking sibling means the run is already failing.
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // Held for the whole test. A tokio mutex has no poisoning, which suits a
+    // test: a panicking sibling should not also fail the next one for a reason
+    // unrelated to what it is checking.
+    let _serial = SERIAL.lock().await;
 
     let ssh = SshTarget::new(SshHostId { alias, user: None, port: None });
     ssh.connect().await.expect("connect");
@@ -137,7 +142,7 @@ async fn the_installed_key_is_what_authenticates() {
         return;
     };
 
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = SERIAL.lock().await;
 
     let home = dirs::home_dir().expect("home");
     let ssh = SshTarget::new(SshHostId { alias: alias.clone(), user: None, port: None });
