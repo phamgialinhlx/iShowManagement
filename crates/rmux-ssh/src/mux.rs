@@ -128,6 +128,16 @@ impl ControlMaster {
             .arg("-o")
             .arg("ServerAliveCountMax=3");
 
+        // **The key rmux installed, offered to the connection that authenticates.**
+        //
+        // Every client command is multiplexed through this master, so this is the
+        // one place credentials are actually checked. `~/.ssh/rmux_<host>_ed25519`
+        // is not a name OpenSSH tries by itself, so without this the key sits on
+        // the host being ignored and the password prompt returns for ever.
+        for arg in crate::keys::identity_args_for(&self.host.label()) {
+            cmd.arg(arg);
+        }
+
         if let Some(user) = &self.host.user {
             cmd.arg("-l").arg(user);
         }

@@ -355,6 +355,32 @@ daemon.
   signed and notarised on the developer's Mac by `scripts/release-mac.sh`; CI opens the release
   as a **draft** so that dmg can be added before anyone publishes it.
 
+## An installed key has to be offered, or nothing changes
+
+`ssh_key_install` writes rmux's public key to a host's `authorized_keys` and
+reports "key added". That was true and useless: the key lives at
+`~/.ssh/rmux_<host>_ed25519`, which is **not a name OpenSSH tries on its own**,
+and nothing passed `-i`. So the password prompt came back on the very next
+connection while the operator had been told the problem was solved.
+
+- **`-i` goes on the *master*.** Every client command is multiplexed through it,
+  so that is the only connection where credentials are checked. It is also passed
+  on client commands, for Windows, which has no ControlMaster and authenticates
+  per command.
+- **Additive, never exclusive.** `-i` appends to the identities ssh will try.
+  `IdentitiesOnly=yes` would suppress the operator's own keys and `~/.ssh/config`
+  — a fix for one host that breaks every other.
+- **Silent when there is no key.** Naming a file that does not exist makes ssh
+  warn on every connection, turning a working host into a noisy one.
+- **A key is offered only to the host it was made for.** Another host's key is a
+  wasted authentication attempt, and on a server counting failures it is a step
+  toward a lockout.
+- `tests/live_keys.rs` proves the part unit tests cannot: it installs a real key
+  and then connects with `BatchMode=yes`, `PasswordAuthentication=no` and
+  `IdentitiesOnly=yes`, so a successful login can only mean the key was used.
+  Those tests hold a `SERIAL` mutex — they share one `authorized_keys`, and in
+  parallel each counts the other's line.
+
 ## Managing the host
 
 - **A pid crosses the IPC bridge as a `u32`.** This is the one place the operator points at

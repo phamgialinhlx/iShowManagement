@@ -47,6 +47,44 @@ pub fn key_path(home: &Path, host: &str) -> PathBuf {
     home.join(".ssh").join(format!("rmux_{safe}_ed25519"))
 }
 
+/// The `-i` arguments for a host, if rmux has generated a key for it.
+///
+/// **Without this the whole feature does nothing.** rmux writes its key to
+/// `~/.ssh/rmux_<host>_ed25519`, which is not one of the names OpenSSH tries on
+/// its own — so the public half was installed on the host, the offer reported
+/// "key added", and the very next connection asked for a password again. The
+/// operator is then told the problem is solved while nothing has changed, which
+/// is worse than the feature not existing.
+///
+/// **Additive, never exclusive.** `-i` appends to the identities ssh will try;
+/// it does not suppress the defaults or anything from `~/.ssh/config`. Adding
+/// `IdentitiesOnly=yes` would make this exclusive and break every host that
+/// already authenticates with the operator's own key — a fix for one host that
+/// breaks the rest.
+///
+/// Empty when there is no such key, because naming a file that does not exist
+/// makes ssh warn about it on every single connection.
+pub fn identity_args(home: &Path, host: &str) -> Vec<String> {
+    let path = key_path(home, host);
+    if !path.exists() {
+        return Vec::new();
+    }
+    vec!["-i".to_owned(), path.to_string_lossy().into_owned()]
+}
+
+/// The same, resolving the home directory itself.
+///
+/// A convenience for the two call sites that build an `ssh` command line and
+/// have no reason to know where keys live. Silent when there is no home
+/// directory: a machine without one cannot have an rmux key either, so there is
+/// nothing to report.
+pub fn identity_args_for(host: &str) -> Vec<String> {
+    match dirs::home_dir() {
+        Some(home) => identity_args(&home, host),
+        None => Vec::new(),
+    }
+}
+
 /// Generate a keypair if one is not already there, and return the public half.
 ///
 /// **ed25519, not RSA.** Small, fast, and supported by every OpenSSH since 6.5
@@ -173,6 +211,75 @@ pub async fn install_key(target: &dyn Target, public_key: &str) -> anyhow::Resul
     } else {
         Installed::Added
     })
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    /// **The key must be offered, or installing it changes nothing.**
+    ///
+    /// rmux writes its key to `~/.ssh/rmux_<host>_ed25519`, which OpenSSH does
+    /// not try on its own. Without `-i` the public half sat in the host's
+    /// `authorized_keys` being ignored, the offer reported "key added", and the
+    /// next connection asked for a password again — the operator told the
+    /// problem was solved while nothing had changed.
+    #[test]
+    fn an_existing_key_is_offered_to_ssh() {
+        let home = std::env::temp_dir().join(format!("rmux-id-{}", std::process::id()));
+        let host = "192.168.100.22";
+        let path = key_path(&home, host);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not a real key").unwrap();
+
+        let args = identity_args(&home, host);
+        assert_eq!(args.len(), 2, "expected `-i <path>`, got {args:?}");
+        assert_eq!(args[0], "-i");
+        assert!(args[1].ends_with("rmux_192.168.100.22_ed25519"), "got {args:?}");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// **Nothing is offered when there is no key**, because naming a file that
+    /// does not exist makes ssh complain on every connection — turning a host
+    /// that works into one that prints a warning for ever.
+    #[test]
+    fn no_key_means_no_argument() {
+        let home = std::env::temp_dir().join(format!("rmux-id-none-{}", std::process::id()));
+        assert!(identity_args(&home, "never-used").is_empty());
+    }
+
+    /// A key belongs to one host. Offering another host's key would be a
+    /// pointless extra authentication attempt, and on a server counting failures
+    /// it is a step towards being locked out.
+    #[test]
+    fn a_key_is_not_offered_to_a_different_host() {
+        let home = std::env::temp_dir().join(format!("rmux-id-other-{}", std::process::id()));
+        let path = key_path(&home, "host-a");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not a real key").unwrap();
+
+        assert!(identity_args(&home, "host-b").is_empty(), "host-b must not get host-a's key");
+        assert!(!identity_args(&home, "host-a").is_empty(), "host-a must get its own");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `user@host` is the label a key is filed under, so the two must agree —
+    /// otherwise a key installed for `yitec@10.0.0.1` is never found again.
+    #[test]
+    fn a_user_qualified_host_finds_its_own_key() {
+        let home = std::env::temp_dir().join(format!("rmux-id-user-{}", std::process::id()));
+        let label = "yitec@192.168.100.22";
+        let path = key_path(&home, label);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not a real key").unwrap();
+
+        let args = identity_args(&home, label);
+        assert_eq!(args.len(), 2, "a user-qualified host must find its key: {args:?}");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
 
 #[cfg(test)]

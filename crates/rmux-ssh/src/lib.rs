@@ -320,6 +320,12 @@ impl SshTarget {
     fn ssh_argv(&self, tty: Tty) -> Vec<String> {
         let mut args = self.master.client_options();
 
+        // Also here, not only on the master: Windows has no ControlMaster, so
+        // every command there is its own connection and authenticates on its
+        // own. Harmless where multiplexing works — the socket answers before an
+        // identity is ever consulted.
+        args.extend(keys::identity_args_for(&self.host.label()));
+
         match tty {
             // `-t` forces TTY allocation even though our stdin is a pipe rather
             // than a terminal; without the second `-t` ssh refuses.
