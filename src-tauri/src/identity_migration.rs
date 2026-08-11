@@ -61,16 +61,16 @@ pub enum Outcome {
 /// starting with an empty workspace is bad, and refusing to start at all is
 /// worse.
 pub fn run(current: &str) -> Outcome {
-    let Some(home) = dirs::home_dir() else {
+    let Some(roots) = storage_roots() else {
         return Outcome::NothingToMigrate;
     };
-    let roots = [home.join("Library/WebKit"), home.join("Library/Application Support")];
+    let roots = roots.as_slice();
 
     // Both directories move together or the app ends up half-migrated — a
     // workspace with no background, or worse, a background setting pointing at a
     // file that is no longer there.
     for previous in PREVIOUS_IDENTIFIERS {
-        if roots.iter().all(|root| !has_content(&root.join(previous))) {
+        if roots.iter().all(|root: &std::path::PathBuf| !has_content(&root.join(previous))) {
             continue;
         }
         // The destination having content means this has already run, or the
@@ -79,7 +79,7 @@ pub fn run(current: &str) -> Outcome {
             return Outcome::AlreadyPresent;
         }
 
-        for root in &roots {
+        for root in roots {
             let from = root.join(previous);
             let to = root.join(current);
             if !has_content(&from) {
@@ -94,6 +94,48 @@ pub fn run(current: &str) -> Outcome {
     }
 
     Outcome::NothingToMigrate
+}
+
+/// The directories this platform keys by bundle identifier.
+///
+/// **The only platform-specific part of this module**, deliberately: everything
+/// below — what counts as content, the copy, the refusal to overwrite — is the
+/// same problem everywhere, and the rename costs an operator their whole
+/// workspace on any OS that namespaces storage by identifier. All of them do.
+///
+/// The addresses are measured on each platform rather than taken from the docs,
+/// because the webview store is the one that matters and it is not where the
+/// app's *own* data lives:
+///
+/// - **macOS**: `~/Library/WebKit/<id>/` is the WKWebView store holding
+///   `localStorage`; `~/Library/Application Support/<id>/` holds backgrounds,
+///   face models and the log.
+/// - **Windows**: `%LOCALAPPDATA%\<id>\` contains `EBWebView\`, which is
+///   WebView2's user data folder and therefore `localStorage`; `%APPDATA%\<id>\`
+///   holds the rest. Confirmed on a real machine mid-upgrade: both existed under
+///   `ai.betterscale.rmux`, with `EBWebView` and `logs` inside them and 14
+///   `rmux.` keys in the leveldb.
+/// - **Linux**: `~/.local/share/<id>/` and `~/.config/<id>/`, where WebKitGTK
+///   and Tauri put them.
+///
+/// macOS keeps `dirs::home_dir()` joins rather than `data_local_dir()`, which
+/// would resolve to `~/Library/Application Support` for *both* entries and
+/// migrate half the data. Returning `None` means "this platform does not
+/// namespace by identifier", which the caller reads as nothing to migrate.
+fn storage_roots() -> Option<Vec<std::path::PathBuf>> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir()?;
+        Some(vec![home.join("Library/WebKit"), home.join("Library/Application Support")])
+    }
+
+    // `data_local_dir` is `%LOCALAPPDATA%` and `config_dir` is `%APPDATA%` here,
+    // which is the pair Tauri derives the app's own directories from — so these
+    // are the same roots the running app will use under the new name.
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(vec![dirs::data_local_dir()?, dirs::config_dir()?])
+    }
 }
 
 /// Does this directory hold anything worth carrying over?
@@ -128,6 +170,84 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// This platform has somewhere to migrate from and to.
+    ///
+    /// `run` is a no-op the moment this returns `None` or the wrong pair, and it
+    /// is a **silent** one — the app starts with an empty rail and the operator
+    /// reads it as having lost their sessions, which is exactly how the macOS
+    /// half was reported ("oh no i lost all my session").
+    ///
+    /// The roots were macOS paths unconditionally, so on Windows and Linux this
+    /// module found nothing and every user upgrading past the rename would have
+    /// lost servers, projects, the session list, notes and shortcuts — with the
+    /// sessions still running on their hosts and no longer reachable from the
+    /// app. The tests below only exercised the copy helpers, which are platform
+    /// independent and were never the broken part.
+    #[test]
+    fn this_platform_has_storage_roots() {
+        let roots = storage_roots().expect("every supported platform namespaces by identifier");
+        assert_eq!(roots.len(), 2, "the webview store and the app data both move");
+        for root in &roots {
+            assert!(root.is_absolute(), "{root:?} must be absolute");
+        }
+        // Two names for one directory would copy the first onto the second and
+        // migrate half the data. `data_local_dir()` on macOS resolves to
+        // Application Support, which is why that platform is spelled out.
+        assert_ne!(roots[0], roots[1], "the two roots must be distinct");
+    }
+
+    /// The roots are real directories on *this* machine.
+    ///
+    /// This is the assertion that actually catches wrong addresses, and getting
+    /// it right took two attempts. The first version looked for a previous
+    /// install and skipped when it found none — but it asked `storage_roots()`
+    /// where to look, so wrong roots found nothing and the test **skipped
+    /// instead of failing**. Verified: with the macOS paths restored on Windows
+    /// it passed, green, while the migration silently did nothing. A check whose
+    /// escape hatch is computed from the thing under test cannot fail.
+    ///
+    /// Existence is independent of that, and it is exactly what separates a real
+    /// root from a plausible-looking one: `%LOCALAPPDATA%` is always there on
+    /// Windows, `~/Library` is always there on macOS, and neither exists on the
+    /// other. The parent is accepted because `~/Library/WebKit` appears only
+    /// once a WebKit app has run, while `~/Library` is unconditional.
+    #[test]
+    fn the_roots_exist_on_this_machine() {
+        let roots = storage_roots().expect("storage roots");
+        for root in &roots {
+            let usable = root.is_dir() || root.parent().is_some_and(Path::is_dir);
+            assert!(
+                usable,
+                "{root:?} is not a directory on this machine and neither is its \
+                 parent — these are another platform's paths, so the migration \
+                 would silently find nothing and the operator would open an empty \
+                 rail"
+            );
+        }
+    }
+
+    /// A previous install on this machine is found by the roots, not missed.
+    ///
+    /// Only meaningful on a machine mid-upgrade, and it says so rather than
+    /// skipping silently. Kept alongside the existence check because it is the
+    /// stronger statement when it can be made: not just "these directories are
+    /// real" but "the data is where we are looking".
+    #[test]
+    fn a_previous_install_is_found_where_it_lives() {
+        let roots = storage_roots().expect("storage roots");
+        let old = PREVIOUS_IDENTIFIERS[0];
+
+        if !roots.iter().any(|root| root.join(old).exists()) {
+            eprintln!("skipped: no {old} install on this machine");
+            return;
+        }
+        assert!(
+            roots.iter().any(|root| has_content(&root.join(old))),
+            "found {old} under one of {roots:?} but it looks empty — the roots \
+             and the content check disagree about where the data is"
+        );
+    }
 
     /// A directory of this test's own.
     ///

@@ -66,6 +66,15 @@ fn production_source(text: &str) -> &str {
     }
 }
 
+/// Is this line commentary rather than code?
+///
+/// Line comments only, which is all this codebase uses around spawn sites — a
+/// `/* */` block would need a stateful scan, and adding one for a shape that
+/// does not occur here would be more machinery than the rule is worth.
+fn is_comment(line: &str) -> bool {
+    line.trim_start().starts_with("//")
+}
+
 #[test]
 fn every_spawned_command_suppresses_the_console_window() {
     let root = repo_root();
@@ -85,6 +94,17 @@ fn every_spawned_command_suppresses_the_console_window() {
 
         for (i, line) in lines.iter().enumerate() {
             if !line.contains("Command::new(") {
+                continue;
+            }
+            // **Prose is not a spawn site.** This file's rule is about commands
+            // that actually run; a doc comment explaining *why* the rule exists
+            // spawns nothing. Without this the guard punishes documentation —
+            // and in a codebase that explains itself as heavily as this one, the
+            // pressure is then to write worse comments to satisfy a checker,
+            // which is precisely backwards. Caught when a Windows fix described
+            // the bug it was fixing and the guard failed the build over an
+            // English sentence.
+            if is_comment(line) {
                 continue;
             }
             checked += 1;

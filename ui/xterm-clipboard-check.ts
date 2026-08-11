@@ -232,6 +232,59 @@ setTimeout(async () => {
 
   tap.dispose();
 
+  // --- Ctrl+V must reach the platform, not the control-code table -----------
+  //
+  // xterm claims Ctrl+V for `\x16` and calls preventDefault, so the browser
+  // never raises a `paste` event and nothing can arrive. Cmd+V is not a control
+  // key and is never claimed, which is why paste worked on macOS and not on
+  // Windows. Nothing here implements paste — a second implementation is what
+  // made every paste arrive twice — so what is asserted is that the key is
+  // *released*, and that xterm still does the pasting when an event arrives.
+  const pasteTap: string[] = [];
+  const pasteWatch = term.onData((d) => pasteTap.push(d));
+
+  const pressCtrlV = (shift = false) => {
+    const ev = keyEvent({ ctrlKey: true, shiftKey: shift, key: "v", code: "KeyV", keyCode: 86, which: 86 });
+    textarea?.focus();
+    textarea?.dispatchEvent(ev);
+    return ev;
+  };
+
+  pasteTap.length = 0;
+  const ctrlV = pressCtrlV();
+  say(
+    `ctrl+v left for the platform: ${!ctrlV.defaultPrevented}` +
+      (isWindows ? "" : " (windows-only; the terminal keeps it here)"),
+  );
+  if (isWindows) {
+    say(`  no control code was sent: ${!pasteTap.join("").includes("\x16")}`);
+  } else {
+    // **Off Windows plain Ctrl+V must stay `\x16`** — readline's quoted-insert,
+    // which is how a literal control character gets typed. Ctrl+Shift+V is the
+    // paste key on Linux and was measured free of the terminal already, so
+    // there was never anything to fix there. Asserting this stops the Windows
+    // branch being widened to `!isMac` on the grounds that it looks tidier.
+    say(`  quoted-insert survives off windows: ${pasteTap.join("").includes("\x16")}`);
+  }
+
+  // Ctrl+Shift+V is never ours: the terminal does not claim it on any platform,
+  // so the browser's own paste already runs.
+  pasteTap.length = 0;
+  const ctrlShiftV = pressCtrlV(true);
+  say(`  ctrl+shift+v is left alone everywhere: ${!ctrlShiftV.defaultPrevented}`);
+
+  // The other half: when a paste *does* arrive, xterm delivers it. If this ever
+  // stops being true, releasing the key above would silently paste nothing.
+  pasteTap.length = 0;
+  const transfer = new DataTransfer();
+  transfer.setData("text/plain", "pasted-by-the-platform");
+  textarea?.dispatchEvent(
+    new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }),
+  );
+  await new Promise((r) => setTimeout(r, 150));
+  say(`  xterm still handles a paste event: ${pasteTap.join("").includes("pasted-by-the-platform")}`);
+  pasteWatch.dispose();
+
   // --- select mode: does disabling reporting locally actually stop it? ------
   const tracker = new MouseModeTracker();
   let reports = 0;

@@ -90,6 +90,23 @@ export function resetOffered(): void {
  * that does the wrong thing, which the interface rules forbid outright — and it
  * would be pressed, because the dialog that preceded it was real.
  */
+/**
+ * The offer's `user@host` string as the target rmux addresses elsewhere.
+ *
+ * The prompt names a host the way OpenSSH does — `yitec@192.168.100.22` — while
+ * every command in the app takes `{ host, user, port }`. Passing the joined
+ * string through as the *alias* would work, in that `ssh` accepts it, but it
+ * would be a different `TargetId` from the one this server already has: a second
+ * ControlMaster, a second authentication, and the password prompt this offer
+ * exists to end. Splitting it keeps the key install on the connection that is
+ * already open.
+ */
+export function targetOfOfferHost(host: string): { host: string; user?: string } {
+  const at = host.indexOf("@");
+  if (at <= 0) return { host };
+  return { host: host.slice(at + 1), user: host.slice(0, at) };
+}
+
 export function hostFromPrompt(message: string): string | null {
   // `anh@build-box's password:` and `anh@build-box's password for ...:` —
   // the form OpenSSH uses for password and keyboard-interactive auth.

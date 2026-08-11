@@ -8,7 +8,7 @@
  * structured field, so the destination is parsed out of text — and the rule is
  * that anything unrecognised yields no offer rather than a guess.
  */
-import { declineForever, allowAgain, hostFromPrompt, passwordUsed, resetOffered } from "./src/lib/ssh-key-offer";
+import { declineForever, allowAgain, hostFromPrompt, passwordUsed, resetOffered , targetOfOfferHost } from "./src/lib/ssh-key-offer";
 
 let failures = 0;
 function check(what: string, ok: boolean) {
@@ -62,6 +62,36 @@ check("an empty host is never offered", passwordUsed("", "msg") === false);
 
 if (saved === null) localStorage.removeItem("rmux.sshKey.declined");
 else localStorage.setItem("rmux.sshKey.declined", saved);
+
+
+// ── The target the install is actually addressed to ────────────────────────
+//
+// The offer names a host the way OpenSSH does, `user@host`; every rmux command
+// takes `{ host, user, port }`. Sending the joined string as a nested map is
+// what made this feature fail on every attempt with
+// `invalid type: map, expected a string` — before it reached the host at all.
+{
+  const split = targetOfOfferHost("yitec@192.168.100.22");
+  check(
+    `user@host splits into the shape Rust declares — ${JSON.stringify(split)}`,
+    split.host === "192.168.100.22" && split.user === "yitec",
+  );
+
+  const bare = targetOfOfferHost("build-box");
+  check(
+    `a bare alias carries no user — ${JSON.stringify(bare)}`,
+    bare.host === "build-box" && bare.user === undefined,
+  );
+
+  // An ssh_config alias goes to the ssh binary verbatim, so it must survive.
+  const alias = targetOfOfferHost("contabo2");
+  check(`an ssh alias is untouched — ${JSON.stringify(alias)}`, alias.host === "contabo2");
+
+  // Nothing sensible to split on: keep it whole rather than inventing an empty
+  // user, which would resolve to a different host entirely.
+  const odd = targetOfOfferHost("@weird");
+  check(`a leading @ is not treated as a user — ${JSON.stringify(odd)}`, odd.host === "@weird");
+}
 
 console.log(
   failures ? `%c ${failures} FAILED ` : "%c ALL PASS ",

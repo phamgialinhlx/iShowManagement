@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 
-import { OFFER_EVENT, declineForever, type KeyOffer } from "../lib/ssh-key-offer";
+import {
+  OFFER_EVENT,
+  declineForever,
+  targetOfOfferHost,
+  type KeyOffer,
+} from "../lib/ssh-key-offer";
 
 /**
  * The offer to stop typing a password on this host.
@@ -51,8 +56,13 @@ export function SshKeyOffer() {
     setBusy(true);
     setFailed(null);
     try {
+      // **The shape Rust actually declares.** This sent
+      // `{ kind: "ssh", host: { alias } }` — a nested map — and every attempt
+      // died on `invalid type: map, expected a string` before touching the
+      // host. `TargetRef` is `{ host, user?, port? }`, the same shape every
+      // other command here takes.
       const message = await invoke<string>("ssh_key_install", {
-        target: { kind: "ssh", host: { alias: offer.host } },
+        target: targetOfOfferHost(offer.host),
       });
       setResult(message);
       // Left on screen briefly rather than vanishing: this wrote to a file on

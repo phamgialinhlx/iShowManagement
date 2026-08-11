@@ -161,6 +161,42 @@ export function attachClipboard(xterm: Xterm): Disposer {
       return false;
     }
 
+    // **Ctrl+V: get out of the way and let the platform paste.**
+    //
+    // Same asymmetry as Ctrl+C, one key over, and measured the same way: xterm
+    // claims Ctrl+V for the control code `\x16` and calls `preventDefault`, so
+    // the browser never raises a `paste` event and nothing arrives. `Cmd+V` is
+    // not a control key, is never claimed, and on macOS the Edit menu routes it
+    // as well — so paste has always worked there and never on Windows.
+    //
+    // **Nothing is implemented here, deliberately.** Reading the clipboard and
+    // writing it into the terminal would be a second implementation of paste,
+    // which is exactly what made every paste arrive twice and is why this file
+    // exists. Returning `false` makes xterm skip the key *without* calling
+    // `preventDefault` — verified in its source: `_keyDown` returns the moment
+    // the custom handler refuses, before any of the encoding — so the browser
+    // performs its own paste and xterm's existing `paste` listener receives it.
+    // That keeps bracketed-paste mode correct too, which a hand-rolled version
+    // would have to get right on its own: without it a multi-line paste runs
+    // every line but the last.
+    //
+    // **Windows only, and the measurement is why.** Three chords were checked
+    // against a real xterm:
+    //
+    //     ctrl+V        claimed  → \x16, so no paste event is ever raised
+    //     ctrl+shift+V  free     → the platform already pastes
+    //     cmd+V         free     → the platform already pastes
+    //
+    // So plain Ctrl+V is the only broken one, and releasing anything else would
+    // change a platform that is not broken. Linux keeps plain Ctrl+V as
+    // readline's quoted-insert — `Ctrl+V Ctrl+M` to type a literal carriage
+    // return is a real thing people do — and pastes with Ctrl+Shift+V, which is
+    // the convention there and already works. On Windows, Ctrl+V *is* the paste
+    // key (Windows Terminal, VS Code), and nothing is lost by giving it up.
+    if (isWindows && event.ctrlKey && !event.shiftKey && !event.altKey && key === "v") {
+      return false;
+    }
+
     // Plain Ctrl+C stays SIGINT everywhere else, so terminal-local shortcuts
     // take Cmd on macOS and Ctrl+Shift elsewhere.
     const combo = isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && event.shiftKey;
