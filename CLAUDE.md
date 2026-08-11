@@ -1264,6 +1264,53 @@ connection that never touches this server, so there is no login gate — the app
 into the workbench and sign-in is a footer button. Restoring a stored session runs *beside* the
 app, never in front of it, so an unreachable server delays a footer label and nothing else.
 
+## A crash must say why it crashed
+
+A panic on a tokio worker took the whole app down and **nothing recorded why**.
+`panic = "abort"` means a panic *is* a SIGABRT, so the only artefact was a macOS
+crash report — against a `strip = true` binary, which symbolicates to nothing.
+Two rmux-agent crashes the same day had byte-identical stacks and neither could
+be attributed to a line.
+
+- **The log is where a panic has to land.** The message goes to stderr; a
+  Finder-launched `.app` has nowhere for stderr to go, and `logs.rs` mirrors
+  `tracing`, not stderr. So `rmux.log` — the file the operator exports when
+  asked what happened — held nothing about the crash at all.
+  `logs::route_panics_to_log` is installed immediately after the subscriber,
+  and `src-tauri/tests/panic_is_logged.rs` asserts on the *file*, not on the
+  hook being installed: "we called `set_hook`" is true whether or not a word
+  reaches the log.
+- **Handle a `String` payload, not just `&'static str`.** Every `unwrap` and
+  `expect` produces the formatted form, so a hook matching only the literal case
+  drops precisely the panics worth reading.
+- **Log the thread name.** The crash that prompted this was on a
+  `tokio-rt-worker` while the main thread sat in AppKit accessibility code; the
+  two read as entirely different bugs.
+- **`strip = "debuginfo"`, never `strip = true`.** The latter removes the symbol
+  *table* as well, so a shipped build's crash report cannot be symbolicated by
+  anyone, ever. Keeping the table costs about a megabyte and no runtime.
+- **The agent prints its subcommand.** `daemon`, `attach`, `watch-status` and
+  `list` are different code paths that produce identical crash reports, and its
+  stderr is interleaved into a pty on the far side of `ssh -tt` that nobody
+  reads. It uses `eprintln!` rather than `println!` — stdout is the protocol on
+  some subcommands, and a panic line injected into a frame stream corrupts the
+  very thing being debugged.
+- Still no `catch_unwind`: the profile aborts and that stays true. A panic is a
+  bug, and limping on with half a subsystem dead is worse than stopping. The
+  point is only that it says its own name on the way down.
+
+## Moving the checkout invalidates `target/`
+
+`env!("CARGO_BIN_EXE_…")` bakes an **absolute** path at compile time. Move the
+repository and every already-compiled test binary still points at the old
+location, so nine tests failed with a bare `No such file or directory` while
+passing individually — because running one recompiles it and running the
+workspace reuses the cache. Tauri's build script fails the same way, naming a
+`permissions/…toml` under the previous path.
+
+`cargo clean -p <crate>` for the affected packages is the fix; nothing about the
+source is wrong, and reading those failures as real bugs costs an afternoon.
+
 ## Conventions
 
 - **Never report something as ready before verifying the artefact itself.** Starting a build

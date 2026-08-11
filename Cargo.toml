@@ -112,7 +112,12 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 panic = "abort"
-strip = true
+# **`debuginfo`, not `true`.** `strip = true` removes the symbol *table* as well,
+# so a macOS crash report against a shipped build symbolicates to nothing at all
+# — which is exactly what happened: a reproducible panic, two crash reports, and
+# no way to name a single frame. Keeping the symbol table costs about 1 MB in
+# the binary and no runtime, and turns an unattributable abort into a stack.
+strip = "debuginfo"
 
 # The remote agent is uploaded over the wire on every version bump, so size matters
 # more than anything else about it.

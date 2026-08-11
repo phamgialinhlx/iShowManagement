@@ -15,8 +15,15 @@ use rmux_agent::{Hello, alias, attach, daemon, status};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // **Say which subcommand died.** The agent has crashed on its main thread
+    // more than once with nothing but a stripped macOS crash report to show for
+    // it, and `daemon`, `attach`, `watch-status` and `list` are completely
+    // different code paths that produce an identical report. stderr on the far
+    // side of `ssh -tt` is interleaved into a pty nobody is reading, so this
+    // prints somewhere the operator can actually reach.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("help");
+    install_panic_reporter(command);
 
     match command {
         "daemon" => {
@@ -215,4 +222,40 @@ fn parse_attach(args: &[String]) -> anyhow::Result<Hello> {
 
     anyhow::ensure!(!hello.session.is_empty(), "--session is required");
     Ok(hello)
+}
+
+
+/// Name the panic on the way down.
+///
+/// The agent aborts on panic (`panic = "abort"` is inherited from the release
+/// profile), so a panic is a SIGABRT and macOS writes a crash report against a
+/// stripped binary — which symbolicates to nothing. Two such reports arrived
+/// with byte-identical stacks and neither could be attributed to a line.
+///
+/// This costs one line of stderr and turns that into an answer.
+fn install_panic_reporter(command: &str) {
+    let command = command.to_owned();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        let thread = std::thread::current();
+        let who = thread.name().unwrap_or("<unnamed>").to_owned();
+
+        // `eprintln!` and not `println!`: stdout is the protocol on some of
+        // these subcommands, and injecting a panic line into a frame stream
+        // would corrupt the very thing being debugged.
+        eprintln!(
+            "rmux-agent panic: {message}\n  subcommand: {command}\n  at: {location}\n  thread: {who}"
+        );
+        previous(info);
+    }));
 }

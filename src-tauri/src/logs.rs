@@ -101,6 +101,58 @@ pub fn writer(app_data: &std::path::Path) -> Option<LogFile> {
     LogFile::open(&dir(app_data)).ok()
 }
 
+/// Route panics into the log, so a crash says why it crashed.
+///
+/// **Without this a crash is unattributable, and that is not hypothetical.**
+/// A panic on a tokio worker took the whole app down (`panic = "abort"`, so a
+/// panic *is* a SIGABRT), and finding out why was impossible: the message goes
+/// to stderr, a Finder-launched `.app` has nowhere for stderr to go, and the
+/// log mirrors `tracing` rather than stderr — so `rmux.log`, the file the
+/// operator exports when asked what happened, contained nothing at all. The
+/// only artefact was a macOS crash report against a `strip = true` binary,
+/// which symbolicates to nothing.
+///
+/// The default hook is still called afterwards, so behaviour on a terminal is
+/// unchanged; this only adds a copy that survives.
+///
+/// Deliberately not a `catch_unwind`: the profile aborts on panic and that
+/// stays true. A panic is a bug, and limping on with half a subsystem dead is
+/// worse than stopping — the point here is only that it says its own name.
+pub fn route_panics_to_log() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // `payload_as_str` covers both `panic!("literal")` and the formatted
+        // form; the latter is what every `unwrap`/`expect` produces, and taking
+        // only `&'static str` would have silently dropped exactly those.
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown location>".to_owned());
+
+        // The thread name is load-bearing: the crash that prompted this was on
+        // a `tokio-rt-worker` while the main thread sat in AppKit, and the two
+        // read as completely different bugs.
+        let thread = std::thread::current();
+        let who = thread.name().unwrap_or("<unnamed>").to_owned();
+
+        tracing::error!(
+            panic = %message,
+            location = %location,
+            thread = %who,
+            "rmux panicked — this aborts the process"
+        );
+
+        previous(info);
+    }));
+}
+
 /// What the UI needs to describe the log without reading it.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

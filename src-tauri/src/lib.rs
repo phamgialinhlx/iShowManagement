@@ -29,7 +29,7 @@ mod glass;
 mod identity_migration;
 mod keychain;
 mod lock;
-mod logs;
+pub mod logs;
 mod model_profile;
 mod services;
 mod settings_window;
@@ -84,6 +84,10 @@ pub fn run() {
         // A log file is a convenience; failing to start over one would be absurd.
         None => tracing_subscriber::fmt().with_env_filter(filter).init(),
     }
+
+    // After the subscriber, or the panic would be logged to nothing — which is
+    // the exact failure this exists to fix.
+    logs::route_panics_to_log();
 
     // **Before anything spawns a process.** A Finder-launched .app inherits
     // launchd's minimal PATH, so a `ProxyCommand` helper like `cloudflared` —
