@@ -173,12 +173,6 @@ fn a_remote_machine_can_be_browsed_edited_and_measured() {
             assert_eq!(mode & 0o777, 0o600, "a remote save changed the file mode: {mode:o}");
             assert_eq!(std::fs::read_to_string(&secret).unwrap(), "TOKEN=2");
         }
-
-        // --- metrics ride the same path ---------------------------------------
-        let target = SshTarget::new(SshHostId::new("fake-host"));
-        let mut collector = rmux_metrics::Collector::new();
-        let sample = collector.sample(&target).await.expect("sample over ssh");
-        assert!(sample.memory_total_bytes > 0, "expected a real memory figure");
     });
 
     let _ = std::fs::remove_dir_all(&work);

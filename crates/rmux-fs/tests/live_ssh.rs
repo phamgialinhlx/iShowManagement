@@ -157,37 +157,6 @@ async fn run_checks(fs: &dyn FileSystem, root: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// CPU and memory from a real remote host.
-#[tokio::test]
-#[ignore = "needs a real SSH host; set RMUX_LIVE_HOST"]
-async fn a_real_host_reports_metrics() {
-    let Some(host) = live_host() else {
-        return;
-    };
-
-    let target = SshTarget::new(SshHostId::new(&host));
-    target.connect().await.expect("connect");
-
-    let mut collector = rmux_metrics::Collector::new();
-
-    let first = collector.sample(&target).await.expect("first sample");
-    assert!(first.memory_total_bytes > 0, "expected real memory, got {first:?}");
-    // The first reading cannot know CPU — there is no baseline to difference.
-    assert!(first.cpu_percent.is_none(), "first sample must not invent a CPU figure");
-
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-
-    let second = collector.sample(&target).await.expect("second sample");
-    let cpu = second.cpu_percent.expect("a second sample should yield CPU on Linux");
-    assert!((0.0..=100.0).contains(&cpu), "implausible CPU: {cpu}");
-
-    eprintln!(
-        "{host}: cpu {:.1}%  mem {:.1}%  load {:.2}",
-        cpu,
-        second.memory_percent(),
-        second.load_average
-    );
-}
 
 /// The folder browser's flow against a real host.
 ///

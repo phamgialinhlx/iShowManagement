@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/rmux-proto",
     "crates/rmux-transport",
     "crates/rmux-ssh",
     "crates/rmux-agent",
@@ -9,13 +8,13 @@ members = [
     "crates/rmux-git",
     "crates/rmux-term",
     "crates/rmux-claude",
-    "crates/rmux-metrics",
-    "crates/rmux-control",
-    "crates/rmux-cowork",
-    "crates/rmux-core",
+    "crates/rmux-app",
     "askpass",
-    "src-tauri",
 ]
+# The vendored Zed presentation stack is its own workspace (its crates use
+# `workspace = true` inheritance against Zed's manifest). `references/` is a
+# read-only Zed checkout. Neither may be absorbed as members of this workspace.
+exclude = ["vendor/zed", "references"]
 
 [workspace.package]
 version = "0.2.17"
@@ -26,7 +25,6 @@ repository = "https://github.com/ngocanhnckh/rmux"
 
 [workspace.dependencies]
 # --- internal ---
-rmux-proto = { path = "crates/rmux-proto" }
 rmux-transport = { path = "crates/rmux-transport" }
 rmux-ssh = { path = "crates/rmux-ssh" }
 rmux-fs = { path = "crates/rmux-fs" }
@@ -34,10 +32,6 @@ rmux-git = { path = "crates/rmux-git" }
 rmux-term = { path = "crates/rmux-term" }
 rmux-claude = { path = "crates/rmux-claude" }
 rmux-agent = { path = "crates/rmux-agent" }
-rmux-metrics = { path = "crates/rmux-metrics" }
-rmux-control = { path = "crates/rmux-control" }
-rmux-cowork = { path = "crates/rmux-cowork" }
-rmux-core = { path = "crates/rmux-core" }
 
 # --- async / runtime ---
 tokio = { version = "1", features = ["full"] }
@@ -106,6 +100,12 @@ camino = { version = "1", features = ["serde1"] }
 dirs = "6"
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# Required by the vendored gpui: it depends on these upstream forks. `[patch]`
+# only takes effect from the true build root, which is this workspace.
+[patch.crates-io]
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 
 [profile.release]
 codegen-units = 1

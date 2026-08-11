@@ -1,0 +1,13 @@
+[package]
+name = "rmux-app"
+version = "0.2.17"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "rmux"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { path = "../../vendor/zed/crates/gpui" }
+gpui_platform = { path = "../../vendor/zed/crates/gpui_platform" }
