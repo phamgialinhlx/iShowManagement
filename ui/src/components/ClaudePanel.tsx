@@ -7,6 +7,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
 import { contextLimit, sniffWindow } from "../lib/context-window";
 import { settleResize } from "../lib/terminal-resize";
+import { coalesceOutput, terminalFps, TERMINAL_FPS_KEY } from "../lib/terminal-fps";
 import { useWorkspace } from "../lib/workspace";
 import { basename } from "../lib/workspace-model";
 import { claudeTheme, gpuRendering } from "../lib/terminal-theme";
@@ -363,11 +364,14 @@ export function ClaudePanel({
 
 
 
-    const output = new Channel<ArrayBuffer>();
-    output.onmessage = (chunk) => {
-      const bytes = new Uint8Array(chunk);
+    // Repaint at most `fpsValue` times a second; `onAppearance` refreshes it
+    // live, `0` = uncapped. The per-chunk detectors below run on the coalesced
+    // *batch* — order is preserved (one ordered buffer), so this is fewer,
+    // larger scans than before, never a reordering.
+    let fpsValue = terminalFps();
+    const sink = coalesceOutput((bytes) => {
       // Mouse-mode tracking, for the fullscreen escape hatch. Prefiltered on the
-      // raw bytes: this is the hottest path in the app, and decoding every chunk
+      // raw bytes: this is the hottest path in the app, and decoding every batch
       // to a string just to look for a rare sequence was pure cost. `0x1b` is
       // absent from the overwhelming majority of output.
       if (bytes.includes(0x1b)) {
@@ -377,7 +381,7 @@ export function ClaudePanel({
       // context)` — in the banner and in `/status`. That is the only place it
       // is ever stated, so reading it here is what turns the meter's
       // denominator from a guess into an observation. Byte-prefiltered: this
-      // runs on every chunk of a TUI that redraws constantly.
+      // runs on every batch of a TUI that redraws constantly.
       if (mentionsContext(bytes)) {
         const sniffed = sniffWindow(latin1(bytes));
         // Written through the store so it persists and the rail sees it too.
@@ -397,7 +401,9 @@ export function ClaudePanel({
         reconnectingRef.current = false;
         setReconnecting(false);
       }
-    };
+    }, () => fpsValue);
+    const output = new Channel<ArrayBuffer>();
+    output.onmessage = (chunk) => sink.write(chunk);
 
     // Started only once the pane has a real size — fitting before layout tells
     // Claude its window is about 12x4, and its TUI then draws into a space too
@@ -532,6 +538,12 @@ export function ClaudePanel({
     // Two frames: the first lets the zoom land, the second lets layout settle
     // before xterm measures a cell.
     const onAppearance = (event: StorageEvent) => {
+      // The frame-rate cap applies live: a change in the Settings window reaches
+      // here as a `storage` event, no remount.
+      if (event.key === TERMINAL_FPS_KEY) {
+        fpsValue = terminalFps();
+        return;
+      }
       if (event.key && event.key !== "rmux.appearance") return;
       // The palette is derived from the live design tokens, so a colour chosen
       // in Settings has to be pushed into xterm — it does not re-read CSS on
@@ -568,6 +580,9 @@ export function ClaudePanel({
       window.removeEventListener("resize", refit);
       window.removeEventListener("rmux-theme", onTheme);
       onData.dispose();
+      // Flush any bytes the throttle was still holding before tearing xterm
+      // down, or the tail of the output is lost with the pending buffer.
+      sink.dispose();
       xtermRef.current = null;
       xterm.dispose();
       // The session is deliberately NOT stopped: Claude may be mid-task, and

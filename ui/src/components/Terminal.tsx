@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import { isTauri, type TargetRef } from "../lib/api";
 import { settleResize } from "../lib/terminal-resize";
+import { coalesceOutput, terminalFps, TERMINAL_FPS_KEY } from "../lib/terminal-fps";
 import { record } from "../lib/activity";
 import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
@@ -157,12 +158,21 @@ export function TerminalView({
       if (terminalId) void invoke("terminal_write", { id: terminalId, data: data.normalize("NFC") });
     });
 
-    const output = new Channel<ArrayBuffer>();
-    output.onmessage = (chunk) => {
+    // The terminal repaints at most `fpsValue` times a second. Read into a
+    // closure variable rather than off `localStorage` per chunk (this is a hot
+    // path); the `onAppearance` handler below refreshes it live. `0` = uncapped,
+    // and then `coalesceOutput` writes straight through with no overhead.
+    let fpsValue = terminalFps();
+    const sink = coalesceOutput(
       // Raw bytes, not JSON — see the note in src-tauri/src/terminal.rs.
-      xterm.write(new Uint8Array(chunk));
-      setReady(true);
-    };
+      (bytes) => {
+        xterm.write(bytes);
+        setReady(true);
+      },
+      () => fpsValue,
+    );
+    const output = new Channel<ArrayBuffer>();
+    output.onmessage = (chunk) => sink.write(chunk);
 
     const lifecycle = new Channel<Lifecycle>();
     lifecycle.onmessage = (event) => {
@@ -313,6 +323,12 @@ export function TerminalView({
     // Two frames: the first lets the zoom land, the second lets layout settle
     // before xterm measures a cell.
     const onAppearance = (event: StorageEvent) => {
+      // The frame-rate cap applies live: pick up a change made in the Settings
+      // window (which reaches here as a `storage` event) without a remount.
+      if (event.key === TERMINAL_FPS_KEY) {
+        fpsValue = terminalFps();
+        return;
+      }
       if (event.key && event.key !== "rmux.appearance") return;
       // The palette is derived from the live design tokens, so a colour chosen
       // in Settings has to be pushed into xterm — it does not re-read CSS on
@@ -352,6 +368,9 @@ export function TerminalView({
       window.removeEventListener("resize", refit);
       window.removeEventListener("rmux-theme", onTheme);
       onData.dispose();
+      // Flush any bytes the throttle was still holding before tearing xterm
+      // down, or the tail of the output is lost with the pending buffer.
+      sink.dispose();
       termRef.current = null;
       xterm.dispose();
       // The PTY is deliberately left running. This view may be remounting, and
