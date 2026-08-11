@@ -804,39 +804,64 @@ export function ClaudePanel({
           INTERRUPT, and a per-session property decided once rather than a
           control reached mid-run.
         */}
-        {/* Select mode is meaningful only in Claude's fullscreen TUI, which
-            captures the mouse; turning capture off locally lets a drag select
-            again. It stays hidden in the default inline rendering. */}
+        {/*
+          **Select mode is an icon, not a labelled chip.**
+
+          It was `select mode` as text, which in a narrow pane wrapped onto two
+          lines and took more width than the title it sat beside — in the busiest
+          header in the app, for a control most operators touch once a month.
+          Reported as taking a lot of space for something never used.
+
+          Still visible rather than buried in a menu: when it *is* needed, it is
+          needed mid-drag, and a two-click path to "let me select this text" is
+          worse than the space it costs. As an icon it matches the transcript,
+          files, git and settings buttons already in this row and costs a
+          fourteenth of the width.
+
+          Shown only for a fullscreen session, as before: inline rendering
+          disables the mouse, so a drag already selects and this would be a
+          control with nothing to do.
+        */}
         {fullscreen && (
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              className="chip"
-              title={
-                selectMode
-                  ? "Give the mouse back to Claude"
-                  : "Turn Claude's mouse capture off so you can select text"
-              }
-              onClick={() => {
-                const term = xtermRef.current;
-                if (!term) return;
-                const next = !selectMode;
-                // Written into xterm, not sent to Claude: this changes what *this*
-                // terminal does with the mouse, and Claude is never told.
-                term.write(
-                  next ? mouseModes.current.disableSequence() : mouseModes.current.restoreSequence(),
-                );
-                setSelectMode(next);
-              }}
-              style={{
-                color: selectMode ? "var(--text)" : "var(--text-faint)",
-                background: selectMode ? "var(--hover)" : "transparent",
-                padding: "1px 6px",
-              }}
+          <button
+            type="button"
+            aria-label={selectMode ? "Give the mouse back to Claude" : "Select text with the mouse"}
+            aria-pressed={selectMode}
+            title={
+              selectMode
+                ? "Give the mouse back to Claude"
+                : "Turn Claude's mouse capture off so you can select text"
+            }
+            className="flex shrink-0 items-center px-1"
+            style={{ color: selectMode ? "var(--text)" : "var(--text-faint)" }}
+            onClick={() => {
+              const term = xtermRef.current;
+              if (!term) return;
+              const next = !selectMode;
+              // Written into xterm, not sent to Claude: this changes what *this*
+              // terminal does with the mouse, and Claude is never told.
+              term.write(
+                next ? mouseModes.current.disableSequence() : mouseModes.current.restoreSequence(),
+              );
+              setSelectMode(next);
+            }}
+          >
+            {/* A text cursor over a selected span — the gesture it restores.
+                Lucide-style, square caps, like every other icon in this row. */}
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="square"
+              strokeLinejoin="miter"
+              aria-hidden="true"
             >
-              select mode
-            </button>
-          </div>
+              <path d="M9 4h2a2 2 0 002-2 2 2 0 002 2h2M9 20h2a2 2 0 012-2 2 2 0 002 2h2M12 4v16" />
+            </svg>
+          </button>
         )}
 
         {state.working && (
