@@ -11,8 +11,39 @@ use gpui_platform::application;
 
 use crate::terminal::TerminalView;
 
+/// Minimal stderr logger so gpui's own warnings/errors surface. Without an
+/// installed logger these are silently dropped — which once hid the fact that a
+/// missing `font-kit` feature made gpui fall back to a no-op text system (empty
+/// stderr proved nothing). Warn-level keeps it quiet in normal use.
+struct StderrLogger;
+impl log::Log for StderrLogger {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record) {
+        eprintln!("[{}] {}: {}", record.level(), record.target(), record.args());
+    }
+    fn flush(&self) {}
+}
+static LOGGER: StderrLogger = StderrLogger;
+
 fn main() {
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Warn);
     application().run(|cx: &mut App| {
+        // gpui ships the font *names* (".ZedMono" → "Lilex") but not the font
+        // *data*, so text renders nothing until the actual files are registered.
+        // Lilex is bundled (OFL) and embedded into the binary here.
+        let fonts = vec![
+            std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/fonts/Lilex-Regular.ttf").as_slice(),
+            ),
+            std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/fonts/Lilex-Bold.ttf").as_slice(),
+            ),
+        ];
+        cx.text_system().add_fonts(fonts).expect("register Lilex");
+
         let bounds = Bounds::centered(None, size(px(900.), px(600.)), cx);
         cx.open_window(
             WindowOptions {

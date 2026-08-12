@@ -10,8 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 gpui = { path = "../../vendor/zed/crates/gpui" }
-gpui_platform = { path = "../../vendor/zed/crates/gpui_platform" }
+gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", features = ["font-kit"] }
 rmux-term.workspace = true
 rmux-transport.workspace = true
 alacritty_terminal.workspace = true
 anyhow.workspace = true
+log = "0.4"

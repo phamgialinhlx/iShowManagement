@@ -88,7 +88,8 @@ impl TerminalView {
 
         let mut rx = pty.subscribe();
         cx.spawn(async move |this, cx| {
-            while let Ok(event) = rx.recv().await {
+            loop {
+                let Ok(event) = rx.recv().await else { break };
                 let keep_going = this.update(cx, |view, cx| match event {
                     TerminalEvent::Output(bytes) => {
                         view.emu.feed(&bytes);
@@ -132,9 +133,9 @@ impl Render for TerminalView {
             .size_full()
             .bg(rgb(0x14110f))
             .text_color(rgb(0xe8e6e1))
-            .font_family("Menlo")
+            .font_family("Lilex")
             .text_size(px(13.))
-            .line_height(px(18.))
+            .line_height(px(17.))
             .flex()
             .flex_col()
             .children(self.emu.rows())
