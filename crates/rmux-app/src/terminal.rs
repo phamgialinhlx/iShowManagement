@@ -8,13 +8,15 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor};
+use parking_lot::Mutex;
 use gpui::{
     App, Bounds, Context, Element, FocusHandle, Focusable, Font, FontWeight, GlobalElementId, Hsla,
     InspectorElementId, KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent, Pixels,
@@ -50,16 +52,40 @@ impl Dimensions for Dims {
     }
 }
 
+/// Captures the terminal title set via OSC (the default `VoidListener` drops it).
+#[derive(Clone)]
+struct TitleSink(Arc<Mutex<String>>);
+
+impl EventListener for TitleSink {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::Title(title) => *self.0.lock() = title,
+            Event::ResetTitle => self.0.lock().clear(),
+            _ => {}
+        }
+    }
+}
+
 /// The alacritty emulation of the PTY byte stream.
 struct Emu {
-    term: Term<VoidListener>,
+    term: Term<TitleSink>,
     parser: Processor,
+    title: Arc<Mutex<String>>,
 }
 
 impl Emu {
     fn new(cols: u16, rows: u16) -> Self {
         let size = Dims { columns: cols.max(1) as usize, screen_lines: rows.max(1) as usize };
-        Self { term: Term::new(Config::default(), &size, VoidListener), parser: Processor::new() }
+        let title = Arc::new(Mutex::new(String::new()));
+        Self {
+            term: Term::new(Config::default(), &size, TitleSink(title.clone())),
+            parser: Processor::new(),
+            title,
+        }
+    }
+
+    fn title(&self) -> String {
+        self.title.lock().clone()
     }
 
     fn feed(&mut self, bytes: &[u8]) {
@@ -188,6 +214,12 @@ impl TerminalView {
     /// to track the active pane).
     pub fn has_focus(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
+    }
+
+    /// The OSC-set terminal title, or a fallback for the tab label.
+    pub fn title(&self) -> String {
+        let title = self.emu.title();
+        if title.is_empty() { "zsh".to_string() } else { title }
     }
 }
 

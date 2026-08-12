@@ -5,6 +5,7 @@
 //! (panes/docks/tabs) grows around this.
 
 mod pane;
+mod pane_group;
 mod terminal;
 mod workspace;
 
