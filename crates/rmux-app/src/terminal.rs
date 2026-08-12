@@ -17,8 +17,9 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor};
 use gpui::{
     App, Bounds, Context, Element, FocusHandle, Focusable, Font, FontWeight, GlobalElementId, Hsla,
-    InspectorElementId, KeyDownEvent, Keystroke, LayoutId, Pixels, Rgba, Size, Style, TextAlign,
-    TextRun, UnderlineStyle, Window, div, font, point, prelude::*, px, relative, rgb, size,
+    InspectorElementId, KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent, Pixels,
+    Rgba, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, div, font, point, prelude::*, px,
+    relative, rgb, size,
 };
 use rmux_term::{TermSize, Terminal, TerminalEvent};
 use rmux_transport::{CommandSpec, LocalTarget, Target};
@@ -213,8 +214,18 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                }),
+            )
             .size_full()
             .bg(rgb(DEFAULT_BG))
+            // A 1px border, tinted only while focused, marks the active pane.
+            .border_1()
+            .border_color(rgb(DEFAULT_BG))
+            .focus(|style| style.border_color(rgb(ACTIVE_BORDER)))
             .child(element)
     }
 }
@@ -363,6 +374,8 @@ fn same_style(a: &CellSnap, b: &CellSnap) -> bool {
 const DEFAULT_FG: u32 = 0xe8e6e1;
 const DEFAULT_BG: u32 = 0x14110f;
 const CURSOR: u32 = 0xe8e6e1;
+/// Border tint on the focused (active) pane.
+const ACTIVE_BORDER: u32 = 0x5c5346;
 
 /// 16-colour ANSI palette (0–7 normal, 8–15 bright), tuned to the warm dark skin.
 const ANSI: [u32; 16] = [

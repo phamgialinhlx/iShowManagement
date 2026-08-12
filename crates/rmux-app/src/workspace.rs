@@ -75,7 +75,6 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.focused_pane(window, cx);
         div()
             .track_focus(&self.focus)
             .key_context("Workspace")
@@ -94,6 +93,6 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ClosePane, window, cx| this.close_pane(window, cx)))
             .size_full()
             .bg(rgb(0x14110f))
-            .child(self.center.render(&active, window, cx))
+            .child(self.center.render(window, cx))
     }
 }

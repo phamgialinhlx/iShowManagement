@@ -9,7 +9,7 @@
 //! colors (hardcoded here to match the terminal skin). The split-tree algebra
 //! and the flex-based resize element are carried over near-verbatim.
 
-use gpui::{App, Axis, Bounds, Entity, IntoElement, Pixels, Window, div, prelude::*, rgb};
+use gpui::{App, Axis, Bounds, Entity, IntoElement, Pixels, Window, div, prelude::*};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -21,7 +21,6 @@ use crate::terminal::TerminalView;
 pub type Pane = TerminalView;
 
 const DIVIDER_COLOR: u32 = 0x2a2621;
-const ACTIVE_BORDER: u32 = 0x5c5346;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum SplitDirection {
@@ -100,13 +99,8 @@ impl PaneGroup {
         self.root.first_pane()
     }
 
-    pub fn render(
-        &self,
-        active: &Entity<Pane>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        self.root.render(0, active, window, cx)
+    pub fn render(&self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.root.render(0, window, cx)
     }
 }
 
@@ -157,35 +151,15 @@ impl Member {
         }
     }
 
-    fn render(
-        &self,
-        basis: usize,
-        active: &Entity<Pane>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> gpui::AnyElement {
+    fn render(&self, basis: usize, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
         match self {
-            Member::Pane(pane) => {
-                let is_active = pane == active;
-                div()
-                    .relative()
-                    .flex_1()
-                    .size_full()
-                    .child(pane.clone())
-                    .when(is_active, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .size_full()
-                                .left_0()
-                                .top_0()
-                                .border_1()
-                                .border_color(rgb(ACTIVE_BORDER)),
-                        )
-                    })
-                    .into_any_element()
-            }
-            Member::Axis(axis) => axis.render(basis, active, window, cx),
+            Member::Pane(pane) => div()
+                .relative()
+                .flex_1()
+                .size_full()
+                .child(pane.clone())
+                .into_any_element(),
+            Member::Axis(axis) => axis.render(basis, window, cx),
         }
     }
 }
@@ -289,18 +263,12 @@ impl PaneAxis {
         }
     }
 
-    fn render(
-        &self,
-        basis: usize,
-        active: &Entity<Pane>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> gpui::AnyElement {
+    fn render(&self, basis: usize, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
         let children = self
             .members
             .iter()
             .enumerate()
-            .map(|(ix, member)| member.render((basis + ix + 1) * 10, active, window, cx))
+            .map(|(ix, member)| member.render((basis + ix + 1) * 10, window, cx))
             .collect::<Vec<_>>();
 
         element::pane_axis(self.axis, basis, self.flexes.clone(), self.bounding_boxes.clone())
