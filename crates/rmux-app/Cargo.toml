@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [[bin]]
-name = "rmux"
+name = "zmux"
 path = "src/main.rs"
 
 [dependencies]
@@ -13,7 +13,15 @@ gpui = { path = "../../vendor/zed/crates/gpui" }
 gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", features = ["font-kit"] }
 rmux-term.workspace = true
 rmux-transport.workspace = true
+rmux-ssh.workspace = true
+rmux-agent.workspace = true
 alacritty_terminal.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+uuid.workspace = true
 log = "0.4"
 parking_lot = "0.12"

@@ -1,14 +1,26 @@
-//! The workspace shell: a splittable tree of panes filling the window. This is
-//! the zmux-native replacement for Zed's `workspace` crate — it owns the split
-//! geometry (`pane_group`) and the panes (`pane`) without the project/collab
-//! domain model (ADR-0002).
+//! The workspace shell: a splittable tree of panes filling the window, with a
+//! left-edge session rail and a host-picker overlay. This is the zmux-native
+//! replacement for Zed's `workspace` crate — it owns the split geometry
+//! (`pane_group`) and the panes (`pane`) without the project/collab domain
+//! model (ADR-0002), and it bridges the `Backend` service to terminal tabs.
 
-use gpui::{App, Context, Entity, FocusHandle, Focusable, Subscription, Window, actions, div, prelude::*, rgb};
+use std::collections::HashMap;
 
+use gpui::{
+    App, Context, Entity, FocusHandle, Focusable, Subscription, WeakEntity, Window, actions, div,
+    prelude::*, rgb,
+};
+use rmux_transport::TargetId;
+
+use crate::backend::Backend;
 use crate::pane::{Pane, PaneEvent};
 use crate::pane_group::{PaneGroup, SplitDirection};
+use crate::picker::{HostPicker, HostPickerEvent};
+use crate::rail::{RailEvent, RailView};
+use crate::state::{PersistedSession, SessionKind, State};
+use crate::terminal::TerminalView;
 
-actions!(zmux, [SplitLeft, SplitRight, SplitUp, SplitDown, ClosePane]);
+actions!(zmux, [SplitLeft, SplitRight, SplitUp, SplitDown, ClosePane, ToggleRail, OpenHostPicker]);
 
 pub struct Workspace {
     center: PaneGroup,
@@ -16,15 +28,39 @@ pub struct Workspace {
     /// One subscription per live pane, so an emptied pane prunes itself from the
     /// tree. Rebuilt whenever the pane set changes (see `resubscribe`).
     pane_subs: Vec<Subscription>,
+    /// The session rail (always mounted; shown/hidden by `rail_visible`).
+    rail: Entity<RailView>,
+    rail_sub: Subscription,
+    rail_visible: bool,
+    /// The host-picker overlay, mounted only while open.
+    picker: Option<Entity<HostPicker>>,
+    picker_sub: Option<Subscription>,
+    /// Open terminal per (server, session name), so a rail row click focuses an
+    /// existing tab instead of starting a duplicate. Weak so a closed tab's
+    /// entry is lazily reclaimed.
+    session_map: HashMap<(TargetId, String), WeakEntity<TerminalView>>,
+    /// Persisted servers + adopted session names.
+    state: State,
 }
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let state = State::load();
+        let rail = cx.new(|cx| RailView::new(&state, cx));
+        let rail_sub = cx.subscribe_in(&rail, window, Self::on_rail_event);
+
         let pane = cx.new(|cx| Pane::new(window, cx));
         let mut this = Self {
             center: PaneGroup::new(pane),
             focus: cx.focus_handle(),
             pane_subs: Vec::new(),
+            rail,
+            rail_sub,
+            rail_visible: true,
+            picker: None,
+            picker_sub: None,
+            session_map: HashMap::new(),
+            state,
         };
         this.resubscribe(cx);
         this
@@ -49,6 +85,154 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    fn on_rail_event(
+        &mut self,
+        _rail: &Entity<RailView>,
+        event: &RailEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            RailEvent::OpenSession { target, name, kind, folder } => {
+                self.open_session(
+                    target.clone(),
+                    name.clone(),
+                    *kind,
+                    folder.clone(),
+                    window,
+                    cx,
+                );
+            }
+            RailEvent::NewShell { target, folder } => {
+                self.new_shell(target.clone(), folder.clone(), window, cx);
+            }
+            RailEvent::Dismissed => {
+                self.focus_terminal_area(window, cx);
+            }
+        }
+    }
+
+    fn on_picker_event(
+        &mut self,
+        _picker: &Entity<HostPicker>,
+        event: &HostPickerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            HostPickerEvent::Selected(target) => {
+                self.connect_server(target.clone(), cx);
+                self.close_picker(cx);
+                self.focus_terminal_area(window, cx);
+            }
+            HostPickerEvent::Dismissed => {
+                self.close_picker(cx);
+                self.focus_terminal_area(window, cx);
+            }
+        }
+    }
+
+    /// Add a server to the rail, persist it, and start its connect+list.
+    fn connect_server(&mut self, target: TargetId, cx: &mut Context<Self>) {
+        if self.rail.read(cx).has_server(&target) {
+            return;
+        }
+        self.state.add_server(target.clone());
+        let state = self.state.clone();
+        self.rail.update(cx, |rail, cx| rail.connect(target, &state, cx));
+    }
+
+    /// Open (attach to, or focus if already open) a session. The dedup map
+    /// keeps one terminal per (server, name); a closed tab's weak ref is
+    /// reclaimed on the next lookup.
+    fn open_session(
+        &mut self,
+        target: TargetId,
+        name: String,
+        kind: SessionKind,
+        folder: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing) = self
+            .session_map
+            .get(&(target.clone(), name.clone()))
+            .and_then(|w| w.upgrade())
+        {
+            self.focus_terminal(&existing, window, cx);
+            return;
+        }
+
+        let backend = cx.global::<Backend>();
+        let ensure_rx = backend.ensure(target.clone());
+        let label = name.clone();
+        let target_ = target.clone();
+        let name_ = name.clone();
+        let kind_ = kind;
+        let folder_ = folder.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(server)) = ensure_rx.await else { return };
+            let Ok(cmd) = server.attach_argv(&name_, folder_.as_deref(), 100, 30) else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                let view = cx.new(|cx| TerminalView::new(cx, cmd, Some(label)));
+                let pane = this.focused_pane(window, cx);
+                pane.update(cx, |pane, cx| pane.add_view(view.clone(), window, cx));
+                this.session_map.insert((target_.clone(), name_.clone()), view.downgrade());
+                this.state.add_session(
+                    &target_,
+                    PersistedSession { name: name_.clone(), kind: kind_, folder: folder_.clone() },
+                );
+                let handle = view.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+                this.rail.update(cx, |rail, cx| rail.refresh_list(&target_, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Start a new persistent shell on a server. A fresh unique name mints a
+    /// new agent session; the daemon's `open_or_attach` creates it on the host.
+    fn new_shell(
+        &mut self,
+        target: TargetId,
+        folder: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = format!("rmux-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        self.open_session(target, name, SessionKind::Shell, folder, window, cx);
+    }
+
+    /// Make `item` the active tab of whatever pane holds it, and focus it.
+    fn focus_terminal(
+        &mut self,
+        item: &Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for pane in self.center.panes() {
+            if pane.read(cx).has_item(item) {
+                let pane = pane.clone();
+                pane.update(cx, |pane, cx| pane.activate_item(item, window, cx));
+                return;
+            }
+        }
+    }
+
+    /// Focus the active terminal of the focused pane (used when the rail is
+    /// dismissed, so the keyboard returns to the terminal area).
+    fn focus_terminal_area(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.focused_pane(window, cx);
+        pane.update(cx, |pane, cx| pane.focus_active(window, cx));
+    }
+
+    fn close_picker(&mut self, cx: &mut Context<Self>) {
+        self.picker = None;
+        self.picker_sub = None;
+        cx.notify();
     }
 
     /// The pane holding focus, falling back to the first pane.
@@ -77,6 +261,27 @@ impl Workspace {
         let pane = self.focused_pane(window, cx);
         pane.update(cx, |pane, cx| pane.close_active(window, cx));
     }
+
+    fn toggle_rail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.rail_visible = !self.rail_visible;
+        if self.rail_visible {
+            let handle = self.rail.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        } else {
+            self.focus_terminal_area(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_host_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picker = cx.new(|cx| HostPicker::new(cx));
+        let sub = cx.subscribe_in(&picker, window, Self::on_picker_event);
+        let handle = picker.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        self.picker = Some(picker);
+        self.picker_sub = Some(sub);
+        cx.notify();
+    }
 }
 
 impl Focusable for Workspace {
@@ -87,6 +292,13 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Collect the non-cx-borrowing parts first. `self.center.render` borrows
+        // `cx` mutably, so it is inlined after the `on_action` listeners (which
+        // borrow `cx` immutably) to keep the borrows from overlapping.
+        let rail = self.rail.clone();
+        let picker = self.picker.clone();
+        let rail_visible = self.rail_visible;
+
         div()
             .track_focus(&self.focus)
             .key_context("Workspace")
@@ -105,8 +317,37 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ClosePane, window, cx| {
                 this.close_active_tab(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &ToggleRail, window, cx| {
+                this.toggle_rail(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenHostPicker, window, cx| {
+                this.open_host_picker(window, cx)
+            }))
             .size_full()
+            .relative()
             .bg(rgb(0x14110f))
-            .child(self.center.render(window, cx))
+            .flex()
+            .flex_row()
+            .when(rail_visible, |this| this.child(rail))
+            .child(
+                div()
+                    .flex_1()
+                    .size_full()
+                    .child(self.center.render(window, cx)),
+            )
+            .when_some(picker, |this, picker| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgb(0x000000))
+                        .child(picker),
+                )
+            })
     }
 }

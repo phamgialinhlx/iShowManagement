@@ -24,7 +24,7 @@ use gpui::{
     relative, rgb, size,
 };
 use rmux_term::{TermSize, Terminal, TerminalEvent};
-use rmux_transport::{CommandSpec, LocalTarget, Target};
+use rmux_transport::{CommandSpec, LocalTarget, ResolvedCommand, Target};
 
 /// Initial PTY grid, before the pane has been measured (see `reflow`).
 const COLS: u16 = 100;
@@ -140,15 +140,25 @@ pub struct TerminalView {
     /// Pane pixel bounds, written each frame by the measuring `canvas` and read
     /// by `reflow` on the next frame to resize the grid to fit.
     measured: Rc<Cell<Size<Pixels>>>,
+    /// A fixed tab label for sessions that carry one (an adopted agent session's
+    /// alias/name). When `None`, the tab falls back to the OSC shell title.
+    label: Option<String>,
 }
 
 impl TerminalView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let cmd = LocalTarget::new()
-            .build_command(&CommandSpec::login_shell())
-            .expect("build local login shell");
+    /// Spawn a terminal running `cmd` (a locally-resolvable argv — local shell
+    /// or `ssh … -- rmux-agent attach …`). `label`, when set, overrides the
+    /// OSC-derived tab title. Spawning is synchronous: the PTY is a std thread,
+    /// and `Target::build_command` never does I/O, so the gpui thread never
+    /// blocks. Remote *connection* (ControlMaster + provisioning) is done
+    /// before this call, by the backend service.
+    ///
+    /// Windowless on purpose: the caller focuses the view after construction,
+    /// so a terminal can be created from an async task that has resolved an
+    /// attach argv but only later gains window access (`update_in`).
+    pub fn new(cx: &mut Context<Self>, cmd: ResolvedCommand, label: Option<String>) -> Self {
         let pty = Terminal::spawn(&cmd, None, TermSize { cols: COLS, rows: ROWS })
-            .expect("spawn local pty");
+            .expect("spawn pty");
 
         let mut rx = pty.subscribe();
         cx.spawn(async move |this, cx| {
@@ -169,15 +179,22 @@ impl TerminalView {
         })
         .detach();
 
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
         Self {
-            focus,
+            focus: cx.focus_handle(),
             emu: Emu::new(COLS, ROWS),
             pty,
             size: TermSize { cols: COLS, rows: ROWS },
             measured: Rc::new(Cell::new(Size::default())),
+            label,
         }
+    }
+
+    /// A local login shell, as the workspace's default new tab.
+    pub fn new_local(cx: &mut Context<Self>) -> Self {
+        let cmd = LocalTarget::new()
+            .build_command(&CommandSpec::login_shell())
+            .expect("build local login shell");
+        Self::new(cx, cmd, None)
     }
 
     /// Resize the emulator grid and PTY to fit the last measured pane bounds.
@@ -216,8 +233,15 @@ impl TerminalView {
         self.focus.is_focused(window)
     }
 
-    /// The OSC-set terminal title, or a fallback for the tab label.
+    /// The tab label: a session's fixed label when set, else the OSC shell
+    /// title, else a fallback. The old UI honored a host-side alias verbatim
+    /// for adopted sessions; a local shell has no label and shows its shell.
     pub fn title(&self) -> String {
+        if let Some(label) = &self.label {
+            if !label.is_empty() {
+                return label.clone();
+            }
+        }
         let title = self.emu.title();
         if title.is_empty() { "zsh".to_string() } else { title }
     }

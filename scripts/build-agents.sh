@@ -28,7 +28,7 @@ TARGETS=(
   x86_64-pc-windows-gnu
 )
 
-OUT="src-tauri/agents"
+OUT="target/agents"
 mkdir -p "$OUT"
 
 if ! cargo zigbuild --help >/dev/null 2>&1; then

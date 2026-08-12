@@ -1,18 +1,25 @@
-//! rmux — native gpui shell (scaffold).
+//! zmux — native gpui shell (scaffold).
 //!
 //! Current milestone: one native terminal tab running a local login shell,
 //! emulated by `alacritty_terminal` and painted by gpui. The workspace shell
 //! (panes/docks/tabs) grows around this.
 
+mod backend;
 mod pane;
 mod pane_group;
+mod picker;
+mod rail;
+mod state;
 mod terminal;
 mod workspace;
 
 use gpui::{App, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_platform::application;
 
-use crate::workspace::{ClosePane, SplitDown, SplitLeft, SplitRight, SplitUp, Workspace};
+use crate::backend::Backend;
+use crate::workspace::{
+    ClosePane, OpenHostPicker, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleRail, Workspace,
+};
 
 /// Minimal stderr logger so gpui's own warnings/errors surface. Without an
 /// installed logger these are silently dropped — which once hid the fact that a
@@ -47,18 +54,28 @@ fn main() {
         ];
         cx.text_system().add_fonts(fonts).expect("register Lilex");
 
+        // Backend service: tokio runtime + target/agent cache, global for the
+        // process lifetime.
+        cx.set_global(Backend::new().expect("build backend"));
+
         cx.bind_keys([
             KeyBinding::new("cmd-left", SplitLeft, Some("Workspace")),
             KeyBinding::new("cmd-right", SplitRight, Some("Workspace")),
             KeyBinding::new("cmd-up", SplitUp, Some("Workspace")),
             KeyBinding::new("cmd-down", SplitDown, Some("Workspace")),
             KeyBinding::new("cmd-w", ClosePane, Some("Workspace")),
+            KeyBinding::new("cmd-b", ToggleRail, Some("Workspace")),
+            KeyBinding::new("cmd-shift-o", OpenHostPicker, Some("Workspace")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(900.), px(600.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("zmux".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| Workspace::new(window, cx)),

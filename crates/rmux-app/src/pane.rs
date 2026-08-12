@@ -55,12 +55,41 @@ impl EventEmitter<PaneEvent> for Pane {}
 
 impl Pane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let item = cx.new(|cx| TerminalView::new(window, cx));
-        Self { items: vec![item], active_ix: 0 }
+        let item = cx.new(|cx| TerminalView::new_local(cx));
+        let pane = Self { items: vec![item], active_ix: 0 };
+        pane.focus_active(window, cx);
+        pane
     }
 
     pub fn active_item(&self) -> Option<Entity<TerminalView>> {
         self.items.get(self.active_ix).cloned()
+    }
+
+    /// Whether this pane holds the given terminal tab.
+    pub fn has_item(&self, item: &Entity<TerminalView>) -> bool {
+        self.items.iter().any(|i| i.entity_id() == item.entity_id())
+    }
+
+    /// Make `item` the active tab and focus it. No-op if it isn't in this pane.
+    pub fn activate_item(
+        &mut self,
+        item: &Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ix) = self.items.iter().position(|i| i.entity_id() == item.entity_id()) {
+            self.activate(ix, window, cx);
+        }
+    }
+
+    /// Insert an already-constructed terminal as a new tab and focus it. Used
+    /// when the workspace opens a remote session: the view is built from a
+    /// resolved attach argv, then handed to the focused pane.
+    pub fn add_view(&mut self, item: Entity<TerminalView>, window: &mut Window, cx: &mut Context<Self>) {
+        self.items.push(item);
+        self.active_ix = self.items.len() - 1;
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     /// Whether any of this pane's terminals currently holds focus.
@@ -85,7 +114,7 @@ impl Pane {
     }
 
     fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let item = cx.new(|cx| TerminalView::new(window, cx));
+        let item = cx.new(|cx| TerminalView::new_local(cx));
         self.items.push(item);
         self.active_ix = self.items.len() - 1;
         self.focus_active(window, cx);

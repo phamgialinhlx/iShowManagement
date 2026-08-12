@@ -4840,12 +4840,20 @@ version = "0.2.17"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "dirs",
+ "futures",
  "gpui",
  "gpui_platform",
  "log",
  "parking_lot",
+ "rmux-agent",
+ "rmux-ssh",
  "rmux-term",
  "rmux-transport",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

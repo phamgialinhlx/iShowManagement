@@ -74,3 +74,6 @@ Before starting work, consult memory + `CONTEXT.md` + `docs/adr/` for the projec
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## IMPORTANT
+- Don't read images. Tell user to verify
