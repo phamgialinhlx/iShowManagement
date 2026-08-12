@@ -6,17 +6,19 @@
 //! same call). Terminal bytes never cross an RPC — they go PTY → emulator →
 //! screen, exactly as the invariants require.
 
-use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
 use std::cell::Cell;
 use std::rc::Rc;
 
+use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor};
 use gpui::{
-    App, Context, FocusHandle, Focusable, KeyDownEvent, Keystroke, Pixels, Size, Window, canvas,
-    div, font, prelude::*, px, rgb,
+    App, Bounds, Context, Element, FocusHandle, Focusable, Font, FontWeight, GlobalElementId, Hsla,
+    InspectorElementId, KeyDownEvent, Keystroke, LayoutId, Pixels, Rgba, Size, Style, TextAlign,
+    TextRun, UnderlineStyle, Window, div, font, point, prelude::*, px, relative, rgb, size,
 };
 use rmux_term::{TermSize, Terminal, TerminalEvent};
 use rmux_transport::{CommandSpec, LocalTarget, Target};
@@ -68,19 +70,36 @@ impl Emu {
         self.term.resize(size);
     }
 
-    /// The visible screen as one string per row (spaces preserved for alignment).
-    fn rows(&self) -> Vec<String> {
-        let grid = self.term.grid();
-        let cols = grid.columns();
-        (0..grid.screen_lines())
-            .map(|row| {
-                let mut s = String::with_capacity(cols);
-                for col in 0..cols {
-                    s.push(grid[Line(row as i32)][Column(col)].c);
-                }
-                s
-            })
-            .collect()
+    /// Snapshot the visible screen as per-cell styled data, with the cursor cell
+    /// inverted so it paints as a block. Colors are resolved to `Hsla` here so
+    /// the paint path is pure geometry.
+    fn snapshot(&self) -> Frame {
+        let (cols, lines, mut rows) = {
+            let grid = self.term.grid();
+            let cols = grid.columns();
+            let lines = grid.screen_lines();
+            let rows: Vec<Vec<CellSnap>> = (0..lines)
+                .map(|row| {
+                    (0..cols)
+                        .map(|col| cell_snap(&grid[Line(row as i32)][Column(col)]))
+                        .collect()
+                })
+                .collect();
+            (cols, lines, rows)
+        };
+
+        let cursor = self.term.renderable_content().cursor;
+        if cursor.shape != CursorShape::Hidden {
+            let cursor_row = cursor.point.line.0;
+            let cursor_col = cursor.point.column.0;
+            if cursor_row >= 0 && (cursor_row as usize) < lines && cursor_col < cols {
+                let cell = &mut rows[cursor_row as usize][cursor_col as usize];
+                cell.fg = hex(DEFAULT_BG);
+                cell.bg = Some(hex(CURSOR));
+            }
+        }
+
+        Frame { rows }
     }
 }
 
@@ -180,38 +199,244 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.reflow(cx);
-        let measured = self.measured.clone();
+        let mut bold_font = font(FONT_FAMILY);
+        bold_font.weight = FontWeight::BOLD;
+        let element = TerminalElement {
+            frame: self.emu.snapshot(),
+            measured: self.measured.clone(),
+            font_size: px(FONT_SIZE),
+            line_height: px(LINE_HEIGHT),
+            base_font: font(FONT_FAMILY),
+            bold_font,
+        };
         div()
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))
             .size_full()
-            .bg(rgb(0x14110f))
-            .text_color(rgb(0xe8e6e1))
-            .font_family(FONT_FAMILY)
-            .text_size(px(FONT_SIZE))
-            .line_height(px(LINE_HEIGHT))
-            .flex()
-            .flex_col()
-            // An invisible overlay that reports the pane's pixel bounds so the
-            // next frame can reflow the grid to fit. Absolutely positioned so it
-            // stays out of the text flex flow.
-            .child(
-                canvas(
-                    move |bounds, window, _cx| {
-                        if measured.get() != bounds.size {
-                            measured.set(bounds.size);
-                            window.refresh();
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
-            )
-            .children(self.emu.rows())
+            .bg(rgb(DEFAULT_BG))
+            .child(element)
+    }
+}
+
+/// One cell's rendered attributes (colors already resolved to `Hsla`).
+#[derive(Clone, PartialEq)]
+struct CellSnap {
+    c: char,
+    fg: Hsla,
+    bg: Option<Hsla>,
+    bold: bool,
+    underline: bool,
+}
+
+/// A snapshot of the visible screen, one row of cells at a time.
+struct Frame {
+    rows: Vec<Vec<CellSnap>>,
+}
+
+/// Paints a `Frame` cell-by-cell and reports its bounds back for `reflow`.
+/// Rows are shaped into colored runs; gpui paints the glyphs, per-run
+/// backgrounds, and underlines. The block cursor is just an inverted cell.
+struct TerminalElement {
+    frame: Frame,
+    measured: Rc<Cell<Size<Pixels>>>,
+    font_size: Pixels,
+    line_height: Pixels,
+    base_font: Font,
+    bold_font: Font,
+}
+
+impl IntoElement for TerminalElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for TerminalElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let style = Style {
+            size: size(relative(1.).into(), relative(1.).into()),
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        // Report the pane's pixel bounds so the next frame can reflow the grid.
+        if self.measured.get() != bounds.size {
+            self.measured.set(bounds.size);
+            window.refresh();
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let left = bounds.origin.x;
+        let top = bounds.origin.y;
+        for (row_ix, row) in self.frame.rows.iter().enumerate() {
+            if row.is_empty() {
+                continue;
+            }
+            let (text, runs) = build_runs(row, &self.base_font, &self.bold_font);
+            let shaped = window
+                .text_system()
+                .shape_line(text.into(), self.font_size, &runs, None);
+            let origin = point(left, top + self.line_height * row_ix as f32);
+            let _ = shaped.paint_background(origin, self.line_height, TextAlign::Left, None, window, cx);
+            let _ = shaped.paint(origin, self.line_height, TextAlign::Left, None, window, cx);
+        }
+    }
+}
+
+/// Group a row's cells into runs of identical style and build the row string
+/// plus its `TextRun`s for `shape_line`.
+fn build_runs(row: &[CellSnap], base_font: &Font, bold_font: &Font) -> (String, Vec<TextRun>) {
+    let mut text = String::with_capacity(row.len());
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut i = 0;
+    while i < row.len() {
+        let head = &row[i];
+        let mut run_text = String::new();
+        run_text.push(head.c);
+        let mut j = i + 1;
+        while j < row.len() && same_style(&row[j], head) {
+            run_text.push(row[j].c);
+            j += 1;
+        }
+        runs.push(TextRun {
+            len: run_text.len(),
+            font: if head.bold { bold_font.clone() } else { base_font.clone() },
+            color: head.fg,
+            background_color: head.bg,
+            underline: head.underline.then(|| UnderlineStyle {
+                thickness: px(1.),
+                color: None,
+                wavy: false,
+            }),
+            strikethrough: None,
+        });
+        text.push_str(&run_text);
+        i = j;
+    }
+    (text, runs)
+}
+
+fn same_style(a: &CellSnap, b: &CellSnap) -> bool {
+    a.fg == b.fg && a.bg == b.bg && a.bold == b.bold && a.underline == b.underline
+}
+
+const DEFAULT_FG: u32 = 0xe8e6e1;
+const DEFAULT_BG: u32 = 0x14110f;
+const CURSOR: u32 = 0xe8e6e1;
+
+/// 16-colour ANSI palette (0–7 normal, 8–15 bright), tuned to the warm dark skin.
+const ANSI: [u32; 16] = [
+    0x2a2621, 0xd77b6b, 0x8fae7b, 0xd9b06a, 0x6f9bd8, 0xb58bd0, 0x76b8b0, 0xcfc9c0, 0x6b645c,
+    0xe8907f, 0xa6c48c, 0xe8c67d, 0x88b0e8, 0xcaa0e0, 0x8fd0c8, 0xf0ece4,
+];
+
+fn hex(x: u32) -> Hsla {
+    rgb(x).into()
+}
+
+fn rgb8(r: u8, g: u8, b: u8) -> Hsla {
+    Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: 1. }.into()
+}
+
+fn resolve(color: Color) -> Hsla {
+    match color {
+        Color::Named(named) => resolve_named(named),
+        Color::Spec(spec) => rgb8(spec.r, spec.g, spec.b),
+        Color::Indexed(i) => resolve_indexed(i),
+    }
+}
+
+fn resolve_named(named: NamedColor) -> Hsla {
+    match named {
+        NamedColor::Background => hex(DEFAULT_BG),
+        NamedColor::Cursor => hex(CURSOR),
+        NamedColor::Foreground | NamedColor::BrightForeground => hex(DEFAULT_FG),
+        other => {
+            let idx = other as usize;
+            if idx < 16 { hex(ANSI[idx]) } else { hex(DEFAULT_FG) }
+        }
+    }
+}
+
+fn resolve_indexed(i: u8) -> Hsla {
+    match i {
+        0..=15 => hex(ANSI[i as usize]),
+        16..=231 => {
+            let i = i - 16;
+            let step = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
+            rgb8(step(i / 36), step((i / 6) % 6), step(i % 6))
+        }
+        232..=255 => {
+            let v = 8 + 10 * (i - 232);
+            rgb8(v, v, v)
+        }
+    }
+}
+
+/// Default background cells stay `None` so the pane background shows through.
+fn resolve_bg(color: Color) -> Option<Hsla> {
+    match color {
+        Color::Named(NamedColor::Background) => None,
+        other => Some(resolve(other)),
+    }
+}
+
+fn cell_snap(cell: &alacritty_terminal::term::cell::Cell) -> CellSnap {
+    let flags = cell.flags;
+    let mut fg = resolve(cell.fg);
+    let mut bg = resolve_bg(cell.bg);
+    if flags.contains(Flags::INVERSE) {
+        let prev_fg = fg;
+        fg = bg.unwrap_or_else(|| hex(DEFAULT_BG));
+        bg = Some(prev_fg);
+    }
+    let c = if flags.contains(Flags::HIDDEN) || cell.c == '\0' { ' ' } else { cell.c };
+    CellSnap {
+        c,
+        fg,
+        bg,
+        bold: flags.contains(Flags::BOLD),
+        underline: flags.contains(Flags::UNDERLINE),
     }
 }
 
