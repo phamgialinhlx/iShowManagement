@@ -4843,6 +4843,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "log",
+ "parking_lot",
  "rmux-term",
  "rmux-transport",
 ]

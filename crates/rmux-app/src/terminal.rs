@@ -116,6 +116,12 @@ impl TerminalView {
             let _ = self.pty.write(&bytes);
         }
     }
+
+    /// Whether this terminal currently holds window focus (used by the workspace
+    /// to track the active pane).
+    pub fn has_focus(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
 }
 
 impl Focusable for TerminalView {
@@ -146,6 +152,11 @@ impl Render for TerminalView {
 /// encoder (mouse, all the modified arrows) comes with the real painter.
 fn encode_key(ks: &Keystroke) -> Vec<u8> {
     let key = ks.key.as_str();
+
+    // Cmd combos are workspace shortcuts (split/close), not terminal input.
+    if ks.modifiers.platform {
+        return Vec::new();
+    }
 
     // Ctrl+letter → control code.
     if ks.modifiers.control && key.len() == 1 {

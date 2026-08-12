@@ -4,12 +4,14 @@
 //! emulated by `alacritty_terminal` and painted by gpui. The workspace shell
 //! (panes/docks/tabs) grows around this.
 
+mod pane;
 mod terminal;
+mod workspace;
 
-use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{App, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_platform::application;
 
-use crate::terminal::TerminalView;
+use crate::workspace::{ClosePane, SplitDown, SplitLeft, SplitRight, SplitUp, Workspace};
 
 /// Minimal stderr logger so gpui's own warnings/errors surface. Without an
 /// installed logger these are silently dropped — which once hid the fact that a
@@ -44,13 +46,21 @@ fn main() {
         ];
         cx.text_system().add_fonts(fonts).expect("register Lilex");
 
+        cx.bind_keys([
+            KeyBinding::new("cmd-left", SplitLeft, Some("Workspace")),
+            KeyBinding::new("cmd-right", SplitRight, Some("Workspace")),
+            KeyBinding::new("cmd-up", SplitUp, Some("Workspace")),
+            KeyBinding::new("cmd-down", SplitDown, Some("Workspace")),
+            KeyBinding::new("cmd-w", ClosePane, Some("Workspace")),
+        ]);
+
         let bounds = Bounds::centered(None, size(px(900.), px(600.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| TerminalView::new(window, cx)),
+            |window, cx| cx.new(|cx| Workspace::new(window, cx)),
         )
         .unwrap();
         cx.activate(true);

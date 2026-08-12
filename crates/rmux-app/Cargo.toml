@@ -16,3 +16,4 @@ rmux-transport.workspace = true
 alacritty_terminal.workspace = true
 anyhow.workspace = true
 log = "0.4"
+parking_lot = "0.12"
