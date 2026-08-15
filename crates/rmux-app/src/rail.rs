@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use futures::channel::mpsc;
 use futures::StreamExt as _;
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
-    Keystroke, SharedString, Window, div, prelude::*, px,
+    App, ClickEvent, Context, Div, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
+    IntoElement, KeyDownEvent, Keystroke, SharedString, Stateful, Window, div, prelude::*, px,
 };
 use rmux_transport::TargetId;
 use theme::ActiveTheme;
@@ -433,7 +433,12 @@ impl Render for RailView {
             let row = match *item {
                 RailItem::Server(six) => {
                     let Some(srv) = self.servers.get(six) else { continue };
-                    server_row(srv, selected, colors, status).into_any_element()
+                    server_row(srv, selected, row_ix, colors, status)
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.cursor = row_ix;
+                            view.activate(cx);
+                        }))
+                        .into_any_element()
                 }
                 RailItem::Session { server, session } => {
                     let Some(srv) = self.servers.get(server) else { continue };
@@ -444,7 +449,12 @@ impl Render for RailView {
                     } else {
                         LiveStatus::Gone
                     };
-                    session_row(sess, &live, selected, colors, status).into_any_element()
+                    session_row(sess, &live, selected, row_ix, colors, status)
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                            view.cursor = row_ix;
+                            view.activate(cx);
+                        }))
+                        .into_any_element()
                 }
             };
             rows.push(row);
@@ -469,9 +479,10 @@ impl Render for RailView {
 fn server_row(
     srv: &ServerNode,
     selected: bool,
+    row_ix: usize,
     colors: &theme::ThemeColors,
     status: &theme::StatusColors,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let arrow = if srv.folded { "›" } else { "⌄" };
     let (state_label, state_color) = match &srv.state {
         ConnectState::Connecting => ("…", colors.text_disabled),
@@ -479,7 +490,7 @@ fn server_row(
         ConnectState::Failed(_) => ("!", status.warning),
     };
     div()
-        .id("server")
+        .id(("server", row_ix))
         .w_full()
         .px_2()
         .py_1()
@@ -501,9 +512,10 @@ fn session_row(
     sess: &SessionNode,
     status: &LiveStatus,
     selected: bool,
+    row_ix: usize,
     colors: &theme::ThemeColors,
     status_colors: &theme::StatusColors,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let icon = match sess.kind {
         SessionKind::Shell => "›_",
         SessionKind::Claude => "◇",
@@ -521,7 +533,7 @@ fn session_row(
         .into();
 
     div()
-        .id("session")
+        .id(("session", row_ix))
         .w_full()
         .pl_6()
         .pr_2()
