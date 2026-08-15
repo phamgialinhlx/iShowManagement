@@ -5,10 +5,12 @@
 //! tab within itself or onto another pane.
 
 use gpui::{
-    App, ClickEvent, Context, Entity, EntityId, EventEmitter, Focusable, IntoElement, MouseButton,
-    MouseDownEvent, SharedString, WeakEntity, Window, div, prelude::*, px, rgb,
+    App, Bounds, ClickEvent, Context, DragMoveEvent, Entity, EntityId, EventEmitter, Focusable,
+    IntoElement, MouseButton, MouseDownEvent, Pixels, Point, SharedString, WeakEntity, Window,
+    div, point, prelude::*, px, rgb, size,
 };
 
+use crate::pane_group::SplitDirection;
 use crate::terminal::TerminalView;
 
 const TAB_HEIGHT: f32 = 28.;
@@ -17,10 +19,45 @@ const ACTIVE_TAB_BG: u32 = 0x14110f;
 const ACTIVE_TEXT: u32 = 0xe8e6e1;
 const INACTIVE_TEXT: u32 = 0x8a827a;
 const DROP_HINT: u32 = 0x2a2621;
+// Translucent accent for the drop-zone overlay (fill + border).
+const ZONE_FILL: u32 = 0x8fae7b20;
+const ZONE_BORDER: u32 = 0x8fae7b66;
+const ZONE_CENTER_FILL: u32 = 0x8fae7b10;
 
-/// Emitted when a pane loses its last tab and should be removed from the tree.
+/// Emitted when a pane loses its last tab and should be removed from the tree,
+/// or when a tab is dropped on an edge of the pane's body and the pane should
+/// be split to receive it.
 pub enum PaneEvent {
     Empty,
+    SplitDrop {
+        tab: Entity<TerminalView>,
+        from: WeakEntity<Pane>,
+        direction: SplitDirection,
+    },
+}
+
+/// Which half of a pane's body a dragged tab is hovering over. `Center` means
+/// "move the tab into this pane" (no split); the four edges mean "split the
+/// pane in that direction and put the tab in the new half".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DropZone {
+    Center,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl DropZone {
+    fn direction(self) -> Option<SplitDirection> {
+        match self {
+            DropZone::Left => Some(SplitDirection::Left),
+            DropZone::Right => Some(SplitDirection::Right),
+            DropZone::Up => Some(SplitDirection::Up),
+            DropZone::Down => Some(SplitDirection::Down),
+            DropZone::Center => None,
+        }
+    }
 }
 
 /// The payload dragged when a tab is picked up: the source pane and the item.
@@ -49,6 +86,9 @@ impl Render for TabDragPreview {
 pub struct Pane {
     items: Vec<Entity<TerminalView>>,
     active_ix: usize,
+    /// Which edge of this pane's body a dragged tab is hovering over, if any.
+    /// Set by `on_drag_move`, read by `on_drop` and the overlay renderer.
+    active_drop_zone: Option<DropZone>,
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -56,9 +96,36 @@ impl EventEmitter<PaneEvent> for Pane {}
 impl Pane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let item = cx.new(|cx| TerminalView::new_local(cx));
-        let pane = Self { items: vec![item], active_ix: 0 };
+        let pane = Self {
+            items: vec![item],
+            active_ix: 0,
+            active_drop_zone: None,
+        };
         pane.focus_active(window, cx);
         pane
+    }
+
+    /// An empty pane with no tabs — used as the receiving half of a drag-split.
+    /// The dragged tab is pushed in by the workspace after the split.
+    pub fn empty() -> Self {
+        Self {
+            items: Vec::new(),
+            active_ix: 0,
+            active_drop_zone: None,
+        }
+    }
+
+    /// Number of tabs in this pane.
+    pub fn tab_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Adopt a tab from another pane (used after a drag-split). Does NOT focus
+    /// — the workspace handles focusing via `pending_focus`.
+    pub fn adopt_tab(&mut self, tab: Entity<TerminalView>, cx: &mut Context<Self>) {
+        self.items.push(tab);
+        self.active_ix = 0;
+        cx.notify();
     }
 
     pub fn active_item(&self) -> Option<Entity<TerminalView>> {
@@ -143,8 +210,9 @@ impl Pane {
         cx.notify();
     }
 
-    /// Remove a tab by identity (used when it is dragged out to another pane).
-    fn remove_item(&mut self, id: EntityId, cx: &mut Context<Self>) {
+    /// Remove a tab by identity (used when it is dragged out to another pane,
+    /// or adopted by a new pane after a drag-split).
+    pub fn remove_item(&mut self, id: EntityId, cx: &mut Context<Self>) {
         if let Some(pos) = self.items.iter().position(|item| item.entity_id() == id) {
             self.items.remove(pos);
             if self.items.is_empty() {
@@ -275,10 +343,40 @@ impl Pane {
     }
 }
 
+/// Determine which drop zone the cursor is in, relative to the pane body.
+/// The inner 40%×40% area is `Center` (move tab, no split); the outer 30%
+/// band on each side resolves to the nearest edge. Corners go to the closer
+/// edge because `min` picks the smallest distance.
+fn compute_drop_zone(cursor: Point<Pixels>, body: Bounds<Pixels>) -> DropZone {
+    let dx = (cursor.x - body.origin.x).as_f32() / body.size.width.as_f32();
+    let dy = (cursor.y - body.origin.y).as_f32() / body.size.height.as_f32();
+    let d_left = dx;
+    let d_right = 1.0 - dx;
+    let d_top = dy;
+    let d_bottom = 1.0 - dy;
+    let threshold = 0.3;
+    let min = d_left.min(d_right).min(d_top).min(d_bottom);
+    if min >= threshold {
+        DropZone::Center
+    } else if min == d_left {
+        DropZone::Left
+    } else if min == d_right {
+        DropZone::Right
+    } else if min == d_top {
+        DropZone::Up
+    } else {
+        DropZone::Down
+    }
+}
+
 impl Render for Pane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.active_item();
+        let has_drag = cx.has_active_drag();
+        let zone = self.active_drop_zone;
+
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -287,5 +385,120 @@ impl Render for Pane {
             .when_some(active, |this, item| {
                 this.child(div().flex_1().size_full().child(item))
             })
+            // Track which edge the cursor is hovering over during a tab drag.
+            // Fires on ALL panes; each pane checks its own body bounds and
+            // only the one under the cursor keeps a zone set.
+            .on_drag_move(cx.listener(|pane, ev: &DragMoveEvent<TabDrag>, _window, cx| {
+                let cursor = ev.event.position;
+                let body_top = ev.bounds.origin.y + px(TAB_HEIGHT);
+                let body = Bounds {
+                    origin: point(ev.bounds.origin.x, body_top),
+                    size: size(
+                        ev.bounds.size.width,
+                        ev.bounds.size.height - px(TAB_HEIGHT),
+                    ),
+                };
+                let new_zone = if body.contains(&cursor) {
+                    Some(compute_drop_zone(cursor, body))
+                } else {
+                    None
+                };
+                if pane.active_drop_zone != new_zone {
+                    pane.active_drop_zone = new_zone;
+                    cx.notify();
+                }
+            }))
+            // Drop on the pane body. Tab-bar drops fire first (innermost) and
+            // stop propagation, so this only fires for body-area drops.
+            .on_drop(cx.listener(|pane, drag: &TabDrag, window, cx| {
+                let zone = pane.active_drop_zone.take();
+                match zone {
+                    None | Some(DropZone::Center) => {
+                        // Move tab into this pane (append), same as tab-bar tail.
+                        pane.drop_tab(drag, pane.items.len(), window, cx);
+                    }
+                    Some(direction_zone) => {
+                        if let Some(direction) = direction_zone.direction() {
+                            // Guard: skip no-op split (only tab, same pane).
+                            let is_same =
+                                drag.from.upgrade().as_ref() == Some(&cx.entity());
+                            if is_same && pane.items.len() <= 1 {
+                                cx.notify();
+                                return;
+                            }
+                            cx.emit(PaneEvent::SplitDrop {
+                                tab: drag.item.clone(),
+                                from: drag.from.clone(),
+                                direction,
+                            });
+                        }
+                    }
+                }
+                cx.notify();
+            }))
+            // Drop-zone overlay: only while a drag is active and a zone is set.
+            .when(has_drag && zone.is_some(), |this| {
+                this.child(render_drop_overlay(zone.unwrap()))
+            })
     }
+}
+
+/// The translucent highlight shown over the pane body while a tab is dragged
+/// onto an edge. Absolute-positioned over the body area (below the tab bar).
+/// Each directional zone shows the highlighted half; center shows a faint tint
+/// over the whole body.
+fn render_drop_overlay(zone: DropZone) -> impl IntoElement {
+    let inner: gpui::AnyElement = match zone {
+        DropZone::Center => div()
+            .size_full()
+            .bg(rgb(ZONE_CENTER_FILL))
+            .into_any_element(),
+        DropZone::Left | DropZone::Right => {
+            let (first, second) = if zone == DropZone::Left {
+                (zone_highlight(), zone_plain())
+            } else {
+                (zone_plain(), zone_highlight())
+            };
+            div()
+                .flex()
+                .flex_row()
+                .size_full()
+                .child(first)
+                .child(second)
+                .into_any_element()
+        }
+        DropZone::Up | DropZone::Down => {
+            let (first, second) = if zone == DropZone::Up {
+                (zone_highlight(), zone_plain())
+            } else {
+                (zone_plain(), zone_highlight())
+            };
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(first)
+                .child(second)
+                .into_any_element()
+        }
+    };
+
+    div()
+        .absolute()
+        .left_0()
+        .top(px(TAB_HEIGHT))
+        .size_full()
+        .child(inner)
+}
+
+fn zone_highlight() -> gpui::Div {
+    div()
+        .flex_1()
+        .bg(rgb(ZONE_FILL))
+        .border_1()
+        .border_color(rgb(ZONE_BORDER))
+}
+
+fn zone_plain() -> gpui::Div {
+    div().flex_1()
 }

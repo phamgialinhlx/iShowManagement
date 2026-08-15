@@ -41,6 +41,10 @@ pub struct Workspace {
     session_map: HashMap<(TargetId, String), WeakEntity<TerminalView>>,
     /// Persisted servers + adopted session names.
     state: State,
+    /// A pane that should be focused on the next render (set after a drag-split
+    /// drops a tab into a new pane). `render` has `&mut Window`, which is needed
+    /// to call `focus_active`; the event handler doesn't.
+    pending_focus: Option<Entity<Pane>>,
 }
 
 impl Workspace {
@@ -61,6 +65,7 @@ impl Workspace {
             picker_sub: None,
             session_map: HashMap::new(),
             state,
+            pending_focus: None,
         };
         this.resubscribe(cx);
         this
@@ -83,6 +88,27 @@ impl Workspace {
                     self.resubscribe(cx);
                     cx.notify();
                 }
+            }
+            PaneEvent::SplitDrop { tab, from, direction } => {
+                let target = pane.clone();
+                // Guard: skip no-op split (already checked in pane's on_drop,
+                // but double-check to be safe).
+                if from.upgrade().as_ref() == Some(&target) && target.read(cx).tab_count() <= 1 {
+                    return;
+                }
+                let new = cx.new(|_cx| Pane::empty());
+                self.center.split(&target, &new, *direction);
+                // Move tab into the new pane (no window needed — adopt_tab
+                // just pushes and notifies).
+                let tab_id = tab.entity_id();
+                new.update(cx, |p, cx| p.adopt_tab(tab.clone(), cx));
+                // Remove from source pane (remove_item doesn't need window).
+                if let Some(src) = from.upgrade() {
+                    src.update(cx, |p, cx| p.remove_item(tab_id, cx));
+                }
+                self.resubscribe(cx);
+                self.pending_focus = Some(new);
+                cx.notify();
             }
         }
     }
@@ -292,6 +318,13 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Focus the pane that received a drag-split tab. The event handler
+        // can't call focus_active (no &mut Window), so it stashes the pane
+        // here for one frame. Imperceptible — fires on the same render cycle.
+        if let Some(pane) = self.pending_focus.take() {
+            pane.update(cx, |p, cx| p.focus_active(window, cx));
+        }
+
         // Collect the non-cx-borrowing parts first. `self.center.render` borrows
         // `cx` mutably, so it is inlined after the `on_action` listeners (which
         // borrow `cx` immutably) to keep the borrows from overlapping.
