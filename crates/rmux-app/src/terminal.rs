@@ -21,10 +21,11 @@ use gpui::{
     App, Bounds, Context, Element, FocusHandle, Focusable, Font, FontWeight, GlobalElementId, Hsla,
     InspectorElementId, KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent, Pixels,
     Rgba, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, div, font, point, prelude::*, px,
-    relative, rgb, size,
+    relative, size,
 };
 use rmux_term::{TermSize, Terminal, TerminalEvent};
 use rmux_transport::{CommandSpec, LocalTarget, ResolvedCommand, Target};
+use theme::ActiveTheme;
 
 /// Initial PTY grid, before the pane has been measured (see `reflow`).
 const COLS: u16 = 100;
@@ -100,7 +101,7 @@ impl Emu {
     /// Snapshot the visible screen as per-cell styled data, with the cursor cell
     /// inverted so it paints as a block. Colors are resolved to `Hsla` here so
     /// the paint path is pure geometry.
-    fn snapshot(&self) -> Frame {
+    fn snapshot(&self, palette: &TerminalPalette) -> Frame {
         let (cols, lines, mut rows) = {
             let grid = self.term.grid();
             let cols = grid.columns();
@@ -108,7 +109,7 @@ impl Emu {
             let rows: Vec<Vec<CellSnap>> = (0..lines)
                 .map(|row| {
                     (0..cols)
-                        .map(|col| cell_snap(&grid[Line(row as i32)][Column(col)]))
+                        .map(|col| cell_snap(&grid[Line(row as i32)][Column(col)], palette))
                         .collect()
                 })
                 .collect();
@@ -121,8 +122,8 @@ impl Emu {
             let cursor_col = cursor.point.column.0;
             if cursor_row >= 0 && (cursor_row as usize) < lines && cursor_col < cols {
                 let cell = &mut rows[cursor_row as usize][cursor_col as usize];
-                cell.fg = hex(DEFAULT_BG);
-                cell.bg = Some(hex(CURSOR));
+                cell.fg = palette.bg;
+                cell.bg = Some(palette.cursor);
             }
         }
 
@@ -258,8 +259,34 @@ impl Render for TerminalView {
         self.reflow(cx);
         let mut bold_font = font(FONT_FAMILY);
         bold_font.weight = FontWeight::BOLD;
+        let colors = cx.theme().colors();
+        let palette = TerminalPalette {
+            fg: colors.terminal_foreground,
+            bg: colors.terminal_background,
+            cursor: colors.terminal_foreground,
+            ansi: [
+                colors.terminal_ansi_black,
+                colors.terminal_ansi_red,
+                colors.terminal_ansi_green,
+                colors.terminal_ansi_yellow,
+                colors.terminal_ansi_blue,
+                colors.terminal_ansi_magenta,
+                colors.terminal_ansi_cyan,
+                colors.terminal_ansi_white,
+                colors.terminal_ansi_bright_black,
+                colors.terminal_ansi_bright_red,
+                colors.terminal_ansi_bright_green,
+                colors.terminal_ansi_bright_yellow,
+                colors.terminal_ansi_bright_blue,
+                colors.terminal_ansi_bright_magenta,
+                colors.terminal_ansi_bright_cyan,
+                colors.terminal_ansi_bright_white,
+            ],
+        };
+        let term_bg = colors.terminal_background;
+        let active_border = colors.pane_focused_border;
         let element = TerminalElement {
-            frame: self.emu.snapshot(),
+            frame: self.emu.snapshot(&palette),
             measured: self.measured.clone(),
             font_size: px(FONT_SIZE),
             line_height: px(LINE_HEIGHT),
@@ -277,11 +304,11 @@ impl Render for TerminalView {
                 }),
             )
             .size_full()
-            .bg(rgb(DEFAULT_BG))
+            .bg(term_bg)
             // A 1px border, tinted only while focused, marks the active pane.
             .border_1()
-            .border_color(rgb(DEFAULT_BG))
-            .focus(|style| style.border_color(rgb(ACTIVE_BORDER)))
+            .border_color(term_bg)
+            .focus(|style| style.border_color(active_border))
             .child(element)
     }
 }
@@ -294,6 +321,15 @@ struct CellSnap {
     bg: Option<Hsla>,
     bold: bool,
     underline: bool,
+}
+
+/// Resolved terminal colors, threaded from the theme through `snapshot()` to
+/// the per-cell color resolution functions. All `Hsla` values are `Copy`.
+struct TerminalPalette {
+    fg: Hsla,
+    bg: Hsla,
+    cursor: Hsla,
+    ansi: [Hsla; 16],
 }
 
 /// A snapshot of the visible screen, one row of cells at a time.
@@ -427,49 +463,33 @@ fn same_style(a: &CellSnap, b: &CellSnap) -> bool {
     a.fg == b.fg && a.bg == b.bg && a.bold == b.bold && a.underline == b.underline
 }
 
-const DEFAULT_FG: u32 = 0xe8e6e1;
-const DEFAULT_BG: u32 = 0x14110f;
-const CURSOR: u32 = 0xe8e6e1;
-/// Border tint on the focused (active) pane.
-const ACTIVE_BORDER: u32 = 0x5c5346;
-
-/// 16-colour ANSI palette (0–7 normal, 8–15 bright), tuned to the warm dark skin.
-const ANSI: [u32; 16] = [
-    0x2a2621, 0xd77b6b, 0x8fae7b, 0xd9b06a, 0x6f9bd8, 0xb58bd0, 0x76b8b0, 0xcfc9c0, 0x6b645c,
-    0xe8907f, 0xa6c48c, 0xe8c67d, 0x88b0e8, 0xcaa0e0, 0x8fd0c8, 0xf0ece4,
-];
-
-fn hex(x: u32) -> Hsla {
-    rgb(x).into()
-}
-
 fn rgb8(r: u8, g: u8, b: u8) -> Hsla {
     Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: 1. }.into()
 }
 
-fn resolve(color: Color) -> Hsla {
+fn resolve(color: Color, palette: &TerminalPalette) -> Hsla {
     match color {
-        Color::Named(named) => resolve_named(named),
+        Color::Named(named) => resolve_named(named, palette),
         Color::Spec(spec) => rgb8(spec.r, spec.g, spec.b),
-        Color::Indexed(i) => resolve_indexed(i),
+        Color::Indexed(i) => resolve_indexed(i, palette),
     }
 }
 
-fn resolve_named(named: NamedColor) -> Hsla {
+fn resolve_named(named: NamedColor, palette: &TerminalPalette) -> Hsla {
     match named {
-        NamedColor::Background => hex(DEFAULT_BG),
-        NamedColor::Cursor => hex(CURSOR),
-        NamedColor::Foreground | NamedColor::BrightForeground => hex(DEFAULT_FG),
+        NamedColor::Background => palette.bg,
+        NamedColor::Cursor => palette.cursor,
+        NamedColor::Foreground | NamedColor::BrightForeground => palette.fg,
         other => {
             let idx = other as usize;
-            if idx < 16 { hex(ANSI[idx]) } else { hex(DEFAULT_FG) }
+            if idx < 16 { palette.ansi[idx] } else { palette.fg }
         }
     }
 }
 
-fn resolve_indexed(i: u8) -> Hsla {
+fn resolve_indexed(i: u8, palette: &TerminalPalette) -> Hsla {
     match i {
-        0..=15 => hex(ANSI[i as usize]),
+        0..=15 => palette.ansi[i as usize],
         16..=231 => {
             let i = i - 16;
             let step = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
@@ -483,20 +503,20 @@ fn resolve_indexed(i: u8) -> Hsla {
 }
 
 /// Default background cells stay `None` so the pane background shows through.
-fn resolve_bg(color: Color) -> Option<Hsla> {
+fn resolve_bg(color: Color, palette: &TerminalPalette) -> Option<Hsla> {
     match color {
         Color::Named(NamedColor::Background) => None,
-        other => Some(resolve(other)),
+        other => Some(resolve(other, palette)),
     }
 }
 
-fn cell_snap(cell: &alacritty_terminal::term::cell::Cell) -> CellSnap {
+fn cell_snap(cell: &alacritty_terminal::term::cell::Cell, palette: &TerminalPalette) -> CellSnap {
     let flags = cell.flags;
-    let mut fg = resolve(cell.fg);
-    let mut bg = resolve_bg(cell.bg);
+    let mut fg = resolve(cell.fg, palette);
+    let mut bg = resolve_bg(cell.bg, palette);
     if flags.contains(Flags::INVERSE) {
         let prev_fg = fg;
-        fg = bg.unwrap_or_else(|| hex(DEFAULT_BG));
+        fg = bg.unwrap_or(palette.bg);
         bg = Some(prev_fg);
     }
     let c = if flags.contains(Flags::HIDDEN) || cell.c == '\0' { ' ' } else { cell.c };

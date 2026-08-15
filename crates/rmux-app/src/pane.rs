@@ -6,23 +6,15 @@
 
 use gpui::{
     App, Bounds, ClickEvent, Context, DragMoveEvent, Entity, EntityId, EventEmitter, Focusable,
-    IntoElement, MouseButton, MouseDownEvent, Pixels, Point, SharedString, WeakEntity, Window,
-    div, point, prelude::*, px, rgb, size,
+    Hsla, IntoElement, MouseButton, MouseDownEvent, Pixels, Point, SharedString, WeakEntity,
+    Window, div, point, prelude::*, px, size,
 };
+use theme::ActiveTheme;
 
 use crate::pane_group::SplitDirection;
 use crate::terminal::TerminalView;
 
 const TAB_HEIGHT: f32 = 28.;
-const BAR_BG: u32 = 0x0a0908;
-const ACTIVE_TAB_BG: u32 = 0x14110f;
-const ACTIVE_TEXT: u32 = 0xe8e6e1;
-const INACTIVE_TEXT: u32 = 0x8a827a;
-const DROP_HINT: u32 = 0x2a2621;
-// Translucent accent for the drop-zone overlay (fill + border).
-const ZONE_FILL: u32 = 0x8fae7b20;
-const ZONE_BORDER: u32 = 0x8fae7b66;
-const ZONE_CENTER_FILL: u32 = 0x8fae7b10;
 
 /// Emitted when a pane loses its last tab and should be removed from the tree,
 /// or when a tab is dropped on an edge of the pane's body and the pane should
@@ -72,12 +64,13 @@ struct TabDragPreview {
 }
 
 impl Render for TabDragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
         div()
             .px_3()
             .py_1()
-            .bg(rgb(DROP_HINT))
-            .text_color(rgb(ACTIVE_TEXT))
+            .bg(colors.element_active)
+            .text_color(colors.text)
             .rounded_md()
             .child(self.title.clone())
     }
@@ -264,6 +257,7 @@ impl Pane {
         let this = cx.entity();
         let drag_item = item.clone();
         let drag_title = title.clone();
+        let colors = cx.theme().colors();
 
         div()
             .id(ix)
@@ -273,16 +267,16 @@ impl Pane {
             .gap_1p5()
             .px_2()
             .h(px(TAB_HEIGHT))
-            .bg(if is_active { rgb(ACTIVE_TAB_BG) } else { rgb(BAR_BG) })
-            .text_color(if is_active { rgb(ACTIVE_TEXT) } else { rgb(INACTIVE_TEXT) })
-            .child(div().text_color(rgb(INACTIVE_TEXT)).child("›_"))
+            .bg(if is_active { colors.tab_active_background } else { colors.tab_bar_background })
+            .text_color(if is_active { colors.text } else { colors.text_placeholder })
+            .child(div().text_color(colors.text_placeholder).child("›_"))
             .child(title)
             .child(
                 // Close button; stops propagation so it doesn't also activate.
                 div()
                     .id("close")
                     .px_1()
-                    .text_color(rgb(INACTIVE_TEXT))
+                    .text_color(colors.text_placeholder)
                     .child("✕")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -299,13 +293,20 @@ impl Pane {
                 TabDrag { from: this.downgrade(), item: drag_item },
                 move |_, _, _, cx| cx.new(|_| TabDragPreview { title: drag_title.clone() }),
             )
-            .drag_over::<TabDrag>(|style, _, _, _| style.bg(rgb(DROP_HINT)))
+            .drag_over::<TabDrag>(|style, _, _, drag_cx| {
+                style.bg(drag_cx.theme().colors().element_active)
+            })
             .on_drop(cx.listener(move |pane, drag: &TabDrag, window, cx| {
                 pane.drop_tab(drag, ix, window, cx);
             }))
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Extract Copy values before the .map() closure borrows cx mutably.
+        let (bar_bg, new_tab_color) = {
+            let c = cx.theme().colors();
+            (c.tab_bar_background, c.text_placeholder)
+        };
         let tabs: Vec<_> = self
             .items
             .iter()
@@ -321,7 +322,7 @@ impl Pane {
             .items_center()
             .h(px(TAB_HEIGHT))
             .w_full()
-            .bg(rgb(BAR_BG))
+            .bg(bar_bg)
             .children(tabs)
             .child(
                 div()
@@ -330,7 +331,7 @@ impl Pane {
                     .h(px(TAB_HEIGHT))
                     .flex()
                     .items_center()
-                    .text_color(rgb(INACTIVE_TEXT))
+                    .text_color(new_tab_color)
                     .child("+")
                     .on_click(cx.listener(|pane, _: &ClickEvent, window, cx| {
                         pane.add_terminal(window, cx);
@@ -374,13 +375,19 @@ impl Render for Pane {
         let active = self.active_item();
         let has_drag = cx.has_active_drag();
         let zone = self.active_drop_zone;
+        // Extract Copy values before the div chain — render_tab_bar(cx) and
+        // cx.listener() both borrow cx, so the theme reference can't persist.
+        let (pane_bg, accent) = {
+            let c = cx.theme().colors();
+            (c.tab_active_background, c.text_accent)
+        };
 
         div()
             .relative()
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(ACTIVE_TAB_BG))
+            .bg(pane_bg)
             .child(self.render_tab_bar(cx))
             .when_some(active, |this, item| {
                 this.child(div().flex_1().size_full().child(item))
@@ -438,7 +445,12 @@ impl Render for Pane {
             }))
             // Drop-zone overlay: only while a drag is active and a zone is set.
             .when(has_drag && zone.is_some(), |this| {
-                this.child(render_drop_overlay(zone.unwrap()))
+                this.child(render_drop_overlay(
+                    zone.unwrap(),
+                    accent.opacity(0.125),
+                    accent.opacity(0.4),
+                    accent.opacity(0.06),
+                ))
             })
     }
 }
@@ -447,17 +459,22 @@ impl Render for Pane {
 /// onto an edge. Absolute-positioned over the body area (below the tab bar).
 /// Each directional zone shows the highlighted half; center shows a faint tint
 /// over the whole body.
-fn render_drop_overlay(zone: DropZone) -> impl IntoElement {
+fn render_drop_overlay(
+    zone: DropZone,
+    zone_fill: Hsla,
+    zone_border: Hsla,
+    zone_center_fill: Hsla,
+) -> impl IntoElement {
     let inner: gpui::AnyElement = match zone {
         DropZone::Center => div()
             .size_full()
-            .bg(rgb(ZONE_CENTER_FILL))
+            .bg(zone_center_fill)
             .into_any_element(),
         DropZone::Left | DropZone::Right => {
             let (first, second) = if zone == DropZone::Left {
-                (zone_highlight(), zone_plain())
+                (zone_highlight(zone_fill, zone_border), zone_plain())
             } else {
-                (zone_plain(), zone_highlight())
+                (zone_plain(), zone_highlight(zone_fill, zone_border))
             };
             div()
                 .flex()
@@ -469,9 +486,9 @@ fn render_drop_overlay(zone: DropZone) -> impl IntoElement {
         }
         DropZone::Up | DropZone::Down => {
             let (first, second) = if zone == DropZone::Up {
-                (zone_highlight(), zone_plain())
+                (zone_highlight(zone_fill, zone_border), zone_plain())
             } else {
-                (zone_plain(), zone_highlight())
+                (zone_plain(), zone_highlight(zone_fill, zone_border))
             };
             div()
                 .flex()
@@ -491,12 +508,12 @@ fn render_drop_overlay(zone: DropZone) -> impl IntoElement {
         .child(inner)
 }
 
-fn zone_highlight() -> gpui::Div {
+fn zone_highlight(zone_fill: Hsla, zone_border: Hsla) -> gpui::Div {
     div()
         .flex_1()
-        .bg(rgb(ZONE_FILL))
+        .bg(zone_fill)
         .border_1()
-        .border_color(rgb(ZONE_BORDER))
+        .border_color(zone_border)
 }
 
 fn zone_plain() -> gpui::Div {

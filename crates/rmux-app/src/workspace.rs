@@ -8,9 +8,10 @@ use std::collections::HashMap;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, Subscription, WeakEntity, Window, actions, div,
-    prelude::*, rgb,
+    prelude::*,
 };
 use rmux_transport::TargetId;
+use theme::ActiveTheme;
 
 use crate::backend::Backend;
 use crate::pane::{Pane, PaneEvent};
@@ -331,6 +332,7 @@ impl Render for Workspace {
         let rail = self.rail.clone();
         let picker = self.picker.clone();
         let rail_visible = self.rail_visible;
+        let bg_color = cx.theme().colors().background;
 
         div()
             .track_focus(&self.focus)
@@ -358,7 +360,7 @@ impl Render for Workspace {
             }))
             .size_full()
             .relative()
-            .bg(rgb(0x14110f))
+            .bg(bg_color)
             .flex()
             .flex_row()
             .when(rail_visible, |this| this.child(rail))
@@ -378,7 +380,7 @@ impl Render for Workspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .bg(rgb(0x000000))
+                        .bg(gpui::black())
                         .child(picker),
                 )
             })

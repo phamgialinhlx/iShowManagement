@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 gpui = { path = "../../vendor/zed/crates/gpui" }
 gpui_platform = { path = "../../vendor/zed/crates/gpui_platform", features = ["font-kit"] }
+theme = { path = "../../vendor/zed/crates/theme" }
 rmux-term.workspace = true
 rmux-transport.workspace = true
 rmux-ssh.workspace = true

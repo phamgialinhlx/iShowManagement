@@ -15,10 +15,11 @@ use std::collections::HashMap;
 use futures::channel::mpsc;
 use futures::StreamExt as _;
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
-    Keystroke, SharedString, Window, div, prelude::*, px, rgb,
+    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
+    Keystroke, SharedString, Window, div, prelude::*, px,
 };
 use rmux_transport::TargetId;
+use theme::ActiveTheme;
 
 use crate::backend::{self, AgentSession, Backend, StatusLine};
 use crate::state::{SessionKind, State};
@@ -419,18 +420,12 @@ impl Focusable for RailView {
 
 // ── Rendering ───────────────────────────────────────────────────────────────
 
-const RAIL_BG: u32 = 0x0a0908;
-const RAIL_FG: u32 = 0xcfc9c0;
-const RAIL_DIM: u32 = 0x6b645c;
-const CURSOR_BG: u32 = 0x2a2621;
-const ACCENT: u32 = 0x8fae7b;
-const WARN: u32 = 0xd9b06a;
-const BUSY: u32 = 0x88b0e8;
-
 impl Render for RailView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.clamp_cursor();
         let items = self.flat();
+        let colors = cx.theme().colors();
+        let status = cx.theme().status();
 
         let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(items.len());
         for (row_ix, item) in items.iter().enumerate() {
@@ -438,18 +433,18 @@ impl Render for RailView {
             let row = match *item {
                 RailItem::Server(six) => {
                     let Some(srv) = self.servers.get(six) else { continue };
-                    server_row(srv, selected).into_any_element()
+                    server_row(srv, selected, colors, status).into_any_element()
                 }
                 RailItem::Session { server, session } => {
                     let Some(srv) = self.servers.get(server) else { continue };
                     let Some(sess) = srv.sessions.get(session) else { continue };
                     let host_status = self.status_by_host.get(&srv.target);
-                    let status = if sess.live {
+                    let live = if sess.live {
                         live_status(sess.kind, &sess.folder, host_status)
                     } else {
                         LiveStatus::Gone
                     };
-                    session_row(sess, &status, selected).into_any_element()
+                    session_row(sess, &live, selected, colors, status).into_any_element()
                 }
             };
             rows.push(row);
@@ -458,25 +453,30 @@ impl Render for RailView {
         div()
             .track_focus(&self.focus)
             .key_context("Rail")
-            .on_key_down(_cx.listener(Self::on_key))
+            .on_key_down(cx.listener(Self::on_key))
             .h_full()
             .w(px(240.))
             .flex_shrink_0()
-            .bg(rgb(RAIL_BG))
+            .bg(colors.panel_background)
             .border_r_1()
-            .border_color(rgb(0x1a1714))
+            .border_color(colors.border_variant)
             .flex()
             .flex_col()
             .children(rows)
     }
 }
 
-fn server_row(srv: &ServerNode, selected: bool) -> impl IntoElement {
+fn server_row(
+    srv: &ServerNode,
+    selected: bool,
+    colors: &theme::ThemeColors,
+    status: &theme::StatusColors,
+) -> impl IntoElement {
     let arrow = if srv.folded { "›" } else { "⌄" };
     let (state_label, state_color) = match &srv.state {
-        ConnectState::Connecting => ("…", RAIL_DIM),
-        ConnectState::Ready => ("", RAIL_DIM),
-        ConnectState::Failed(_) => ("!", WARN),
+        ConnectState::Connecting => ("…", colors.text_disabled),
+        ConnectState::Ready => ("", colors.text_disabled),
+        ConnectState::Failed(_) => ("!", status.warning),
     };
     div()
         .id("server")
@@ -487,25 +487,31 @@ fn server_row(srv: &ServerNode, selected: bool) -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap_1()
-        .bg(if selected { rgb(CURSOR_BG) } else { rgb(RAIL_BG) })
-        .text_color(rgb(RAIL_FG))
+        .bg(if selected { colors.element_active } else { colors.panel_background })
+        .text_color(colors.text_muted)
         .text_sm()
-        .child(div().w_3().text_color(rgb(RAIL_DIM)).child(arrow))
+        .child(div().w_3().text_color(colors.text_disabled).child(arrow))
         .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child(srv.label.clone()))
         .when(!state_label.is_empty(), |this| {
-            this.child(div().text_color(rgb(state_color)).child(state_label))
+            this.child(div().text_color(state_color).child(state_label))
         })
 }
 
-fn session_row(sess: &SessionNode, status: &LiveStatus, selected: bool) -> impl IntoElement {
+fn session_row(
+    sess: &SessionNode,
+    status: &LiveStatus,
+    selected: bool,
+    colors: &theme::ThemeColors,
+    status_colors: &theme::StatusColors,
+) -> impl IntoElement {
     let icon = match sess.kind {
         SessionKind::Shell => "›_",
         SessionKind::Claude => "◇",
     };
-    let dot_color = status_color(status);
+    let dot_color = status_color(status, colors, status_colors);
     let label = sess.alias.clone().unwrap_or_else(|| sess.name.clone());
     let dim = !sess.live;
-    let text_color = if dim { RAIL_DIM } else { RAIL_FG };
+    let text = if dim { colors.text_disabled } else { colors.text_muted };
     let folder: SharedString = sess
         .folder
         .as_deref()
@@ -524,24 +530,28 @@ fn session_row(sess: &SessionNode, status: &LiveStatus, selected: bool) -> impl 
         .flex_row()
         .items_center()
         .gap_2()
-        .bg(if selected { rgb(CURSOR_BG) } else { rgb(RAIL_BG) })
-        .text_color(rgb(text_color))
+        .bg(if selected { colors.element_active } else { colors.panel_background })
+        .text_color(text)
         .text_sm()
-        .child(div().w_3().text_color(rgb(RAIL_DIM)).child(icon))
-        .child(div().w_2().h_2().rounded_full().bg(rgb(dot_color)))
+        .child(div().w_3().text_color(colors.text_disabled).child(icon))
+        .child(div().w_2().h_2().rounded_full().bg(dot_color))
         .child(div().flex_1().child(label))
-        .child(div().text_xs().text_color(rgb(RAIL_DIM)).child(folder))
+        .child(div().text_xs().text_color(colors.text_disabled).child(folder))
         .when(sess.attached, |this| {
-            this.child(div().text_xs().text_color(rgb(ACCENT)).child("●"))
+            this.child(div().text_xs().text_color(colors.text_accent).child("●"))
         })
 }
 
-fn status_color(status: &LiveStatus) -> u32 {
+fn status_color(
+    status: &LiveStatus,
+    colors: &theme::ThemeColors,
+    status_colors: &theme::StatusColors,
+) -> Hsla {
     match status {
-        LiveStatus::Busy => BUSY,
-        LiveStatus::Waiting => WARN,
-        LiveStatus::Idle => ACCENT,
-        LiveStatus::Shell => RAIL_DIM,
-        LiveStatus::Gone => RAIL_DIM,
+        LiveStatus::Busy => status_colors.info,
+        LiveStatus::Waiting => status_colors.warning,
+        LiveStatus::Idle => status_colors.success,
+        LiveStatus::Shell => colors.text_disabled,
+        LiveStatus::Gone => colors.text_disabled,
     }
 }

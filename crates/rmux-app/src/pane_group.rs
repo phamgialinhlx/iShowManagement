@@ -16,8 +16,6 @@ use std::sync::Arc;
 
 use crate::pane::Pane;
 
-const DIVIDER_COLOR: u32 = 0x2a2621;
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum SplitDirection {
     Up,
@@ -288,8 +286,7 @@ mod element {
         relative, size,
     };
     use parking_lot::Mutex;
-
-    use super::DIVIDER_COLOR;
+    use theme::ActiveTheme;
 
     const HANDLE_HITBOX_SIZE: f32 = 4.0;
     const DIVIDER_SIZE: f32 = 1.0;
@@ -587,7 +584,7 @@ mod element {
                     window.set_cursor_style(cursor_style, &handle.hitbox);
                 }
 
-                window.paint_quad(fill(handle.divider_bounds, gpui::rgb(DIVIDER_COLOR)));
+                window.paint_quad(fill(handle.divider_bounds, cx.theme().colors().pane_group_border));
 
                 window.on_mouse_event({
                     let dragged_handle = layout.dragged_handle.clone();

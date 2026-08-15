@@ -8,11 +8,12 @@
 //! fully keyboard-driven and needs no IME/text-field machinery.
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, SharedString,
-    Window, div, prelude::*, px, rgb,
+    App, Context, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
+    SharedString, Window, div, prelude::*, px,
 };
 use rmux_ssh::config::ConfigHost;
 use rmux_transport::{SshHostId, TargetId};
+use theme::ActiveTheme;
 
 use crate::backend::Backend;
 
@@ -155,23 +156,21 @@ impl Focusable for HostPicker {
     }
 }
 
-const OVERLAY_BG: u32 = 0x14110f;
-const ROW_BG: u32 = 0x0a0908;
-const CURSOR_BG: u32 = 0x2a2621;
-const FG: u32 = 0xe8e6e1;
-const DIM: u32 = 0x6b645c;
-const ACCENT: u32 = 0x8fae7b;
-
 impl Render for HostPicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.clamp_cursor();
         let filtered = self.filtered();
+        let colors = cx.theme().colors();
         let query: SharedString = if self.query.is_empty() {
             "Type to filter hosts…".into()
         } else {
             self.query.clone().into()
         };
-        let query_color = if self.query.is_empty() { DIM } else { FG };
+        let query_color: Hsla = if self.query.is_empty() {
+            colors.text_muted
+        } else {
+            colors.text
+        };
 
         let rows: Vec<gpui::AnyElement> = filtered
             .iter()
@@ -188,11 +187,11 @@ impl Render for HostPicker {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .bg(if selected { rgb(CURSOR_BG) } else { rgb(ROW_BG) })
-                    .text_color(if selected { rgb(ACCENT) } else { rgb(FG) })
+                    .bg(if selected { colors.element_active } else { colors.surface_background })
+                    .text_color(if selected { colors.text_accent } else { colors.text })
                     .child(div().flex_1().child(entry.alias.clone()))
                     .when_some(entry.detail.clone(), |this, d| {
-                        this.child(div().text_xs().text_color(rgb(DIM)).child(d))
+                        this.child(div().text_xs().text_color(colors.text_muted).child(d))
                     })
                     .into_any_element()
             })
@@ -204,9 +203,9 @@ impl Render for HostPicker {
             .on_key_down(cx.listener(Self::on_key))
             .w(px(360.))
             .max_h(px(460.))
-            .bg(rgb(OVERLAY_BG))
+            .bg(colors.elevated_surface_background)
             .border_1()
-            .border_color(rgb(0x2a2621))
+            .border_color(colors.border)
             .rounded_md()
             .shadow_md()
             .overflow_hidden()
@@ -217,9 +216,9 @@ impl Render for HostPicker {
                     .flex_shrink_0()
                     .px_3()
                     .py_2()
-                    .text_color(rgb(query_color))
+                    .text_color(query_color)
                     .border_b_1()
-                    .border_color(rgb(0x1a1714))
+                    .border_color(colors.border_variant)
                     .child(query),
             )
             .child(

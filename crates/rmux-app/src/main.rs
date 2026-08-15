@@ -11,6 +11,7 @@ mod picker;
 mod rail;
 mod state;
 mod terminal;
+mod theme;
 mod workspace;
 
 use gpui::{App, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size};
@@ -53,6 +54,10 @@ fn main() {
             ),
         ];
         cx.text_system().add_fonts(fonts).expect("register Lilex");
+
+        // Theme system: sets up the GlobalTheme with the Signal Room default.
+        // All UI colours read from cx.theme().colors().* after this.
+        crate::theme::init_theme(cx);
 
         // Backend service: tokio runtime + target/agent cache, global for the
         // process lifetime.
