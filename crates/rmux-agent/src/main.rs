@@ -106,6 +106,30 @@ async fn main() -> ExitCode {
             }
         }
 
+        // The Redstone bridge: an outbound WebSocket that lets Redstone drive
+        // this host's Claude sessions. Enrolled by rmux, which writes
+        // `~/.rmux/redstone.json`; refuses with a reason when it is not there.
+        //
+        // Logs like the daemon rather than printing a protocol on stdout, because
+        // there is nobody reading its stdout — it is started detached and lives
+        // for weeks.
+        "bridge" => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "rmux_agent=info".into()),
+                )
+                .init();
+
+            match rmux_agent::bridge::run().await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("rmux-agent: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
         // Used to decide whether an uploaded binary needs replacing.
         // What is this daemon running? Printed as one NUL-free line per
         // session so a caller can split on newlines and tabs — the same

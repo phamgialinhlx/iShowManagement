@@ -1,0 +1,21 @@
+[package]
+name = "rmux-claude-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Deliberately just serde. See the crate note: this is depended on by
+# `rmux-agent`, which is a static musl binary uploaded to every host, and a
+# transitive `reqwest` or `alacritty_terminal` there would be several megabytes
+# on the wire for code the agent never calls.
+[dependencies]
+# For `shell_quote` only. The scripts here are run *on the machine that owns the
+# disk* — by the desktop app over ssh, and by `rmux-agent` locally — and a folder
+# name interpolated into a remote shell line unquoted is an injection, not a
+# cosmetic bug. `rmux-transport` is anyhow/serde/tokio and nothing else, so it
+# costs the agent nothing it was not already carrying.
+rmux-transport.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true

@@ -249,7 +249,7 @@ pub async fn claude_start<R: tauri::Runtime>(
                 Arc::clone(&resolved),
                 installed.program.clone(),
             );
-            let line = ClaudeSession::launch_line(resume.as_deref(), &args, rendering);
+            let line = rmux_claude::launch_line(resume.as_deref(), &args, rendering);
 
             let mut spec = installed.attach_spec(name, cwd.as_deref(), cols, rows);
             spec = spec.arg("--login-command").arg(line);

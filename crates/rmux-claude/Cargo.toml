@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 rmux-transport.workspace = true
 rmux-term.workspace = true
+rmux-claude-core.workspace = true
 
 alacritty_terminal.workspace = true
 anyhow.workspace = true

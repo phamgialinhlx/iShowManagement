@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 rmux-transport.workspace = true
 rmux-ssh.workspace = true
 rmux-control.workspace = true
+rmux-bridge.workspace = true
 async-trait.workspace = true
 rmux-cowork.workspace = true
 rmux-term.workspace = true

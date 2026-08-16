@@ -178,6 +178,64 @@ fn effective_status(parsed: &Parsed, is_claude: &dyn Fn(u32) -> bool) -> String 
     }
 }
 
+/// One Claude session's live status, as the bridge needs to report it.
+///
+/// The same fields the NDJSON stream carries, handed back in memory instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub session_id: String,
+    pub cwd: Option<String>,
+    pub pid: Option<u32>,
+    /// `busy | shell | idle | waiting`, or `gone`.
+    pub status: String,
+    pub updated_at: Option<u64>,
+}
+
+/// Every Claude session on this host, right now.
+///
+/// A one-shot read of the directory [`watch_status`] streams, for the callers
+/// that want an answer rather than a subscription — the bridge builds its
+/// session list from this on every `listSessions`.
+///
+/// **The same parser and the same liveness check as the stream.** A second
+/// reader of Claude's session files would be a second opinion about what "busy"
+/// means, and the two would disagree within a release; that is exactly the
+/// duplication the whole `rmux-claude-core` split exists to avoid.
+///
+/// A missing directory is an empty list, not an error: Claude may simply never
+/// have run here, which is a fact about the host rather than a failure.
+pub fn snapshot() -> Vec<Snapshot> {
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let dir = home.join(".claude").join("sessions");
+
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        // A partial write parses as nothing and is skipped, exactly as in `scan`.
+        let Some(parsed) = parse_file(&path) else { continue };
+        let status = effective_status(&parsed, &pid_is_claude);
+        // A dead session is left out rather than reported as `gone`. Its pid may
+        // already have been reused, and a caller shown one would be pointed at
+        // some other process entirely — the same reasoning as the daemon's own
+        // session summary.
+        if status == "gone" {
+            continue;
+        }
+        out.push(Snapshot {
+            session_id: parsed.session_id,
+            cwd: parsed.cwd,
+            pid: parsed.pid,
+            status,
+            updated_at: parsed.updated_at,
+        });
+    }
+    out
+}
+
 fn emit<W: Write>(out: &mut W, update: &Update) -> std::io::Result<()> {
     // Serialising an `Update` cannot fail (all fields are plain strings/ints), so
     // an empty line here would only ever mean a bug — never a runtime condition.

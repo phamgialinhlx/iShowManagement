@@ -9,8 +9,10 @@ members = [
     "crates/rmux-git",
     "crates/rmux-term",
     "crates/rmux-claude",
+    "crates/rmux-claude-core",
     "crates/rmux-metrics",
     "crates/rmux-control",
+    "crates/rmux-bridge",
     "crates/rmux-cowork",
     "crates/rmux-core",
     "askpass",
@@ -18,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.19"
+version = "0.2.20"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -33,9 +35,11 @@ rmux-fs = { path = "crates/rmux-fs" }
 rmux-git = { path = "crates/rmux-git" }
 rmux-term = { path = "crates/rmux-term" }
 rmux-claude = { path = "crates/rmux-claude" }
+rmux-claude-core = { path = "crates/rmux-claude-core" }
 rmux-agent = { path = "crates/rmux-agent" }
 rmux-metrics = { path = "crates/rmux-metrics" }
 rmux-control = { path = "crates/rmux-control" }
+rmux-bridge = { path = "crates/rmux-bridge" }
 rmux-cowork = { path = "crates/rmux-cowork" }
 rmux-core = { path = "crates/rmux-core" }
 
@@ -75,6 +79,31 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",
     "rustls-tls",
+] }
+
+# The bridge's outbound WebSocket. `rustls` and not native TLS: the agent is a
+# *static musl* binary uploaded to hosts we know nothing about, and linking
+# OpenSSL would reintroduce exactly the shared-library dependency that static
+# linking exists to avoid. `webpki-roots` and not the platform store for the
+# same reason — a minimal container frequently has no CA bundle at all, and
+# "works on my Debian box, fails in the Alpine one" is not a failure mode worth
+# shipping.
+tokio-tungstenite = { version = "0.28", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+] }
+# **Named explicitly, with a provider.** tokio-tungstenite 0.28 pulls `rustls`
+# with only the `std` feature and deliberately leaves the crypto backend to the
+# consumer — so a config built without this compiles cleanly and then *panics at
+# runtime* with "no process-level CryptoProvider available". On a host, over
+# ssh, that is a bridge that dies the moment it dials. `ring` rather than
+# `aws-lc-rs` because it is the one that cross-compiles to all three agent
+# targets under zig.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
 ] }
 
 # --- browser automation (CDP) ---

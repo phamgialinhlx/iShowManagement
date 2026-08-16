@@ -16,6 +16,7 @@
 
 pub mod alias;
 pub mod attach;
+pub mod bridge;
 pub mod daemon;
 pub mod ipc;
 pub mod protocol;

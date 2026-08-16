@@ -13,6 +13,7 @@ mod background;
 mod control;
 mod notify;
 mod paste;
+mod redstone;
 mod uplink;
 mod userpath;
 mod tunnels;
@@ -225,6 +226,14 @@ pub fn run() {
             control::control_sync,
             control::control_open_url,
             control::control_info,
+            redstone::redstone_session,
+            redstone::redstone_sign_out,
+            redstone::redstone_capabilities,
+            redstone::redstone_sign_in_start,
+            redstone::redstone_sign_in_poll,
+            redstone::redstone_enrol,
+            redstone::redstone_unenrol,
+            redstone::redstone_host_status,
             claude::claude_start,
             claude::claude_list_sessions,
             claude::claude_list_all_sessions,

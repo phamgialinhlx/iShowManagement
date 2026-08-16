@@ -1075,6 +1075,92 @@ reimplement it.** Reading the screen to say *something is happening over there*
 is a summary. Drawing controls that duplicate what is already on screen is a
 second UI, and the second one is always the one that is wrong.
 
+## The Redstone bridge — rmux as a backend for someone else's agent
+
+`crates/rmux-bridge` is the wire contract; `rmux-agent bridge` is the client;
+`src-tauri/src/redstone.rs` enrols a host. `docs/redstone-bridge.md` is written
+for the Redstone developers and is the specification of what they must build.
+
+- **The bridge runs on the host, not in the desktop app.** It was nearly built
+  the other way — rmux holds the WebSocket and forwards over the ssh it already
+  has, which is less code and puts no credential on any server. It is wrong for
+  one reason: **rmux is frequently closed.** The whole point of `rmux-agent` is
+  that work continues without it, so a bridge in the app would let Redstone drive
+  a server exactly while the operator is sitting in front of it, and go blind the
+  moment they shut the lid. Two consequences fall out and both are wins: a
+  transcript read is a **local file read** rather than 228 MB over ssh, and the
+  connection is **outbound**, so NAT, hotel wifi and a no-ingress VPC all work
+  with no firewall change, no public address and no certificate.
+- **There is no `exec`, and there must never be one.** The verb set is closed —
+  list, spawn, send, interrupt, close, read a transcript — and every one is
+  something the operator could have done from rmux's own UI. Add a method that
+  runs a command and the token stops meaning "drive my Claude sessions" and
+  starts meaning "shell on every machine I have ever ssh'd into". The pressure
+  will be real, because an agent that can run `ls` is more capable; the answer is
+  that **Claude already runs commands**, inside a session, under its own
+  permission prompts, where the operator can watch and interrupt. A bare `exec`
+  removes that machinery from the path. `protocol.rs` carries a test that fails
+  on any method whose name contains `exec`, `shell`, `command` or `run`.
+- **An unknown method is *answered*, never ignored.** The first version `continue`d
+  past a frame it could not parse; measured against a real bridge, the caller got
+  no reply at all and hung until it timed out — indistinguishable from a dead
+  host, which is the wrong conclusion, because a newer Redstone against an older
+  agent is the *ordinary* case. The id is recovered on its own and answered
+  `unsupported`; only a frame with no id at all is dropped.
+- **`rustls` needs a crypto provider named explicitly.** `tokio-tungstenite` 0.28
+  pulls it with only the `std` feature and leaves the backend to the consumer, so
+  a config built without `rustls::crypto::ring::default_provider().install_default()`
+  compiles cleanly and then **panics at runtime** with "no process-level
+  CryptoProvider available" — on a host, over ssh, that is a bridge that dies the
+  instant it dials. `ring` rather than `aws-lc-rs` because it is the one that
+  cross-compiles to all three agent targets under zig, which was checked before
+  any of this was written.
+- **The envelope is flattened, so no request field may be called `id` or
+  `method`.** `readConversation` was written with an `id: String` and produced
+  `{"id":3,"method":"readConversation","id":"conv-abc"}` — two keys of one name,
+  which does not round-trip *at all*: the frame fails to parse rather than losing
+  one quietly. Caught only by actually attempting a round trip. The field is
+  `conversation`, and a test now serialises every variant and refuses a duplicate
+  key.
+- **The token travels in the `Authorization` header.** Never in a frame (it lands
+  in every log that records a body), never in a URL (proxy logs), never in argv
+  (`ps` shows one user's command line to every account on the host — the same
+  rule as `setenv` and the Claude account token). `~/.rmux/redstone.json` is
+  `0600` in a `0700` directory, the mode is set **before** the token is written,
+  and a world-readable file is refused on read rather than used.
+- **One token per host, never the operator's own session.** A dev box is a
+  machine other people have accounts on and which is rebuilt without ceremony; a
+  token that could act as them across Redstone would make every enrolled host a
+  copy of their identity. Per-host is revocable on its own, and its blast radius
+  is the closed verb set against one machine. Unenrolling **deletes** the file —
+  a revoked host still holding its credential is one restart away from
+  re-enrolling, with nothing in either UI saying so.
+- **`Frame::Write` is a one-shot, answered during the *handshake*.** Same rule as
+  `Kill` and `List`, and the same reason that cost a week there: a send-and-close
+  client must be answered before any attach, or the daemon writes a scrollback
+  replay into a socket that has already gone. It also **cannot create** — `Hello`
+  creates, this does not. A remote caller works from a list fetched seconds ago,
+  so writing to a name that has ended is routine, and going through `Hello` would
+  leak a shell on every stale send.
+- **`rmux-claude-core` exists so the agent can share definitions.** `rmux-claude`
+  pulls `reqwest` and `alacritty_terminal`; the agent is a static musl binary
+  uploaded to every host. The pure half — transcripts, session listing, the launch
+  line, the keystrokes — moved there so both sides use **one** definition. A
+  second copy of "how do you submit a message to Claude" is a second place for the
+  text-then-Enter rule to be got wrong, and that has already cost a bug where
+  messages sat in the composer unsent.
+- **`gethostname`, not `/proc/sys/kernel/hostname`.** The first version read
+  procfs — right on Linux, absent on macOS, where the agent also runs for local
+  sessions. Measured: every macOS host announced itself as `"unknown"`, which is
+  the name the operator would then see for their own laptop.
+- **The agent grew from 1.4 MB to 2.8 MB**, which is the TLS and WebSocket stack.
+  Paid once per build fingerprint, per host.
+- **Sign-in is blocked on Redstone.** Its OAuth2 provider offers only the
+  `password` grant gated on a `client_secret`, and its own docs say — correctly —
+  never to ship that in a client. rmux is a desktop app, so the client is written
+  against RFC 8628 device authorization and reports "not supported" until the
+  server has it. **Never work around this by embedding a secret.**
+
 ## rmux is a backend, and the browser is not part of it
 
 There is **no in-app browser**, and that is settled rather than pending. rmux's window is

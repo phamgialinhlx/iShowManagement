@@ -172,6 +172,27 @@ where
                     }
                     return Ok(());
                 }
+                // **Here for the same reason `Kill` is**: the caller sends one
+                // frame and closes, so anything that attaches first writes a
+                // scrollback replay into a socket that has already gone away and
+                // never gets round to reading this.
+                //
+                // Note it looks the session up rather than going through
+                // `open_or_attach`: a one-shot write must never *create*. The
+                // caller is remote and working from a list it fetched some time
+                // ago, so a name that no longer exists is the ordinary case, and
+                // answering it by spawning a shell nobody asked for would leak
+                // one on every stale send.
+                Frame::Write { session, data } => {
+                    let target = sessions.lock().by_name.get(&session).map(|s| s.terminal.clone());
+                    let ok = match target {
+                        Some(terminal) => terminal.write(&data).is_ok(),
+                        None => false,
+                    };
+                    writer.write_all(&Frame::Ack { ok }.encode()).await?;
+                    writer.flush().await?;
+                    return Ok(());
+                }
                 other => anyhow::bail!("expected Hello, got {other:?}"),
             }
         }
@@ -256,10 +277,17 @@ where
                         merge_env(&mut sessions.lock().env, env);
                     }
                     // A client has no business announcing these.
-                    Frame::Hello(_) | Frame::Exited { .. } | Frame::Sessions(_) => {}
-                    // Answered only during the handshake, where it cannot be
-                    // confused with traffic for an open session.
-                    Frame::List => {}
+                    Frame::Hello(_)
+                    | Frame::Exited { .. }
+                    | Frame::Sessions(_)
+                    | Frame::Ack { .. } => {}
+                    // Answered only during the handshake, where they cannot be
+                    // confused with traffic for an open session. `Write` in
+                    // particular: an attached client already has a `Data` path to
+                    // its own session, so honouring a one-shot write here would
+                    // be a second way to do the same thing — pointed at a session
+                    // that need not be the one this connection holds.
+                    Frame::List | Frame::Write { .. } => {}
                 }
             }
 
@@ -487,6 +515,89 @@ mod tests {
         // Nothing is sent back; the client learns it worked from the close.
         let mut sink = [0u8; 1];
         let _ = client_read.read(&mut sink).await;
+    }
+
+    /// A one-shot write reaches a live session, and creates nothing when it misses.
+    ///
+    /// The bridge's whole send path. Both halves matter and the second one more:
+    /// a remote caller works from a session list it fetched some time ago, so
+    /// writing to a name that has since ended is *routine*. If that spawned a
+    /// shell — which going through `Hello` would — every stale send would leak
+    /// one, unreachable, on a machine nobody is looking at.
+    #[tokio::test]
+    async fn a_write_reaches_a_live_session_and_creates_nothing_when_it_misses() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        let size = TermSize { cols: 80, rows: 24 };
+
+        // `cat` echoes what it is given, so the write is observable rather than
+        // merely reported as having happened.
+        let hello = Hello {
+            session: "live".into(),
+            cwd: None,
+            program: Some("cat".into()),
+            args: vec![],
+            login_command: None,
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        };
+        let (terminal, _) = open_or_attach(&sessions, &hello, size).unwrap();
+        let (_backlog, mut events) = terminal.attach();
+
+        // Exactly what `attach::write` sends: one frame, then the socket closes.
+        async fn write_once(
+            sessions: &Arc<Mutex<Sessions>>,
+            session: &str,
+            data: &[u8],
+        ) -> bool {
+            let (client, server) = tokio::io::duplex(1024);
+            let (mut client_read, mut client_write) = tokio::io::split(client);
+            client_write
+                .write_all(
+                    &Frame::Write { session: session.into(), data: data.to_vec() }.encode(),
+                )
+                .await
+                .unwrap();
+
+            handle(server, Arc::clone(sessions)).await.unwrap();
+
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 64];
+            loop {
+                if let Some((Frame::Ack { ok }, _)) = Frame::decode(&buf).unwrap() {
+                    return ok;
+                }
+                let n = client_read.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "the daemon closed without acknowledging");
+                buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+
+        assert!(write_once(&sessions, "live", b"ping\n").await, "a live session must ack true");
+
+        // The bytes actually reached the child, not just the daemon's map.
+        let mut saw = String::new();
+        for _ in 0..50 {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), events.recv()).await {
+                Ok(Ok(crate::daemon::TerminalEvent::Output(bytes))) => {
+                    saw.push_str(&String::from_utf8_lossy(&bytes));
+                    if saw.contains("ping") {
+                        break;
+                    }
+                }
+                Ok(Ok(_)) => {}
+                _ => {}
+            }
+        }
+        assert!(saw.contains("ping"), "the child never saw the write; got {saw:?}");
+
+        // …and a name nobody holds is a clean `false` that leaves the map alone.
+        assert!(!write_once(&sessions, "ghost", b"hello\n").await, "a miss must ack false");
+        assert!(
+            !sessions.lock().by_name.contains_key("ghost"),
+            "a one-shot write must never create a session"
+        );
+        assert_eq!(sessions.lock().by_name.len(), 1, "only the original session should exist");
     }
 
     /// Age ordering, and the exclusion of the dead.

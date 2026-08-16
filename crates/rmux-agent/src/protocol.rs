@@ -30,6 +30,8 @@ const KIND_KILL: u8 = 4;
 const KIND_SET_ENV: u8 = 5;
 const KIND_LIST: u8 = 6;
 const KIND_SESSIONS: u8 = 7;
+const KIND_WRITE: u8 = 8;
+const KIND_ACK: u8 = 9;
 
 /// What an attaching client asks for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +105,32 @@ pub enum Frame {
     List,
     /// Daemon → client: everything it is running.
     Sessions(Vec<SessionSummary>),
+    /// Client → daemon: type these bytes into a session **without attaching**.
+    ///
+    /// The bridge's whole reason for existing: Redstone asks a host to send a
+    /// message to a Claude conversation, and the alternative — attach, write,
+    /// detach — is wrong in three separate ways. Attaching replays the entire
+    /// scrollback back at a client that wants to send four words; it flips
+    /// `attached`, so a session being driven remotely stops looking abandoned in
+    /// `list` when it may well be; and it resizes the terminal to whatever
+    /// dimensions the caller invented, which reflows the conversation of anyone
+    /// actually looking at it.
+    ///
+    /// Handled during the **handshake**, like [`Frame::Kill`] and [`Frame::List`],
+    /// and for exactly the reason that cost a week there: a send-and-close client
+    /// must be answered before any attach is attempted, or the daemon writes a
+    /// replay to a socket that is already gone and never reads the frame.
+    ///
+    /// It deliberately **cannot create a session**. `Hello` creates; this does
+    /// not. A typo'd name from a remote caller must be an error, not a new shell.
+    Write { session: String, data: Vec<u8> },
+    /// Daemon → client: whether the last one-shot request landed.
+    ///
+    /// `false` means the session did not exist. Distinguishing that from success
+    /// is the difference between Redstone reporting "sent" and reporting "there
+    /// is no such session any more" — and a remote caller working from a list it
+    /// fetched a minute ago hits the second case routinely.
+    Ack { ok: bool },
 }
 
 /// One session, as the daemon sees it.
@@ -170,6 +198,19 @@ impl Frame {
                 KIND_SET_ENV,
                 serde_json::to_vec(env).expect("an env map is always serialisable"),
             ),
+            // `[name_len: u16 LE][name][data]`, not JSON. The data is arbitrary
+            // bytes — a pasted message runs to kilobytes — and a JSON array of
+            // numbers inflates that by roughly four times for no gain, on a
+            // protocol whose stated virtue is being tiny.
+            Frame::Write { session, data } => {
+                let name = session.as_bytes();
+                let mut p = Vec::with_capacity(2 + name.len() + data.len());
+                p.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                p.extend_from_slice(name);
+                p.extend_from_slice(data);
+                (KIND_WRITE, p)
+            }
+            Frame::Ack { ok } => (KIND_ACK, vec![u8::from(*ok)]),
         };
 
         let mut out = Vec::with_capacity(5 + payload.len());
@@ -219,6 +260,26 @@ impl Frame {
             KIND_SET_ENV => Frame::SetEnv(serde_json::from_slice(payload)?),
             KIND_LIST => Frame::List,
             KIND_SESSIONS => Frame::Sessions(serde_json::from_slice(payload)?),
+            KIND_WRITE => {
+                anyhow::ensure!(payload.len() >= 2, "malformed write frame");
+                let name_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+                // Checked before slicing. A hostile length here would otherwise
+                // panic the daemon on an out-of-range index, which is a remote
+                // caller crashing the thing that holds every session on the host.
+                anyhow::ensure!(
+                    payload.len() >= 2 + name_len,
+                    "write frame claims a {name_len}-byte name in {} bytes",
+                    payload.len(),
+                );
+                Frame::Write {
+                    session: String::from_utf8(payload[2..2 + name_len].to_vec())?,
+                    data: payload[2 + name_len..].to_vec(),
+                }
+            }
+            KIND_ACK => {
+                anyhow::ensure!(payload.len() == 1, "malformed ack frame");
+                Frame::Ack { ok: payload[0] != 0 }
+            }
             other => anyhow::bail!("unknown frame kind {other}"),
         };
 

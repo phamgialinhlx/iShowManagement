@@ -162,7 +162,9 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
                 | Frame::Kill { .. }
                 | Frame::SetEnv(_)
                 | Frame::List
-                | Frame::Sessions(_) => {}
+                | Frame::Sessions(_)
+                | Frame::Write { .. }
+                | Frame::Ack { .. } => {}
             }
         }
     }
@@ -459,6 +461,138 @@ pub async fn kill(session: &str) -> anyhow::Result<()> {
     let mut sink = [0u8; 1];
     let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut sink).await;
     Ok(())
+}
+
+/// Create a session and let go of it, without ever attaching a terminal.
+///
+/// The bridge's spawn path. Redstone asks for a Claude in a folder; there is no
+/// operator, no window and no pty on this side of the request, so the ordinary
+/// [`attach`] — which enters raw mode, negotiates a size from the tty and pumps
+/// stdin — is entirely the wrong shape.
+///
+/// **Dropping the connection is what detaches**, and that is the daemon's own
+/// design rather than a trick: a session outliving its client is the whole
+/// reason the daemon exists. So this connects, says `Hello` (which creates), and
+/// closes.
+///
+/// A daemon is started if none is running, because the *first* thing Redstone
+/// ever asks a freshly enrolled host to do will find nothing there.
+pub async fn spawn_detached(
+    session: &str,
+    cwd: &str,
+    login_command: &str,
+    cols: u16,
+    rows: u16,
+) -> anyhow::Result<()> {
+    // A name that already exists would be *reattached* rather than created, and
+    // the caller would be handed someone else's conversation as though it were
+    // the new one it asked for.
+    let existing = list().await.unwrap_or_default();
+    anyhow::ensure!(
+        !existing.iter().any(|s| s.name == session),
+        "a session called {session} already exists on this host",
+    );
+
+    let endpoint = daemon::endpoint()?;
+    let mut stream = match ipc::connect(&endpoint).await {
+        Ok(stream) => stream,
+        Err(_) => {
+            spawn_daemon()?;
+            wait_for_daemon(&endpoint).await?
+        }
+    };
+
+    let hello = Hello {
+        session: session.to_owned(),
+        cwd: Some(cwd.to_owned()),
+        program: None,
+        args: Vec::new(),
+        // A **login** shell, like every other Claude launch: `claude` is
+        // installed by a version manager whose PATH exists only there, so
+        // spawning the binary directly gives "command not found" on a host where
+        // it plainly works when typed.
+        login_command: Some(login_command.to_owned()),
+        env: Default::default(),
+        cols,
+        rows,
+    };
+    stream.write_all(&Frame::Hello(hello).encode()).await?;
+    stream.flush().await?;
+
+    // Read one chunk before letting go. The daemon replies with the scrollback
+    // replay, and waiting for the first byte of it is how we know the session was
+    // actually created rather than merely requested — closing immediately would
+    // race the daemon's own accept, exactly as `kill` used to.
+    let mut sink = [0u8; 1];
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::io::AsyncReadExt::read(&mut stream, &mut sink),
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Type bytes into a session that already exists, without attaching to it.
+///
+/// Returns `false` when no daemon on this host holds that name — which for a
+/// remote caller is the ordinary outcome, not an exceptional one: it is working
+/// from a list it fetched some seconds ago, and a session can end in between.
+/// Reporting that honestly is the difference between Redstone saying "sent" and
+/// saying "that conversation has finished".
+///
+/// **Resolved across every daemon, exactly like [`kill`].** A session belongs to
+/// the build that created it, so after an upgrade the name being written to is
+/// held by a *previous* daemon. Asking only our own would answer `false` for a
+/// session that is plainly running — and the caller would report it gone.
+pub async fn write(session: &str, data: &[u8]) -> anyhow::Result<bool> {
+    let mut endpoint = daemon::endpoint()?;
+    let ours = sessions_of(&endpoint).await;
+    if !ours.iter().any(|s| s.name == session)
+        && let Some(binary) = owner_of(session).await
+        && let Some(name) = binary.file_name().and_then(|n| n.to_str())
+        && let Ok(other) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name)
+    {
+        endpoint = other;
+    }
+
+    // No daemon at all means no session, which is a clean `false` rather than an
+    // error. **And emphatically not a reason to start one**: a daemon spawned to
+    // service a write has nothing to write to, so it would leave a fresh, empty
+    // daemon behind on every send to a host whose sessions have all ended.
+    let Ok(mut stream) = ipc::connect(&endpoint).await else {
+        return Ok(false);
+    };
+
+    // `Write` alone, with no Hello — the same rule as `Kill`, for the same
+    // reason. A Hello would *create* the session when the name is unknown, so a
+    // stale name from a remote caller would silently spawn a shell instead of
+    // reporting that the conversation had ended.
+    stream
+        .write_all(&Frame::Write { session: session.to_owned(), data: data.to_vec() }.encode())
+        .await?;
+    stream.flush().await?;
+
+    // Unlike `kill`, this one has an answer worth waiting for.
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 64];
+    loop {
+        if let Some((frame, _)) = Frame::decode(&buf)? {
+            return match frame {
+                Frame::Ack { ok } => Ok(ok),
+                other => anyhow::bail!("expected an ack, got {other:?}"),
+            };
+        }
+        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut chunk).await?;
+        // The daemon closed without answering — an older build that does not
+        // know this frame. Treated as "did not land", because the one thing
+        // that must not happen is reporting a message as delivered when the
+        // far side dropped it on the floor.
+        if n == 0 {
+            return Ok(false);
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
 }
 
 /// Hand the daemon environment for future sessions, read from **stdin**.
