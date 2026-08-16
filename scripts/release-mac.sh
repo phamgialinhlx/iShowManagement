@@ -7,7 +7,7 @@
 # An **Apple Development** certificate signs an app for machines registered to
 # your developer account. On anyone else's Mac, Gatekeeper refuses it — and it
 # refuses quietly enough that the app looks broken rather than blocked. Verified:
-# a Development-signed rmux.app already fails `spctl -a -t exec` on the machine
+# a Development-signed zmux.app already fails `spctl -a -t exec` on the machine
 # that built it; it only launches there because a locally-built file never
 # carries the quarantine flag that a download or an AirDrop attaches.
 #
@@ -81,13 +81,13 @@ say "Signing as: $IDENTITY"
 # line, and `ps` shows one user's argv to every account on the machine. Same
 # reason the Claude credential never travels in argv. Create one once with:
 #
-#   xcrun notarytool store-credentials rmux-notary \
+#   xcrun notarytool store-credentials zmux-notary \
 #     --apple-id you@example.com --team-id XXXXXXXXXX
 #
 # It prompts for the password on stdin, so the secret never reaches argv at all.
-if xcrun notarytool history --keychain-profile "${NOTARY_PROFILE:-rmux-notary}" >/dev/null 2>&1; then
-  NOTARY=(--keychain-profile "${NOTARY_PROFILE:-rmux-notary}")
-  say "Using the stored notary profile: ${NOTARY_PROFILE:-rmux-notary}"
+if xcrun notarytool history --keychain-profile "${NOTARY_PROFILE:-zmux-notary}" >/dev/null 2>&1; then
+  NOTARY=(--keychain-profile "${NOTARY_PROFILE:-zmux-notary}")
+  say "Using the stored notary profile: ${NOTARY_PROFILE:-zmux-notary}"
 elif [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ]; then
   NOTARY=(--key "${APPLE_API_KEY_PATH:?APPLE_API_KEY_PATH must point at the .p8}" \
           --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
@@ -126,7 +126,7 @@ say "Building and signing the app"
 # The dmg is now built in step 5b, from the finished article.
 APPLE_SIGNING_IDENTITY="$IDENTITY" pnpm tauri build --bundles app
 
-APP="target/release/bundle/macos/rmux.app"
+APP="target/release/bundle/macos/zmux.app"
 [ -d "$APP" ] || die "no bundle at $APP"
 
 # --- 3b. sign the nested executables ----------------------------------------
@@ -135,7 +135,7 @@ APP="target/release/bundle/macos/rmux.app"
 # executable and the bundle wrapper and stops there — so `Resources/agents/`
 # ships unsigned, and Apple refuses the whole submission for it:
 #
-#   rmux.app/Contents/Resources/agents/rmux-agent
+#   zmux.app/Contents/Resources/agents/zmuxd
 #     · not signed with a valid Developer ID certificate
 #     · signature does not include a secure timestamp
 #     · executable does not have the hardened runtime enabled
@@ -162,12 +162,12 @@ while IFS= read -r binary; do
       ;;
   esac
 #   **`Contents/MacOS` as well as `Contents/Resources`, and that is not
-#   symmetry for its own sake.** `rmux-askpass` is a *sidecar*: Tauri puts it
+#   symmetry for its own sake.** `zmux-askpass` is a *sidecar*: Tauri puts it
 #   beside the main executable, because that is where `askpass::helper_path`
 #   looks for it. Sealing the wrapper does not give a nested Mach-O its own
 #   signature, and notarisation checks every executable in the bundle
 #   individually — so a sidecar missed here fails the whole submission with a
-#   complaint about one binary, after the upload and the wait. The main `rmux`
+#   complaint about one binary, after the upload and the wait. The main `zmux`
 #   binary is matched too; signing it here is harmless, since the bundle seal
 #   below replaces that signature anyway.
 done < <(find "$APP/Contents/MacOS" "$APP/Contents/Resources" -type f -perm -u+x)
@@ -197,7 +197,7 @@ esac
 # `--keepParent` is the form Apple documents. `zip -r` mangles symlinks inside
 # frameworks.
 say "Notarising — this uploads to Apple and usually takes a few minutes"
-ZIP="target/release/bundle/macos/rmux.zip"
+ZIP="target/release/bundle/macos/zmux.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
 xcrun notarytool submit "$ZIP" "${NOTARY[@]}" --wait \
@@ -223,7 +223,7 @@ xcrun stapler validate "$APP"
 # drags to /Applications validates offline on first launch.
 say "Building the disk image from the stapled app"
 DMG_DIR="target/release/bundle/dmg"
-DMG="$DMG_DIR/rmux_${VERSION}_aarch64.dmg"
+DMG="$DMG_DIR/zmux_${VERSION}_aarch64.dmg"
 STAGE=$(mktemp -d)
 mkdir -p "$DMG_DIR"
 cp -R "$APP" "$STAGE/"
@@ -231,7 +231,7 @@ cp -R "$APP" "$STAGE/"
 # recipient is left to guess where it goes.
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
-hdiutil create -volname "rmux" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+hdiutil create -volname "zmux" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 rm -rf "$STAGE"
 
 # A disk image is itself code-signed and notarised — separately from the app it
@@ -264,8 +264,8 @@ say "…and to the copy inside the disk image"
 MNT=$(mktemp -d)
 hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MNT" >/dev/null \
   || die "could not mount the disk image to verify it"
-VERDICT=$(spctl -a -vvv -t exec "$MNT/rmux.app" 2>&1 || true)
-STAPLED=$(xcrun stapler validate "$MNT/rmux.app" 2>&1 || true)
+VERDICT=$(spctl -a -vvv -t exec "$MNT/zmux.app" 2>&1 || true)
+STAPLED=$(xcrun stapler validate "$MNT/zmux.app" 2>&1 || true)
 hdiutil detach "$MNT" >/dev/null 2>&1 || true
 rmdir "$MNT" 2>/dev/null || true
 echo "$VERDICT"

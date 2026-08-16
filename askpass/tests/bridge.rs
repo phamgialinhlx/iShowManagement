@@ -2,7 +2,7 @@
 //!
 //! Each half is unit-tested on its own, but the thing that actually has to work
 //! is the whole chain: OpenSSH execs the helper with a prompt, the helper reaches
-//! rmux over the socket, the user answers, and the secret comes back on stdout
+//! zmux over the socket, the user answers, and the secret comes back on stdout
 //! with a zero exit status. A mistake anywhere in that chain means password and
 //! 2FA hosts cannot be used at all — and the symptom is `ssh` hanging or failing
 //! with nothing explaining why.
@@ -13,7 +13,7 @@
 use std::process::Command;
 use std::sync::Arc;
 
-use rmux_ssh::askpass::{AskpassServer, Prompt, server::Answerer};
+use zmux_ssh::askpass::{AskpassServer, Prompt, server::Answerer};
 
 /// An answerer that always replies the same way.
 fn answer_with(reply: Option<&'static str>) -> Answerer {
@@ -22,10 +22,10 @@ fn answer_with(reply: Option<&'static str>) -> Answerer {
 
 /// Run the helper the way OpenSSH does: prompt as argv[1], secret on stdout.
 fn run_helper(socket: &str, token: &str, prompt: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rmux-askpass"))
+    Command::new(env!("CARGO_BIN_EXE_zmux-askpass"))
         .arg(prompt)
-        .env("RMUX_ASKPASS_SOCKET", socket)
-        .env("RMUX_ASKPASS_TOKEN", token)
+        .env("ZMUX_ASKPASS_SOCKET", socket)
+        .env("ZMUX_ASKPASS_TOKEN", token)
         .output()
         .expect("failed to run the askpass helper")
 }
@@ -83,14 +83,14 @@ async fn a_helper_with_the_wrong_token_gets_no_secret() {
 }
 
 #[test]
-fn the_helper_refuses_to_run_outside_rmux() {
+fn the_helper_refuses_to_run_outside_zmux() {
     // Someone's shell may have SSH_ASKPASS pointing here from a stale export. It
     // must fail fast rather than block an ssh session waiting on a socket that
     // will never answer.
-    let output = Command::new(env!("CARGO_BIN_EXE_rmux-askpass"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zmux-askpass"))
         .arg("password:")
-        .env_remove("RMUX_ASKPASS_SOCKET")
-        .env_remove("RMUX_ASKPASS_TOKEN")
+        .env_remove("ZMUX_ASKPASS_SOCKET")
+        .env_remove("ZMUX_ASKPASS_TOKEN")
         .output()
         .expect("failed to run the askpass helper");
 
@@ -99,12 +99,12 @@ fn the_helper_refuses_to_run_outside_rmux() {
 }
 
 #[test]
-fn the_helper_fails_fast_when_rmux_is_not_listening() {
-    // rmux quit while ssh was mid-authentication.
-    let output = Command::new(env!("CARGO_BIN_EXE_rmux-askpass"))
+fn the_helper_fails_fast_when_zmux_is_not_listening() {
+    // zmux quit while ssh was mid-authentication.
+    let output = Command::new(env!("CARGO_BIN_EXE_zmux-askpass"))
         .arg("password:")
-        .env("RMUX_ASKPASS_SOCKET", "/tmp/rmux-does-not-exist.sock")
-        .env("RMUX_ASKPASS_TOKEN", "irrelevant")
+        .env("ZMUX_ASKPASS_SOCKET", "/tmp/zmux-does-not-exist.sock")
+        .env("ZMUX_ASKPASS_TOKEN", "irrelevant")
         .output()
         .expect("failed to run the askpass helper");
 

@@ -1,4 +1,4 @@
-# Context — rmux
+# Context — zmux
 
 Glossary of the ubiquitous language. Terms only; no implementation detail.
 
@@ -33,12 +33,12 @@ supporting UI — e.g. the session rail, file tree, or widgets. Distinct from a
 Pane: docks frame the work rather than holding the primary content.
 
 ## Session
-A running unit of remote work owned by `rmux-agent` on a target host — a shell or
+A running unit of remote work owned by `zmuxd` on a target host — a shell or
 a Claude run that survives the app closing. A Session is surfaced in the Workspace
 as one or more Tabs, but it *is* the remote process, not the UI showing it.
 (Unchanged in meaning from today; only its on-screen container changes.)
 
 ## Target
 A place work runs — a local machine or an SSH host — resolved to a locally
-spawnable argv by `rmux-transport`. The "local and remote are one code path"
+spawnable argv by `zmux-transport`. The "local and remote are one code path"
 invariant is a property of the Target, not of the UI, and survives the redesign.

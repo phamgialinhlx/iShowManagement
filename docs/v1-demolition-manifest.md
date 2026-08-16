@@ -3,31 +3,31 @@
 Status: **proposed — nothing deleted yet, awaiting approval**
 
 Big-bang strip of the `zmux` branch (ADR-0001/0002). `main` preserves all source;
-the installed rmux app remains the daily driver during the rewrite. Every edge
+the installed zmux app remains the daily driver during the rewrite. Every edge
 below was verified against the current tree.
 
 ## Crates — KEEP (v1 backend spine)
 
 | Crate | Role |
 |---|---|
-| `rmux-transport` | `Target` — local/remote one code path |
-| `rmux-ssh` | SSH via system `ssh` binary |
-| `rmux-agent` | Persistent session daemon |
-| `rmux-term` | Terminal/PTY abstraction (used by `rmux-agent` **and** `rmux-claude`) |
-| `rmux-claude` | Drives the Claude CLI on a `Target` |
-| `rmux-fs` | Remote file read/write, search |
-| `rmux-git` | "What changed" — git pane |
-| `askpass/` | askpass helper (used by `rmux-ssh`) |
+| `zmux-transport` | `Target` — local/remote one code path |
+| `zmux-ssh` | SSH via system `ssh` binary |
+| `zmuxd` | Persistent session daemon |
+| `zmux-term` | Terminal/PTY abstraction (used by `zmuxd` **and** `zmux-claude`) |
+| `zmux-claude` | Drives the Claude CLI on a `Target` |
+| `zmux-fs` | Remote file read/write, search |
+| `zmux-git` | "What changed" — git pane |
+| `askpass/` | askpass helper (used by `zmux-ssh`) |
 
 ## Crates — DELETE
 
 | Crate | Why | Safe? |
 |---|---|---|
-| `rmux-metrics` | Feature dropped (HOST/TOP-PROCESSES widgets gone) | Only a **dev-dep** of `rmux-fs` → also delete the metrics test blocks in `rmux-fs/tests/{over_ssh,live_ssh}.rs` |
-| `rmux-control` | Browser control bridge — deferred | Used only by `src-tauri` (deleted) |
-| `rmux-cowork` | Cowork server / sign-in / lock — deferred | Used only by `src-tauri` (deleted) |
-| `rmux-core` | Empty placeholder | **Zero dependents** (verified) |
-| `rmux-proto` | Empty placeholder | **Zero dependents** (verified) |
+| `zmux-metrics` | Feature dropped (HOST/TOP-PROCESSES widgets gone) | Only a **dev-dep** of `zmux-fs` → also delete the metrics test blocks in `zmux-fs/tests/{over_ssh,live_ssh}.rs` |
+| `zmux-control` | Browser control bridge — deferred | Used only by `src-tauri` (deleted) |
+| `zmux-cowork` | Cowork server / sign-in / lock — deferred | Used only by `src-tauri` (deleted) |
+| `zmux-core` | Empty placeholder | **Zero dependents** (verified) |
+| `zmux-proto` | Empty placeholder | **Zero dependents** (verified) |
 
 ## Frontend — DELETE wholesale
 
@@ -59,10 +59,10 @@ below was verified against the current tree.
 
 ## NEW — to create (greenfield)
 
-- `crates/rmux-app` — the gpui application crate: workspace shell (own tab trait +
+- `crates/zmux-app` — the gpui application crate: workspace shell (own tab trait +
   lifted `pane_group.rs`/`dock.rs` geometry), fresh alacritty terminal view,
   lightweight tree-sitter editor, session rail, Claude/transcript/git tabs,
-  native settings, `~/.rmux/{settings,state}.json` persistence.
+  native settings, `~/.zmux/{settings,state}.json` persistence.
 - `vendor/` (or `crates/vendor/`) — copied-in Zed presentation stack: `gpui` +
   closure (`gpui_macros`, `gpui_shared_string`, `gpui_util`, `collections`,
   `refineable`, `util_macros`, `sum_tree`, `scheduler`, `stacksafe`,

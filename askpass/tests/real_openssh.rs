@@ -14,7 +14,7 @@
 use std::process::Command;
 use std::sync::Arc;
 
-use rmux_ssh::askpass::{AskpassServer, Prompt, server::Answerer};
+use zmux_ssh::askpass::{AskpassServer, Prompt, server::Answerer};
 
 const PASSPHRASE: &str = "correct-horse-battery-staple";
 
@@ -27,7 +27,7 @@ fn make_encrypted_key(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let key = dir.join("id_ed25519");
 
     let status = Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", PASSPHRASE, "-C", "rmux-askpass-test", "-q", "-f"])
+        .args(["-t", "ed25519", "-N", PASSPHRASE, "-C", "zmux-askpass-test", "-q", "-f"])
         .arg(&key)
         .status()
         .ok()?;
@@ -36,7 +36,7 @@ fn make_encrypted_key(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("rmux-askpass-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("zmux-askpass-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("failed to create temp dir");
     dir
@@ -53,9 +53,9 @@ async fn real_openssh_takes_the_passphrase_from_our_helper() {
     let server = AskpassServer::start(answer_with(Some(PASSPHRASE))).await.unwrap();
     let socket = server.socket_path().display().to_string();
     let token = server.token().to_owned();
-    let helper = env!("CARGO_BIN_EXE_rmux-askpass").to_owned();
+    let helper = env!("CARGO_BIN_EXE_zmux-askpass").to_owned();
 
-    // Exactly the environment `rmux_ssh::askpass::env_for_gui_prompts` builds.
+    // Exactly the environment `zmux_ssh::askpass::env_for_gui_prompts` builds.
     let output = tokio::task::spawn_blocking(move || {
         Command::new("ssh-keygen")
             .arg("-y")
@@ -63,8 +63,8 @@ async fn real_openssh_takes_the_passphrase_from_our_helper() {
             .arg(&key)
             .env("SSH_ASKPASS", &helper)
             .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("RMUX_ASKPASS_SOCKET", &socket)
-            .env("RMUX_ASKPASS_TOKEN", &token)
+            .env("ZMUX_ASKPASS_SOCKET", &socket)
+            .env("ZMUX_ASKPASS_TOKEN", &token)
             .env("DISPLAY", ":0")
             .output()
             .expect("failed to run ssh-keygen")
@@ -97,7 +97,7 @@ async fn real_openssh_fails_when_the_user_dismisses_the_dialog() {
     let server = AskpassServer::start(answer_with(None)).await.unwrap();
     let socket = server.socket_path().display().to_string();
     let token = server.token().to_owned();
-    let helper = env!("CARGO_BIN_EXE_rmux-askpass").to_owned();
+    let helper = env!("CARGO_BIN_EXE_zmux-askpass").to_owned();
 
     let output = tokio::task::spawn_blocking(move || {
         Command::new("ssh-keygen")
@@ -106,8 +106,8 @@ async fn real_openssh_fails_when_the_user_dismisses_the_dialog() {
             .arg(&key)
             .env("SSH_ASKPASS", &helper)
             .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("RMUX_ASKPASS_SOCKET", &socket)
-            .env("RMUX_ASKPASS_TOKEN", &token)
+            .env("ZMUX_ASKPASS_SOCKET", &socket)
+            .env("ZMUX_ASKPASS_TOKEN", &token)
             .env("DISPLAY", ":0")
             .output()
             .expect("failed to run ssh-keygen")

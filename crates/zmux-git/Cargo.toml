@@ -1,0 +1,17 @@
+[package]
+name = "zmux-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zmux-transport.workspace = true
+
+anyhow.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+zmux-ssh.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

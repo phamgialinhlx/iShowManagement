@@ -5,7 +5,7 @@
  *
  * ## Why this exists at all
  *
- * `askpass::helper_path` looks for `rmux-askpass` **beside the main
+ * `askpass::helper_path` looks for `zmux-askpass` **beside the main
  * executable**, which is true for `cargo run` and was true of no shipped build
  * ever. The bundle carried the agents and the icon and nothing else, so every
  * release logged
@@ -39,8 +39,8 @@
  *
  * ## Why the file is named with a target triple
  *
- * That is Tauri's sidecar convention: `externalBin: ["binaries/rmux-askpass"]`
- * resolves `binaries/rmux-askpass-<triple>` and copies it into the bundle under
+ * That is Tauri's sidecar convention: `externalBin: ["binaries/zmux-askpass"]`
+ * resolves `binaries/zmux-askpass-<triple>` and copies it into the bundle under
  * the plain name, next to the main binary — precisely where `helper_path`
  * looks.
  */
@@ -67,14 +67,14 @@ if (!triple) {
   process.exit(1);
 }
 
-console.log(`==> rmux-askpass for ${triple}`);
-run("cargo", ["build", "-p", "rmux-askpass", "--bin", "rmux-askpass", "--release"]);
+console.log(`==> zmux-askpass for ${triple}`);
+run("cargo", ["build", "-p", "zmux-askpass", "--bin", "zmux-askpass", "--release"]);
 
 const exe = process.platform === "win32" ? ".exe" : "";
 const out = join(root, "src-tauri", "binaries");
 mkdirSync(out, { recursive: true });
 
 // The triple goes *before* the extension: Tauri matches `<name>-<triple><ext>`.
-const dest = join(out, `rmux-askpass-${triple}${exe}`);
-copyFileSync(join(root, "target", "release", `rmux-askpass${exe}`), dest);
+const dest = join(out, `zmux-askpass-${triple}${exe}`);
+copyFileSync(join(root, "target", "release", `zmux-askpass${exe}`), dest);
 console.log(`    ${dest}`);

@@ -1,0 +1,25 @@
+[package]
+name = "zmux-fs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zmux-transport.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+# Downloads decode here rather than in the webview. `Output::stdout` is a
+# `String`, so bytes off a target have already been through UTF-8 — base64 is
+# what carries a binary file across intact.
+base64.workspace = true
+dirs.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+zmux-ssh.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

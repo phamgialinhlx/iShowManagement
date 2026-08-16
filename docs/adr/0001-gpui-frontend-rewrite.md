@@ -5,9 +5,9 @@ Status: Accepted
 
 ## Context
 
-rmux today is a Tauri app: ~10 UI-agnostic Rust crates (`rmux-ssh`,
-`rmux-transport`, `rmux-fs`, `rmux-git`, `rmux-metrics`, `rmux-agent`,
-`rmux-claude`, `rmux-control`, …) doing the real work, fronted by a React/
+zmux today is a Tauri app: ~10 UI-agnostic Rust crates (`zmux-ssh`,
+`zmux-transport`, `zmux-fs`, `zmux-git`, `zmux-metrics`, `zmuxd`,
+`zmux-claude`, `zmux-control`, …) doing the real work, fronted by a React/
 TypeScript UI running in a WKWebView. Terminals are xterm.js fed by a local PTY
 over a Tauri `Channel`; editing is Monaco; appearance is a CSS glass/zoom system.
 
@@ -22,7 +22,7 @@ native terminal/editor lineage.
 
 Replace `src-tauri` + `ui/` with a **native gpui application crate**. Keep the
 backend crates as-is (they are the asset and encode the hard-won invariants),
-**except `rmux-metrics`, which is dropped** along with the HOST/TOP-PROCESSES
+**except `zmux-metrics`, which is dropped** along with the HOST/TOP-PROCESSES
 widgets. The gpui app links the backend crates **directly as Rust functions** —
 no IPC, no `Channel`, no JSON boundary; terminal bytes go straight from the local
 PTY into the native terminal view.
@@ -76,10 +76,10 @@ stack.
 - gpui handles IME, GPU compositing, and multi-surface layout natively, which is
   what erases the perf/heat/quirk category the rewrite exists to escape.
 - **Rejected — full Zed-derived (option c):** Zed's `project`/`worktree`/
-  `language`/`editor` stack assumes a local (or LSP-served) filesystem. rmux's
+  `language`/`editor` stack assumes a local (or LSP-served) filesystem. zmux's
   backend is remote-first ("grep runs on the machine that owns the disk", NUL-
   delimited remote records, length-framed remote reads). Adopting Zed's upper
-  stack would import a data model that contradicts rmux's own.
+  stack would import a data model that contradicts zmux's own.
 - **Rejected — fork Zed's `terminal` crate (option i):** it drags Zed's
   `settings`/`theme`/`task` subsystems, and the painter (`terminal_element.rs`)
   lives in the workspace-coupled crate. A stripped two-file fork would be an

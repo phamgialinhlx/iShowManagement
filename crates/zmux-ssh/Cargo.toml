@@ -1,0 +1,36 @@
+[package]
+name = "zmux-ssh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zmux-transport.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+camino.workspace = true
+dirs.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+uuid.workspace = true
+
+# The askpass bridge is a Unix socket everywhere else; on Windows it is a named
+# pipe, and the pipe needs an explicit owner-only DACL rather than the default
+# security descriptor — which grants read access to Everyone. See
+# `askpass/server_windows.rs`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

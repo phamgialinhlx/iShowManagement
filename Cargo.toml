@@ -1,14 +1,14 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/rmux-transport",
-    "crates/rmux-ssh",
-    "crates/rmux-agent",
-    "crates/rmux-fs",
-    "crates/rmux-git",
-    "crates/rmux-term",
-    "crates/rmux-claude",
-    "crates/rmux-app",
+    "crates/zmux-transport",
+    "crates/zmux-ssh",
+    "crates/zmuxd",
+    "crates/zmux-fs",
+    "crates/zmux-git",
+    "crates/zmux-term",
+    "crates/zmux-claude",
+    "crates/zmux-app",
     "askpass",
 ]
 # The vendored Zed presentation stack is its own workspace (its crates use
@@ -21,17 +21,17 @@ version = "0.2.17"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
-repository = "https://github.com/ngocanhnckh/rmux"
+repository = "https://github.com/phamgialinhlx/iShowManagement"
 
 [workspace.dependencies]
 # --- internal ---
-rmux-transport = { path = "crates/rmux-transport" }
-rmux-ssh = { path = "crates/rmux-ssh" }
-rmux-fs = { path = "crates/rmux-fs" }
-rmux-git = { path = "crates/rmux-git" }
-rmux-term = { path = "crates/rmux-term" }
-rmux-claude = { path = "crates/rmux-claude" }
-rmux-agent = { path = "crates/rmux-agent" }
+zmux-transport = { path = "crates/zmux-transport" }
+zmux-ssh = { path = "crates/zmux-ssh" }
+zmux-fs = { path = "crates/zmux-fs" }
+zmux-git = { path = "crates/zmux-git" }
+zmux-term = { path = "crates/zmux-term" }
+zmux-claude = { path = "crates/zmux-claude" }
+zmuxd = { path = "crates/zmuxd" }
 
 # --- async / runtime ---
 tokio = { version = "1", features = ["full"] }

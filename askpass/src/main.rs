@@ -6,12 +6,12 @@
 //! non-zero aborts the authentication.
 //!
 //! This binary deliberately does nothing clever: it forwards the prompt to the
-//! running rmux instance over a Unix socket and relays the reply. It is spawned
+//! running zmux instance over a Unix socket and relays the reply. It is spawned
 //! once per prompt, so it stays tiny and dependency-light.
 //!
-//! It is not a general-purpose askpass. It answers only to the rmux process that
-//! set `RMUX_ASKPASS_SOCKET` and `RMUX_ASKPASS_TOKEN`; without a matching token
-//! the server hangs up. Otherwise any local process could ask rmux to pop a
+//! It is not a general-purpose askpass. It answers only to the zmux process that
+//! set `ZMUX_ASKPASS_SOCKET` and `ZMUX_ASKPASS_TOKEN`; without a matching token
+//! the server hangs up. Otherwise any local process could ask zmux to pop a
 //! credential dialog and read back what the user typed.
 
 use std::process::ExitCode;
@@ -25,7 +25,7 @@ use std::process::ExitCode;
 /// The window is not exotic: `ssh` goes away while the dialog is still open
 /// whenever the app quits mid-prompt, a ControlMaster is torn down, or a
 /// credential is refused. The helper then died without delivering anything, the
-/// connection failed, and rmux asked again — which the operator experiences as a
+/// connection failed, and zmux asked again — which the operator experiences as a
 /// **password prompt that will not stop coming back**, with nothing anywhere
 /// naming a broken pipe.
 ///
@@ -41,7 +41,7 @@ fn deliver(answer: &str) -> ExitCode {
     match write_stdout(&bytes) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("rmux-askpass: could not deliver the answer: {e}");
+            eprintln!("zmux-askpass: could not deliver the answer: {e}");
             ExitCode::FAILURE
         }
     }
@@ -81,47 +81,47 @@ fn main() -> ExitCode {
     let prompt: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
 
     let (Ok(socket), Ok(token)) =
-        (std::env::var("RMUX_ASKPASS_SOCKET"), std::env::var("RMUX_ASKPASS_TOKEN"))
+        (std::env::var("ZMUX_ASKPASS_SOCKET"), std::env::var("ZMUX_ASKPASS_TOKEN"))
     else {
-        // Not launched by rmux. Refuse rather than prompting on a terminal that
+        // Not launched by zmux. Refuse rather than prompting on a terminal that
         // may not exist.
-        eprintln!("rmux-askpass: not invoked by rmux");
+        eprintln!("zmux-askpass: not invoked by zmux");
         return ExitCode::FAILURE;
     };
 
     let Ok(stream) = UnixStream::connect(&socket) else {
-        eprintln!("rmux-askpass: rmux is not listening on {socket}");
+        eprintln!("zmux-askpass: zmux is not listening on {socket}");
         return ExitCode::FAILURE;
     };
 
     // Generous: someone may need a moment to reach for a hardware token. Still
-    // bounded, so a wedged rmux cannot hang an ssh process forever.
+    // bounded, so a wedged zmux cannot hang an ssh process forever.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
 
-    // `attempt` names the `ssh` process we were spawned by, so rmux can tell a
+    // `attempt` names the `ssh` process we were spawned by, so zmux can tell a
     // credential it just refused apart from another connection asking at the
     // same moment. Absent is fine — it only costs that distinction.
     let request = serde_json::json!({
         "token": token,
         "prompt": prompt,
-        "attempt": std::env::var("RMUX_ASKPASS_ATTEMPT").ok(),
+        "attempt": std::env::var("ZMUX_ASKPASS_ATTEMPT").ok(),
     });
 
     let mut writer = &stream;
     if writeln!(writer, "{request}").and_then(|()| writer.flush()).is_err() {
-        eprintln!("rmux-askpass: failed to send the prompt");
+        eprintln!("zmux-askpass: failed to send the prompt");
         return ExitCode::FAILURE;
     }
 
     let mut line = String::new();
     if BufReader::new(&stream).read_line(&mut line).is_err() || line.trim().is_empty() {
-        eprintln!("rmux-askpass: no answer from rmux");
+        eprintln!("zmux-askpass: no answer from zmux");
         return ExitCode::FAILURE;
     }
 
     let Ok(response) = serde_json::from_str::<serde_json::Value>(&line) else {
-        eprintln!("rmux-askpass: malformed answer from rmux");
+        eprintln!("zmux-askpass: malformed answer from zmux");
         return ExitCode::FAILURE;
     };
 
@@ -153,19 +153,19 @@ fn main() -> ExitCode {
     let prompt: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
 
     let (Ok(socket), Ok(token)) =
-        (std::env::var("RMUX_ASKPASS_SOCKET"), std::env::var("RMUX_ASKPASS_TOKEN"))
+        (std::env::var("ZMUX_ASKPASS_SOCKET"), std::env::var("ZMUX_ASKPASS_TOKEN"))
     else {
-        eprintln!("rmux-askpass: not invoked by rmux");
+        eprintln!("zmux-askpass: not invoked by zmux");
         return ExitCode::FAILURE;
     };
 
     // A `File` has no read timeout, so the bound lives here instead: generous
-    // enough to reach for a hardware token, but bounded, so a wedged rmux cannot
+    // enough to reach for a hardware token, but bounded, so a wedged zmux cannot
     // hang an `ssh` process — and through it a terminal — forever. Matches the
     // 300s the Unix path sets on the socket.
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(300));
-        eprintln!("rmux-askpass: rmux did not answer");
+        eprintln!("zmux-askpass: zmux did not answer");
         std::process::exit(1);
     });
 
@@ -186,38 +186,38 @@ fn main() -> ExitCode {
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
-                eprintln!("rmux-askpass: rmux is not listening on {socket}: {e}");
+                eprintln!("zmux-askpass: zmux is not listening on {socket}: {e}");
                 return ExitCode::FAILURE;
             }
         }
     }
 
     let Some(mut pipe) = pipe else {
-        eprintln!("rmux-askpass: rmux never freed a pipe instance");
+        eprintln!("zmux-askpass: zmux never freed a pipe instance");
         return ExitCode::FAILURE;
     };
 
-    // `attempt` names the `ssh` process we were spawned by, so rmux can tell a
+    // `attempt` names the `ssh` process we were spawned by, so zmux can tell a
     // credential it just refused apart from another connection asking at the
     // same moment. Absent is fine — it only costs that distinction.
     let request = serde_json::json!({
         "token": token,
         "prompt": prompt,
-        "attempt": std::env::var("RMUX_ASKPASS_ATTEMPT").ok(),
+        "attempt": std::env::var("ZMUX_ASKPASS_ATTEMPT").ok(),
     });
     if writeln!(pipe, "{request}").and_then(|()| pipe.flush()).is_err() {
-        eprintln!("rmux-askpass: failed to send the prompt");
+        eprintln!("zmux-askpass: failed to send the prompt");
         return ExitCode::FAILURE;
     }
 
     let mut line = String::new();
     if BufReader::new(&mut pipe).read_line(&mut line).is_err() || line.trim().is_empty() {
-        eprintln!("rmux-askpass: no answer from rmux");
+        eprintln!("zmux-askpass: no answer from zmux");
         return ExitCode::FAILURE;
     }
 
     let Ok(response) = serde_json::from_str::<serde_json::Value>(&line) else {
-        eprintln!("rmux-askpass: malformed answer from rmux");
+        eprintln!("zmux-askpass: malformed answer from zmux");
         return ExitCode::FAILURE;
     };
 
@@ -230,6 +230,6 @@ fn main() -> ExitCode {
 /// Anything that is neither Unix nor Windows has no transport here.
 #[cfg(not(any(unix, windows)))]
 fn main() -> ExitCode {
-    eprintln!("rmux-askpass: not supported on this platform");
+    eprintln!("zmux-askpass: not supported on this platform");
     ExitCode::FAILURE
 }

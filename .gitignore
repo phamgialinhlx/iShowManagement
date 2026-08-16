@@ -16,7 +16,7 @@ node_modules
 *.log
 
 # Screenshots taken during development
-rmux-m0*.png
+zmux-m0*.png
 
 # The cross-compiled remote agents: multi-MB binaries, rebuilt by
 # scripts/build-agents.sh and shipped as bundle resources.
@@ -31,7 +31,7 @@ rmux-m0*.png
 # Deployment-specific notes: hostnames, org name, accounts, machines, signing
 # identity. Ignored deliberately — this repository is meant to be shareable, and
 # a hostname committed once stays in the history forever. Everything tracked
-# must stay generic; the live tests read RMUX_LIVE_SERVER instead.
+# must stay generic; the live tests read ZMUX_LIVE_SERVER instead.
 CLAUDE.local.md
 *.local.md
 
@@ -66,4 +66,4 @@ tmp/
 web/dist
 ui/dist
 references/iShowManagement-0.2.8/
-.claude/settings.local.zed.json
+.claude/settings.local.synthetic.json

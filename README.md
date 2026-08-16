@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="src-tauri/icons/128x128@2x.png" alt="rmux" width="112" height="112" />
+<img src="src-tauri/icons/128x128@2x.png" alt="zmux" width="112" height="112" />
 
-# rmux
+# zmux
 
 **Run Claude Code on every machine you own, from one window.**
 
@@ -19,7 +19,7 @@ A fast, direct-SSH remote development client. Rust core, native webview, no rela
 
 ## What it is
 
-rmux is a desktop client for running **several Claude Code sessions at once**, across
+zmux is a desktop client for running **several Claude Code sessions at once**, across
 several machines, without losing track of any of them.
 
 The question it answers is not *"what is in this folder"* — an IDE already does that. It is
@@ -42,7 +42,7 @@ it had came from that one decision: permission cards shown after they were answe
 delivered to a screen that had moved on, sessions reaped by a heartbeat poller, keep-alives
 left stale after an API redeploy.
 
-rmux removes the hop. A prompt is read from the terminal you are actually looking at, and
+zmux removes the hop. A prompt is read from the terminal you are actually looking at, and
 answered on that same screen, synchronously. Both failure modes stop being possible rather
 than being worked around.
 
@@ -54,8 +54,8 @@ no account at all.
 
 ### Sessions that outlive the app
 
-Terminals and Claude conversations run under `rmux-agent` **on the target**, so they survive
-quitting rmux, losing the network, and closing the lid. Reopening reattaches to the same
+Terminals and Claude conversations run under `zmuxd` **on the target**, so they survive
+quitting zmux, losing the network, and closing the lid. Reopening reattaches to the same
 shell with its scrollback intact.
 
 - **Resume anything, from anywhere.** Pick a server, list every Claude conversation on it,
@@ -125,7 +125,7 @@ PIN yields nothing. Face unlock is offered as a convenience over typing, never a
 **macOS (Apple Silicon)** — download the `.dmg` from Releases. It is signed and notarised, so
 it opens with no warning.
 
-**Windows (x64)** — download `rmux_<version>_x64-setup.exe` from Releases and run it. The `.msi`
+**Windows (x64)** — download `zmux_<version>_x64-setup.exe` from Releases and run it. The `.msi`
 beside it installs the same app and is there for anyone deploying by policy; pick one, not both.
 Windows will show a SmartScreen warning — the build is not code-signed — so choose *More info →
 Run anyway*. WebView2 is fetched during install if the machine does not already have it, which
@@ -135,9 +135,9 @@ most Windows 11 machines do.
 also run on newer distributions:
 
 ```sh
-sudo apt install ./rmux_<version>_amd64.deb     # Debian, Ubuntu
-sudo dnf install ./rmux-<version>-1.x86_64.rpm  # Fedora, RHEL
-chmod +x rmux_<version>_amd64.AppImage && ./rmux_<version>_amd64.AppImage
+sudo apt install ./zmux_<version>_amd64.deb     # Debian, Ubuntu
+sudo dnf install ./zmux-<version>-1.x86_64.rpm  # Fedora, RHEL
+chmod +x zmux_<version>_amd64.AppImage && ./zmux_<version>_amd64.AppImage
 ```
 
 The packages depend on **WebKitGTK 4.1**; `apt` and `dnf` pull it in, and the AppImage carries
@@ -170,32 +170,32 @@ scripts/build-agents.sh   # needs cargo-zigbuild + zig
 ## Architecture
 
 ```
-crates/rmux-transport   Target trait: Local | Ssh — the seam everything is written against
-crates/rmux-ssh         system `ssh` + ControlMaster; askpass bridge; tunnels
-crates/rmux-agent       remote daemon + thin stdio proxy — why sessions survive
-crates/rmux-term        local PTY + scrollback; terminals outlive their views
-crates/rmux-fs          FileSystem trait: LocalFs | TargetFs (POSIX shell over ssh)
-crates/rmux-metrics     CPU/memory/network sampled over the existing connection
-crates/rmux-claude      Claude PTY control, screen parsing, transcript reading
-crates/rmux-control     the socket other apps drive rmux through
-crates/rmux-cowork      team-server client + OS keyring
+crates/zmux-transport   Target trait: Local | Ssh — the seam everything is written against
+crates/zmux-ssh         system `ssh` + ControlMaster; askpass bridge; tunnels
+crates/zmuxd            remote daemon + thin stdio proxy — why sessions survive
+crates/zmux-term        local PTY + scrollback; terminals outlive their views
+crates/zmux-fs          FileSystem trait: LocalFs | TargetFs (POSIX shell over ssh)
+crates/zmux-metrics     CPU/memory/network sampled over the existing connection
+crates/zmux-claude      Claude PTY control, screen parsing, transcript reading
+crates/zmux-control     the socket other apps drive zmux through
+crates/zmux-cowork      team-server client + OS keyring
 server/                 the team server (NestJS)
 src-tauri/              thin IPC layer only — no logic
 ui/                     React 19 + Tailwind 4 + motion
 ```
 
 **One rule holds the design together:** local and remote are a single code path. Everything
-is written against `rmux_transport::Target`, and there is never an `if is_local` branch in
+is written against `zmux_transport::Target`, and there is never an `if is_local` branch in
 feature code — the branch belongs in the `Target` impl. `Target::build_command` resolves to a
 *locally* spawnable argv, so terminal code always spawns a local PTY and never learns SSH
 exists.
 
-`~/.ssh/config` is never parsed by rmux. Host aliases go to the `ssh` binary verbatim, which
+`~/.ssh/config` is never parsed by zmux. Host aliases go to the `ssh` binary verbatim, which
 is why `Match`, `Include`, `ProxyJump`, certificates, FIDO keys and 2FA all work for free.
 
-## rmux as a backend
+## zmux as a backend
 
-Other applications can drive rmux over a local socket (`~/.rmux/control.sock`, `0600`, with a
+Other applications can drive zmux over a local socket (`~/.zmux/control.sock`, `0600`, with a
 per-run token): list and activate sessions, subscribe to session events, open an `ssh -D`
 SOCKS proxy, and send back observations from a browser — a DOM selection, a screenshot,
 console output, a HAR.

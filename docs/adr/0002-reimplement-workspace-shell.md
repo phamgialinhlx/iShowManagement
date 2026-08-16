@@ -25,7 +25,7 @@ rectangles, not projects.
 
 Reimplement the workspace shell on gpui + the adopted presentation stack, with a
 **zmux-native tab trait that is remote-session-aware** rather than project-aware
-— a tab is a running shell, a Claude run, a buffer over `rmux-fs`, or a
+— a tab is a running shell, a Claude run, a buffer over `zmux-fs`, or a
 transcript. **Lift `pane_group.rs` and `dock.rs` as the reusable layout core**
 (close read / partial copy), since their geometry carries little or no domain
 coupling.

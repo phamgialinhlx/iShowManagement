@@ -5,7 +5,7 @@
 //!
 //! `println!` panics when stdout is a broken pipe, and the workspace sets
 //! `panic = "abort"`, so an EPIPE became SIGABRT. The helper died without
-//! delivering the secret, `ssh` failed, and rmux asked again. Nothing in the
+//! delivering the secret, `ssh` failed, and zmux asked again. Nothing in the
 //! loop mentioned a pipe, so the symptom pointed at credentials.
 //!
 //! The window is ordinary: `ssh` is gone while the dialog is still open whenever
@@ -21,7 +21,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
 
-/// A stand-in for rmux: takes the request, then answers with a secret.
+/// A stand-in for zmux: takes the request, then answers with a secret.
 ///
 /// It waits before answering so the child is definitely past the point where it
 /// could notice its stdout is gone — the answer has to arrive *into* a broken
@@ -43,17 +43,17 @@ fn serve(listener: UnixListener) {
 
 #[test]
 fn a_closed_stdout_is_reported_not_a_crash() {
-    let dir = std::env::temp_dir().join(format!("rmux-askpass-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("zmux-askpass-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let socket = dir.join("askpass.sock");
 
     let listener = UnixListener::bind(&socket).expect("a listening socket");
     serve(listener);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rmux-askpass"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zmux-askpass"))
         .arg("password:")
-        .env("RMUX_ASKPASS_SOCKET", &socket)
-        .env("RMUX_ASKPASS_TOKEN", "test-token")
+        .env("ZMUX_ASKPASS_SOCKET", &socket)
+        .env("ZMUX_ASKPASS_TOKEN", "test-token")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
