@@ -1107,6 +1107,29 @@ for the Redstone developers and is the specification of what they must build.
   host, which is the wrong conclusion, because a newer Redstone against an older
   agent is the *ordinary* case. The id is recovered on its own and answered
   `unsupported`; only a frame with no id at all is dropped.
+- **A clean close is not evidence that anything worked.** The reconnect loop
+  reset the backoff on every `Ok`, reasoning that a clean close is an ordinary
+  disconnect. But a server that *rejects* a token also closes cleanly — Redstone
+  answers a revoked one with a 1008 policy close — so a revoked host would have
+  redialled **every second, for ever**, against a production box. That is the
+  fail2ban-shaped failure this feature's own documentation warns about, sitting
+  in its retry loop. What earns a reset is a connection that **lasted**
+  (`HEALTHY`), not one that ended politely; a rejection goes straight to the
+  ceiling and logs the reason, because retrying a refused credential faster does
+  not make it more acceptable. `next_backoff` is a pure function precisely so
+  this is testable — `Ok(Some(REJECTED))` reads as a pattern only because
+  `REJECTED` is a `const`, and had it been a binding it would have matched every
+  close code and silently treated each routine disconnect as a rejection.
+- **Measured, not assumed: a deployment may reject at either layer.** The dev
+  Redstone answers an unknown token with **HTTP 403 before the upgrade** rather
+  than the 1008 it documents. Both are handled, and they are different client
+  paths — so neither may be the only one tested.
+- **Keepalive is protocol-level ping/pong, and the pong must flush with no
+  application traffic.** tungstenite queues a pong on receipt, but a queued frame
+  that never flushes is a connection the load balancer drops at its idle timeout
+  — surfacing as a host that silently disappears about a minute after connecting,
+  which reads as a network fault. Verified live: one connection, zero reconnects
+  over two minutes through a public tunnel.
 - **`rustls` needs a crypto provider named explicitly.** `tokio-tungstenite` 0.28
   pulls it with only the `std` feature and leaves the backend to the consumer, so
   a config built without `rustls::crypto::ring::default_provider().install_default()`
@@ -1155,11 +1178,16 @@ for the Redstone developers and is the specification of what they must build.
   the name the operator would then see for their own laptop.
 - **The agent grew from 1.4 MB to 2.8 MB**, which is the TLS and WebSocket stack.
   Paid once per build fingerprint, per host.
-- **Sign-in is blocked on Redstone.** Its OAuth2 provider offers only the
-  `password` grant gated on a `client_secret`, and its own docs say — correctly —
-  never to ship that in a client. rmux is a desktop app, so the client is written
-  against RFC 8628 device authorization and reports "not supported" until the
-  server has it. **Never work around this by embedding a secret.**
+- **Enrolment takes a pasted token, so sign-in is not a gate.** Minting over
+  HTTP is a convenience: a host only ever needs an endpoint and a token, and
+  whether Redstone handed those to rmux or to a person makes no difference
+  downstream. Both paths go through `install`, which is where the
+  `0600`-before-write and stdin rules live — a second delivery would be a second
+  place to get those wrong, and a test fails if one appears.
+  The device flow (RFC 8628) stays the wanted upgrade, and rmux reports "not
+  supported" until a deployment offers it. **Never work around its absence by
+  embedding a `client_secret`** — a secret compiled into a desktop app is a
+  secret published to everyone who downloads it.
 
 ## rmux is a backend, and the browser is not part of it
 

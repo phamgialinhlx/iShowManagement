@@ -254,12 +254,9 @@ pub async fn redstone_enrol(
     app: tauri::AppHandle,
     target: crate::terminal::TargetRef,
 ) -> Result<HostStatus, String> {
-    let session = load_session().ok_or("sign in to Redstone first")?;
-
-    let claude_store = app.state::<crate::claude::ClaudeStore>();
-    let resolved = crate::claude::resolve(&claude_store, &target).await?;
-    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
-    let home = home_of(resolved.as_ref()).await?;
+    let session = load_session().ok_or(
+        "sign in to Redstone first, or enrol with a token pasted from its web UI",
+    )?;
 
     // Ask Redstone for a token belonging to this machine. The hostname is a
     // *label* — every fresh cloud image is `localhost` — so Redstone keys on its
@@ -282,16 +279,96 @@ pub async fn redstone_enrol(
         .await
         .map_err(|e| e.to_string())?;
 
-    let enrolment = rmux_bridge::Enrolment {
-        endpoint: minted.endpoint,
-        token: minted.token,
-        host_id: Some(minted.host_id.clone()),
-        enrolled_by: session.user.clone(),
-        enrolled_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_secs()),
-    };
+    install(
+        &app,
+        &target,
+        rmux_bridge::Enrolment {
+            endpoint: minted.endpoint,
+            token: minted.token,
+            host_id: Some(minted.host_id),
+            enrolled_by: session.user.clone(),
+            enrolled_at: now(),
+        },
+    )
+    .await
+}
+
+/// Enrol with a token somebody already minted, pasted by the operator.
+///
+/// **The answer to "must rmux sign in first?" is no.** Minting is a convenience,
+/// not the mechanism: the host only ever needs an endpoint and a token, and
+/// whether Redstone handed those to rmux over HTTP or to a person through a web
+/// page makes no difference to anything downstream. Keeping this path means the
+/// device grant is an upgrade rather than a gate — and it is the path that works
+/// on a deployment which has not built §2.3 yet.
+///
+/// It is also the honest shape for a self-hosted product: an operator who can
+/// read a token out of their own admin UI should not be blocked because their
+/// deployment has not enabled an OAuth flow.
+#[tauri::command]
+pub async fn redstone_enrol_with_token(
+    app: tauri::AppHandle,
+    target: crate::terminal::TargetRef,
+    endpoint: String,
+    token: String,
+    host_id: Option<String>,
+) -> Result<HostStatus, String> {
+    let endpoint = endpoint.trim().to_owned();
+    let token = token.trim().to_owned();
+
+    // Checked here rather than left for the bridge to discover on the host,
+    // where the only symptom is a log file nobody is reading. A pasted value is
+    // routinely a whole curl command, a JSON blob, or the wrong half of one.
+    if token.is_empty() {
+        return Err("paste the host token from Redstone".into());
+    }
+    if !(endpoint.starts_with("wss://") || endpoint.starts_with("ws://")) {
+        return Err(format!(
+            "the bridge endpoint must be a websocket URL starting ws:// or wss:// — got {endpoint:?}"
+        ));
+    }
+    // A token with whitespace in it is a copy-paste that took the surrounding
+    // line. Left alone it becomes an `Authorization` header the server rejects,
+    // and the operator is shown a policy close rather than the typo.
+    if token.split_whitespace().count() != 1 {
+        return Err("that looks like more than just the token — paste only the token itself".into());
+    }
+
+    install(
+        &app,
+        &target,
+        rmux_bridge::Enrolment {
+            endpoint,
+            token,
+            host_id,
+            enrolled_by: load_session().and_then(|s| s.user),
+            enrolled_at: now(),
+        },
+    )
+    .await
+}
+
+fn now() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Write an enrolment to a host and start its bridge.
+///
+/// The half both enrolment paths share, so a minted token and a pasted one
+/// cannot drift in how they are delivered — which matters, because this is the
+/// part with the mode bits and the stdin rule on it.
+async fn install(
+    app: &tauri::AppHandle,
+    target: &crate::terminal::TargetRef,
+    enrolment: rmux_bridge::Enrolment,
+) -> Result<HostStatus, String> {
+    let claude_store = app.state::<crate::claude::ClaudeStore>();
+    let resolved = crate::claude::resolve(&claude_store, target).await?;
+    let installed = crate::agent::ensure_agent(app, resolved.as_ref()).await?;
+    let home = home_of(resolved.as_ref()).await?;
 
     // Over stdin. See `write_enrolment_script`.
     let body = serde_json::to_vec(&enrolment).map_err(|e| e.to_string())?;
@@ -306,7 +383,7 @@ pub async fn redstone_enrol(
     Ok(HostStatus {
         enrolled: true,
         running: started.contains("running") || started.contains("started"),
-        host_id: Some(minted.host_id),
+        host_id: enrolment.host_id,
         endpoint: Some(enrolment.endpoint),
     })
 }
@@ -644,6 +721,57 @@ mod tests {
         let script = read_enrolment_script("/home/dev.user");
         assert!(script.contains("|| true"), "{script}");
         assert!(script.contains("2>/dev/null"), "{script}");
+    }
+
+    /// The two enrolment paths deliver the credential identically.
+    ///
+    /// A pasted token and a minted one both go through `install`, which is where
+    /// the `0600`-before-write rule and the stdin rule live. If the paste path
+    /// grew its own delivery, those two rules would have to be got right twice —
+    /// and the second copy is the one that ships without them.
+    #[test]
+    fn both_enrolment_paths_share_one_delivery() {
+        // Only the half above `mod tests`, or this counts the literal it is
+        // searching for and reports its own text as a second call site.
+        let src = include_str!("redstone.rs");
+        let code = &src[..src.find("mod tests {").unwrap_or(src.len())];
+
+        // `write_enrolment_script` is called exactly once in the module: from
+        // `install`. A second call site means the paths have diverged.
+        let calls = code.matches("write_enrolment_script(&home)").count();
+        assert_eq!(calls, 1, "the enrolment write is duplicated across paths");
+    }
+
+    #[test]
+    fn a_pasted_endpoint_must_be_a_websocket_url() {
+        // Redstone's own docs show an `https://` base URL right next to the
+        // `wss://` bridge endpoint, so pasting the wrong one is the likely
+        // accident — and left alone it fails on the host, in a log nobody reads.
+        for bad in [
+            "https://redstone.example/api/v1/rmux/bridge",
+            "redstone.example/api/v1/rmux/bridge",
+            "",
+        ] {
+            assert!(
+                !(bad.starts_with("wss://") || bad.starts_with("ws://")),
+                "{bad:?} should be rejected",
+            );
+        }
+        assert!("wss://redstone.example/api/v1/rmux/bridge".starts_with("wss://"));
+        // `ws://` is allowed on purpose: it is what makes a local stand-in
+        // server usable as a first step, exactly as §5.1 of the doc describes.
+        assert!("ws://127.0.0.1:8787/bridge".starts_with("ws://"));
+    }
+
+    #[test]
+    fn a_token_pasted_with_its_surroundings_is_refused() {
+        // The realistic paste is a whole curl line or a JSON fragment. Left
+        // alone it becomes an `Authorization` header the server rejects, and the
+        // operator is shown a policy close instead of their own typo.
+        for bad in ["rbt_abc def", "token: rbt_abc", "  rbt_abc  extra\n"] {
+            assert_ne!(bad.split_whitespace().count(), 1, "{bad:?} should be refused");
+        }
+        assert_eq!("  rbt_abc  ".split_whitespace().count(), 1);
     }
 
     #[test]

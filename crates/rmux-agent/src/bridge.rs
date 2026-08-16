@@ -49,6 +49,18 @@ use crate::{alias, attach, status};
 const REDIAL_MIN: Duration = Duration::from_secs(1);
 const REDIAL_MAX: Duration = Duration::from_secs(60);
 
+/// How long a connection must last to count as having worked.
+///
+/// Only a connection that survives this resets the backoff. A socket that is
+/// accepted and closed immediately — a refused token, a server mid-deploy — is
+/// not evidence of health however politely it ended.
+const HEALTHY: Duration = Duration::from_secs(30);
+
+/// The close code Redstone sends for an unknown or revoked token (RFC 6455
+/// "policy violation"). Named, because a bare 1008 in a match arm is the sort
+/// of constant nobody can look up a year later.
+const REJECTED: u16 = 1008;
+
 /// How long a spawned session is given to appear before the caller is answered.
 const SPAWN_SETTLE: Duration = Duration::from_millis(500);
 
@@ -85,24 +97,62 @@ pub async fn run() -> anyhow::Result<()> {
 
     let mut backoff = REDIAL_MIN;
     loop {
-        match serve(&enrolment).await {
-            // A clean close is still a disconnect: reconnect, but from the floor
-            // rather than from wherever the backoff had grown to.
-            Ok(()) => {
-                tracing::info!("bridge closed by the far side; redialling");
-                backoff = REDIAL_MIN;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, retry_in = ?backoff, "bridge disconnected");
-            }
+        let started = std::time::Instant::now();
+        let outcome = serve(&enrolment).await;
+        let lasted = started.elapsed();
+
+        backoff = next_backoff(&outcome, lasted, backoff);
+        match &outcome {
+            Ok(Some(REJECTED)) => tracing::warn!(
+                retry_in = ?backoff,
+                "Redstone rejected this host's token (policy close). It may have been \
+                 revoked — re-enrol the host from rmux.",
+            ),
+            Ok(code) => tracing::info!(?code, ?lasted, retry_in = ?backoff, "bridge closed"),
+            Err(e) => tracing::warn!(error = %e, ?lasted, retry_in = ?backoff, "bridge disconnected"),
         }
+
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(REDIAL_MAX);
     }
 }
 
+/// How long to wait before redialling.
+///
+/// **A clean close is not evidence that anything worked**, and the first version
+/// assumed it was: it reset the backoff on every `Ok`, reasoning that a clean
+/// close is an ordinary disconnect. But a server that *rejects* the token also
+/// closes cleanly — Redstone answers an unknown or revoked one with a 1008 — so
+/// a revoked host would have redialled **every second, for ever**, against
+/// somebody's production box. That is precisely the failure this file exists to
+/// avoid, sitting in the retry loop.
+///
+/// What earns a reset is a connection that *lasted*, not one that ended
+/// politely. That rule applies to the error path too: a socket that served for
+/// an hour and then dropped should come back quickly, and a dial that fails
+/// instantly should not.
+fn next_backoff(
+    outcome: &anyhow::Result<Option<u16>>,
+    lasted: Duration,
+    current: Duration,
+) -> Duration {
+    // Retrying a refused credential faster does not make it more acceptable; it
+    // just generates failed authentications on someone else's server.
+    if matches!(outcome, Ok(Some(code)) if *code == REJECTED) {
+        return REDIAL_MAX;
+    }
+    if lasted >= HEALTHY {
+        return REDIAL_MIN;
+    }
+    (current * 2).min(REDIAL_MAX)
+}
+
 /// One connection, from dial to close.
-async fn serve(enrolment: &Enrolment) -> anyhow::Result<()> {
+///
+/// Returns the close code the far side sent, when it sent one. That is what
+/// lets [`run`] tell "your token is no good" apart from "the server restarted",
+/// which are the same event as far as the socket is concerned and want opposite
+/// retry behaviour.
+async fn serve(enrolment: &Enrolment) -> anyhow::Result<Option<u16>> {
     let request = tungstenite::client::IntoClientRequest::into_client_request(
         enrolment.endpoint.as_str(),
     )
@@ -198,11 +248,13 @@ async fn serve(enrolment: &Enrolment) -> anyhow::Result<()> {
             // Answered by the library, but matched explicitly so a future
             // message kind is a compile error rather than a silent drop.
             tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_) => {}
-            tungstenite::Message::Close(_) => return Ok(()),
+            tungstenite::Message::Close(frame) => {
+                return Ok(frame.map(|f| u16::from(f.code)));
+            }
             tungstenite::Message::Binary(_) | tungstenite::Message::Frame(_) => {}
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Answer one request.
@@ -860,6 +912,126 @@ mod tests {
             }
             other => panic!("answered with {other:?}"),
         }
+    }
+
+    /// A keepalive ping is answered even with no application traffic.
+    ///
+    /// Redstone's keepalive is **protocol-level** WebSocket pings from uvicorn,
+    /// roughly every 20s, and it sends no application-level ping method — quite
+    /// rightly, since this bridge would answer `unsupported` to every one.
+    ///
+    /// So the pong has to come out of the read path with nothing else flowing.
+    /// tungstenite queues a pong on receipt, but a queued frame that is never
+    /// flushed is a connection that dies at the load balancer's idle timeout —
+    /// and the symptom is a host that silently disappears about a minute after
+    /// connecting, which reads as a network fault rather than a missing flush.
+    #[tokio::test]
+    async fn a_keepalive_ping_is_answered_without_any_application_traffic() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _greeting = socket.next().await.unwrap().unwrap();
+
+            let mut pongs = 0;
+            for n in 0..3u8 {
+                socket
+                    .send(tungstenite::Message::Ping(vec![n].into()))
+                    .await
+                    .unwrap();
+
+                // Nothing else is sent, so anything that comes back is the
+                // answer to the ping.
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    socket.next(),
+                )
+                .await
+                {
+                    Ok(Some(Ok(tungstenite::Message::Pong(_)))) => pongs += 1,
+                    other => panic!("expected a pong, got {other:?}"),
+                }
+            }
+            socket.close(None).await.ok();
+            pongs
+        });
+
+        let enrolment = Enrolment {
+            endpoint: format!("ws://127.0.0.1:{port}/bridge"),
+            token: "t".into(),
+            host_id: None,
+            enrolled_by: None,
+            enrolled_at: None,
+        };
+        serve(&enrolment).await.unwrap();
+
+        assert_eq!(server.await.unwrap(), 3, "keepalive pings went unanswered");
+    }
+
+    /// A rejected token must not turn into a hot loop.
+    ///
+    /// This is the bug the extraction exists to pin. Redstone answers an unknown
+    /// or revoked token with a **1008 policy close**, which is a *clean* close —
+    /// and the original loop reset the backoff on every clean close, so a
+    /// revoked host would have redialled once a second, for ever, against a
+    /// production server. Exactly the fail2ban-shaped failure this file's own
+    /// documentation warns about.
+    #[test]
+    fn a_rejected_token_backs_all_the_way_off_rather_than_hammering() {
+        let rejected: anyhow::Result<Option<u16>> = Ok(Some(REJECTED));
+
+        // Instantly, and from the floor — the case that used to loop.
+        assert_eq!(
+            next_backoff(&rejected, Duration::from_millis(20), REDIAL_MIN),
+            REDIAL_MAX,
+            "a refused credential must go straight to the ceiling",
+        );
+        // …and it stays there however long the socket happened to be held open.
+        assert_eq!(
+            next_backoff(&rejected, Duration::from_secs(600), REDIAL_MIN),
+            REDIAL_MAX,
+        );
+    }
+
+    #[test]
+    fn only_a_connection_that_lasted_resets_the_backoff() {
+        let closed: anyhow::Result<Option<u16>> = Ok(None);
+        let normal: anyhow::Result<Option<u16>> = Ok(Some(1000));
+
+        // A server restart after a real session: come back quickly.
+        assert_eq!(next_backoff(&closed, HEALTHY, Duration::from_secs(32)), REDIAL_MIN);
+        assert_eq!(next_backoff(&normal, HEALTHY, Duration::from_secs(32)), REDIAL_MIN);
+
+        // Accepted and dropped immediately, with a *normal* close code: grow.
+        // This is the case that separates "lasted" from "ended politely".
+        assert_eq!(
+            next_backoff(&normal, Duration::from_millis(10), Duration::from_secs(2)),
+            Duration::from_secs(4),
+        );
+
+        // The error path follows the same rule, and is capped.
+        let failed: anyhow::Result<Option<u16>> = Err(anyhow::anyhow!("connection refused"));
+        assert_eq!(
+            next_backoff(&failed, Duration::from_millis(5), Duration::from_secs(40)),
+            REDIAL_MAX,
+        );
+        assert_eq!(next_backoff(&failed, Duration::from_secs(90), REDIAL_MAX), REDIAL_MIN);
+    }
+
+    #[test]
+    fn the_close_code_is_read_rather_than_bound() {
+        // `Ok(Some(REJECTED))` reads as a pattern only because `REJECTED` is a
+        // `const`. Had it been a local binding it would have matched *every*
+        // close code and silently treated a routine disconnect as a rejection —
+        // which looks identical in the logs and takes an hour to find.
+        let normal: anyhow::Result<Option<u16>> = Ok(Some(1000));
+        assert_ne!(
+            next_backoff(&normal, Duration::from_millis(10), REDIAL_MIN),
+            REDIAL_MAX,
+            "1000 was treated as a rejection",
+        );
     }
 
     #[test]

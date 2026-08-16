@@ -9,10 +9,12 @@ dials Redstone, and rmux can enrol a host and start it. Nothing on the Redstone
 side exists yet; [§2](#2-what-redstone-must-build) is the complete list of what
 does.
 
-**One thing blocks the whole feature and it is small:** rmux cannot sign in.
-Redstone's OAuth2 provider offers only the `password` grant, gated on a
-`client_secret`, and `docs/auth-provider-integration.md` says — correctly — never
-to ship that in a client. rmux is a desktop app. See [§2.3](#23-device-sign-in).
+**Sign-in is no longer a gate.** rmux can enrol a host from a **token pasted**
+out of Redstone's own UI, so the whole feature works today on a deployment that
+has not built the device flow. Minting over HTTP is a convenience, not the
+mechanism: a host only ever needs an endpoint and a token, and whether Redstone
+handed those to rmux or to a person makes no difference downstream. The device
+grant ([§2.3](#23-device-sign-in)) remains worth having, as an upgrade.
 
 ---
 
@@ -76,8 +78,9 @@ mistake.
 
 ## 2. What Redstone must build
 
-Four things. §2.1 and §2.2 are the feature; §2.3 unblocks sign-in; §2.4 is what
-makes it reachable by the agent.
+Four things. §2.1 and §2.2 are the feature and are **done on the dev
+deployment**; §2.3 is now optional; §2.4 is what makes it reachable by the
+agent, and is the only thing still between this and a working demo.
 
 ### 2.1 The bridge endpoint
 
@@ -100,8 +103,14 @@ Then it waits. Redstone sends requests; the bridge answers. Full protocol in
 Requirements:
 
 - **Reject a token you do not recognise at the HTTP layer**, before the upgrade.
-  The bridge treats a failed handshake as a retry and backs off; a socket that
-  accepts anyone is a socket anyone can drive a dev box through.
+  A socket that accepts anyone is a socket anyone can drive a dev box through.
+
+  Measured against the dev deployment: an unknown token gets **HTTP 403 before
+  the upgrade**, not the 1008 close described to us. Both are handled and both
+  back off — 403 fails the dial, 1008 is a policy close — but they are different
+  code paths on the client, so it is worth knowing which one a deployment
+  actually does. Observed backoff on 403: 2s, 4s, 8s, 16s, 32s, capping at 60s.
+  Five attempts in the first forty seconds, and no hot loop.
 - **Send WebSocket pings.** The bridge answers them and does not ping you. Idle
   connections through a load balancer are dropped at 60s by most defaults, and
   without pings every host silently disappears a minute after connecting.
@@ -152,7 +161,11 @@ so an older deployment simply has none. A `404` is a fine answer and is handled.
 
 ### 2.3 Device sign-in
 
-**This is the blocker.** rmux is a public client: it holds no `client_secret`,
+**No longer a blocker — a convenience.** rmux enrols from a pasted token today
+(§5), so this buys the operator not having to carry one by hand. Worth doing,
+not worth waiting for.
+
+rmux is a public client: it holds no `client_secret`,
 because a secret compiled into a desktop app is published to everyone who
 downloads it. It also cannot host a redirect URI.
 
@@ -458,12 +471,29 @@ On the rmux side, already implemented:
 | `crates/rmux-bridge` | The wire contract, with tests |
 | Enrolment | Writes the token to a host over stdin and starts the bridge |
 | `GET /api/v1/rmux/config` probe | So rmux controls stay **hidden** on a deployment without the bridge |
+| Enrol from a pasted token | `redstone_enrol_with_token` — no sign-in needed |
 | Device-flow client | Written against §2.3, reports "not supported" until it exists |
 
 The agent grew from 1.4 MB to 2.8 MB, which is the TLS and WebSocket stack. It is
 uploaded to a host once per build fingerprint.
 
-**Not built:** any Redstone-side UI, and sign-in (blocked on §2.3).
+**Not built:** any Redstone-side UI, and no rmux UI for enrolment — the command
+exists, nothing renders it yet.
+
+### 5.2 Verified against the dev deployment
+
+Run on 2026-08-17 against `/api/v1/rmux/bridge` through the public tunnel, with
+the shipped 0.2.20 agent binary:
+
+| | |
+|---|---|
+| `wss://` dial, TLS, token accepted | connected first attempt |
+| Keepalive | **one connection, zero reconnects over 2 minutes** — uvicorn's protocol-level pings are answered by the read path with no application traffic |
+| Unknown token | HTTP 403 before upgrade; backoff 2→4→8→16→32s, capping at 60s |
+| Config probe | `{"bridge":true,"deviceFlow":false,"orgName":"","protocols":[1]}` |
+
+Still unproven end to end: `spawn`, and any request actually **sent by Redstone**
+— every request so far has come from a stand-in server on one side or the other.
 
 ### 5.1 Trying it without Redstone
 

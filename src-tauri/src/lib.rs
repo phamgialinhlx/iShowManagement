@@ -232,6 +232,7 @@ pub fn run() {
             redstone::redstone_sign_in_start,
             redstone::redstone_sign_in_poll,
             redstone::redstone_enrol,
+            redstone::redstone_enrol_with_token,
             redstone::redstone_unenrol,
             redstone::redstone_host_status,
             claude::claude_start,
