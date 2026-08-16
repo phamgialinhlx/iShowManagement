@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, Subscription, WeakEntity, Window, actions, div,
-    prelude::*,
+    App, ClickEvent, Context, Entity, FocusHandle, Focusable, SharedString, Subscription,
+    WeakEntity, Window, actions, div, prelude::*, px, svg,
 };
 use rmux_transport::TargetId;
 use theme::ActiveTheme;
@@ -332,7 +332,19 @@ impl Render for Workspace {
         let rail = self.rail.clone();
         let picker = self.picker.clone();
         let rail_visible = self.rail_visible;
-        let bg_color = cx.theme().colors().background;
+        let pane_count = self.center.panes().len();
+        let colors = cx.theme().colors();
+        let bg_color = colors.background;
+        let bar_bg = colors.status_bar_background;
+        let bar_border = colors.border_variant;
+        let icon_color = colors.icon;
+        let text_muted = colors.text_muted;
+        let rail_icon_path: &'static str = if rail_visible {
+            "icons/sidebar_left.svg"
+        } else {
+            "icons/sidebar_left_closed.svg"
+        };
+        let pane_label: SharedString = format!("{} panes", pane_count).into();
 
         div()
             .track_focus(&self.focus)
@@ -362,13 +374,54 @@ impl Render for Workspace {
             .relative()
             .bg(bg_color)
             .flex()
-            .flex_row()
-            .when(rail_visible, |this| this.child(rail))
+            .flex_col()
+            // Main area: rail + pane tree.
             .child(
                 div()
                     .flex_1()
-                    .size_full()
-                    .child(self.center.render(window, cx)),
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .when(rail_visible, |this| this.child(rail))
+                    .child(
+                        div()
+                            .flex_1()
+                            .size_full()
+                            .child(self.center.render(window, cx)),
+                    ),
+            )
+            // Bottom bar: rail toggle (left) + pane count (right).
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .h(px(24.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .bg(bar_bg)
+                    .border_t_1()
+                    .border_color(bar_border)
+                    .child(
+                        div()
+                            .id("rail-toggle")
+                            .px_2()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .text_color(icon_color)
+                            .child(svg().path(rail_icon_path).size(px(14.)).text_color(icon_color))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.toggle_rail(window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .ml_auto()
+                            .px_2()
+                            .text_xs()
+                            .text_color(text_muted)
+                            .child(pane_label),
+                    ),
             )
             .when_some(picker, |this, picker| {
                 this.child(

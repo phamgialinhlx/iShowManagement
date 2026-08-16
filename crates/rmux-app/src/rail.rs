@@ -15,14 +15,27 @@ use std::collections::HashMap;
 use futures::channel::mpsc;
 use futures::StreamExt as _;
 use gpui::{
-    App, ClickEvent, Context, Div, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
-    IntoElement, KeyDownEvent, Keystroke, SharedString, Stateful, Window, div, prelude::*, px,
+    App, ClickEvent, Context, Div, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight,
+    Hsla, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, SharedString,
+    Stateful, Window, div, prelude::*, px,
 };
 use rmux_transport::TargetId;
 use theme::ActiveTheme;
 
 use crate::backend::{self, AgentSession, Backend, StatusLine};
 use crate::state::{SessionKind, State};
+
+/// Drag value for the rail's resize handle. The handle starts a `RailResize`
+/// drag; the rail root listens for `DragMoveEvent<RailResize>` to update width.
+struct RailResize;
+
+/// Invisible drag preview (gpui's `on_drag` requires a render entity).
+struct ResizePreview;
+impl Render for ResizePreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 /// A rail row the cursor can land on. Project headers are visual only.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,6 +102,8 @@ pub struct RailView {
     /// Claude status by host, then by cwd (the only key shared between the
     /// agent's session list and `watch-status`'s Claude updates).
     status_by_host: HashMap<TargetId, HashMap<String, String>>,
+    /// Drag-to-resize width of the rail panel.
+    width: Pixels,
 }
 
 impl EventEmitter<RailEvent> for RailView {}
@@ -100,6 +115,7 @@ impl RailView {
             servers: Vec::new(),
             cursor: 0,
             status_by_host: HashMap::new(),
+            width: px(240.),
         };
         // Repopulate from persisted state: each saved server reconnects, and
         // its saved session names show immediately (as "gone" until the live
@@ -380,6 +396,22 @@ impl RailView {
         }
     }
 
+    /// Handle drag-resize: set rail width to the cursor's X, clamped to
+    /// 150–500px. Fires on every mouse-move frame during the drag.
+    fn on_resize_move(
+        &mut self,
+        event: &DragMoveEvent<RailResize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let new_width = event.event.position.x;
+        let clamped = new_width.clamp(px(150.), px(500.));
+        if clamped != self.width {
+            self.width = clamped;
+            cx.notify();
+        }
+    }
+
     /// Whether a server is already in the rail (for the picker).
     pub fn has_server(&self, target: &TargetId) -> bool {
         self.servers.iter().any(|s| &s.target == target)
@@ -434,6 +466,21 @@ impl Render for RailView {
                 RailItem::Server(six) => {
                     let Some(srv) = self.servers.get(six) else { continue };
                     server_row(srv, selected, row_ix, colors, status)
+                        .child(
+                            div()
+                                .id(("new-session", row_ix))
+                                .px_1()
+                                .text_color(colors.text_disabled)
+                                .child("+")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |view, _: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        view.cursor = row_ix;
+                                        view.new_shell(cx);
+                                    }),
+                                ),
+                        )
                         .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                             view.cursor = row_ix;
                             view.activate(cx);
@@ -450,6 +497,21 @@ impl Render for RailView {
                         LiveStatus::Gone
                     };
                     session_row(sess, &live, selected, row_ix, colors, status)
+                        .child(
+                            div()
+                                .id(("kill-session", row_ix))
+                                .px_1()
+                                .text_color(colors.text_disabled)
+                                .child("✕")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |view, _: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        view.cursor = row_ix;
+                                        view.kill_selected(cx);
+                                    }),
+                                ),
+                        )
                         .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                             view.cursor = row_ix;
                             view.activate(cx);
@@ -460,12 +522,15 @@ impl Render for RailView {
             rows.push(row);
         }
 
+        let width = self.width;
+
         div()
             .track_focus(&self.focus)
             .key_context("Rail")
             .on_key_down(cx.listener(Self::on_key))
+            .on_drag_move(cx.listener(Self::on_resize_move))
             .h_full()
-            .w(px(240.))
+            .w(width)
             .flex_shrink_0()
             .bg(colors.panel_background)
             .border_r_1()
@@ -473,6 +538,20 @@ impl Render for RailView {
             .flex()
             .flex_col()
             .children(rows)
+            // Resize handle: an invisible 4px strip on the right edge.
+            .child(
+                div()
+                    .id("rail-resize")
+                    .absolute()
+                    .top_0()
+                    .right(px(-2.))
+                    .h_full()
+                    .w(px(4.))
+                    .cursor_col_resize()
+                    .on_drag(RailResize, |_, _, _, cx| {
+                        cx.new(|_| ResizePreview)
+                    }),
+            )
     }
 }
 

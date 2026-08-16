@@ -4,6 +4,7 @@
 //! emulated by `alacritty_terminal` and painted by gpui. The workspace shell
 //! (panes/docks/tabs) grows around this.
 
+mod assets;
 mod backend;
 mod pane;
 mod pane_group;
@@ -41,7 +42,9 @@ static LOGGER: StderrLogger = StderrLogger;
 fn main() {
     let _ = log::set_logger(&LOGGER);
     log::set_max_level(log::LevelFilter::Warn);
-    application().run(|cx: &mut App| {
+    application()
+        .with_assets(crate::assets::Assets)
+        .run(|cx: &mut App| {
         // gpui ships the font *names* (".ZedMono" → "Lilex") but not the font
         // *data*, so text renders nothing until the actual files are registered.
         // Lilex is bundled (OFL) and embedded into the binary here.

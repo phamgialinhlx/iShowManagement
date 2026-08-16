@@ -66,3 +66,4 @@ tmp/
 web/dist
 ui/dist
 references/iShowManagement-0.2.8/
+.claude/settings.local.zed.json
