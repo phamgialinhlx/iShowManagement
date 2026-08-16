@@ -7,6 +7,7 @@ import { ModelProfilesPanel } from "../components/ModelProfilesPanel";
 import { DiagnosticsPanel } from "../components/DiagnosticsPanel";
 import { LockPanel } from "../components/LockPanel";
 import { CoworkPanel } from "../components/CoworkPanel";
+import { RedstonePanel } from "../components/RedstonePanel";
 import { AppearancePanel } from "../components/AppearancePanel";
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { EditorPanel } from "../components/EditorPanel";
@@ -34,6 +35,7 @@ type Section =
   | "models"
   | "lock"
   | "cowork"
+  | "redstone"
   | "notifications"
   | "editor"
   | "shortcuts"
@@ -45,6 +47,7 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "models", label: "MODELS", blurb: "Run against Kimi, GLM or a gateway" },
   { id: "lock", label: "LOCK", blurb: "Ask for a PIN or a face on every start" },
   { id: "cowork", label: "COWORK", blurb: "Your team's server, if you use one" },
+  { id: "redstone", label: "REDSTONE", blurb: "Let its agent drive a server's sessions" },
   { id: "notifications", label: "NOTIFICATIONS", blurb: "When a session wants you" },
   { id: "editor", label: "EDITOR", blurb: "Whether edits save themselves" },
   { id: "shortcuts", label: "SHORTCUTS", blurb: "Move around without the mouse" },
@@ -183,6 +186,12 @@ export function Settings() {
           {section === "cowork" && (
             <ErrorBoundary label="Cowork account">
               <CoworkPanel session={session} onSession={setSession} />
+            </ErrorBoundary>
+          )}
+
+          {section === "redstone" && (
+            <ErrorBoundary label="Redstone bridge">
+              <RedstonePanel />
             </ErrorBoundary>
           )}
           </div>

@@ -9,6 +9,27 @@ import type { Theme } from "./theme";
  */
 export type ThemeState = { active: string; userThemes: Theme[] };
 
+/** What a Redstone deployment offers. All false on one without the bridge. */
+export type RedstoneCapabilities = {
+  bridge: boolean;
+  deviceFlow: boolean;
+  orgName?: string;
+  protocols?: number[];
+};
+
+/**
+ * One host's enrolment.
+ *
+ * `enrolled` and `running` are deliberately separate: the token being on the
+ * box says nothing about whether the bridge process survived.
+ */
+export type RedstoneHost = {
+  enrolled: boolean;
+  running: boolean;
+  hostId?: string;
+  endpoint?: string;
+};
+
 /**
  * Typed wrappers over the Rust IPC surface.
  *
@@ -752,6 +773,39 @@ export const api = {
    */
   serverDisconnect: (target: TargetRef) =>
     call<{ evicted: number; closed: boolean }>("server_disconnect", { target }),
+
+  // --- Redstone bridge -----------------------------------------------------
+  //
+  // The token never crosses this boundary in either direction. Enrolling sends
+  // one *in* (the operator pasted it) and it goes straight to the host over
+  // stdin; nothing ever reads one back. `redstoneHostStatus` returns whether a
+  // host is enrolled and whether its bridge is actually running — two separate
+  // facts, because a host whose file is present but whose bridge died is the
+  // failure that otherwise looks like success.
+
+  /** What a deployment supports. Asked before any Redstone control is shown. */
+  redstoneCapabilities: (baseUrl: string) =>
+    call<RedstoneCapabilities>("redstone_capabilities", { baseUrl }),
+
+  redstoneHostStatus: (target: TargetRef) =>
+    call<RedstoneHost>("redstone_host_status", { target }),
+
+  /**
+   * Enrol with a token the operator pasted out of Redstone's own UI.
+   *
+   * The path that works without signing in — see `redstone.rs`. Minting over
+   * HTTP is a convenience, not the mechanism.
+   */
+  redstoneEnrolWithToken: (
+    target: TargetRef,
+    endpoint: string,
+    token: string,
+    hostId?: string,
+  ) =>
+    call<RedstoneHost>("redstone_enrol_with_token", { target, endpoint, token, hostId }),
+
+  redstoneUnenrol: (target: TargetRef) =>
+    call<RedstoneHost>("redstone_unenrol", { target }),
 
   /**
    * Give a running session a display name every client can see.
