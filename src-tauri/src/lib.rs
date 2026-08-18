@@ -229,6 +229,7 @@ pub fn run() {
             redstone::redstone_session,
             redstone::redstone_sign_out,
             redstone::redstone_capabilities,
+            redstone::redstone_sign_in,
             redstone::redstone_sign_in_start,
             redstone::redstone_sign_in_poll,
             redstone::redstone_enrol,

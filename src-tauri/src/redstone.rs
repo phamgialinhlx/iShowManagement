@@ -22,17 +22,26 @@
 //! that silently enrolled every host in `~/.ssh/config` on sign-in would be the
 //! kind of default nobody remembers agreeing to.
 //!
-//! ## What is not built here
+//! ## Signing in: an address, not a token
 //!
-//! **Sign-in needs a device flow Redstone does not ship yet.** Its OAuth2
-//! provider today offers only the `password` grant, gated on a `client_secret` —
-//! and its own documentation says, correctly, never to put that in a client. rmux
-//! is a desktop app: a secret compiled into it is a secret published to everyone
-//! who downloads it. [`SignIn`] is therefore written against RFC 8628, which is
-//! the standard answer for a client that cannot hold a secret and cannot host a
-//! redirect, and `docs/redstone-bridge.md` specifies exactly what Redstone must
-//! expose. Until then [`redstone_sign_in_start`] reports that the server does not
-//! support it, rather than offering a control that cannot work.
+//! The operator types their Redstone address and signs in on **Redstone's own
+//! login page**, opened in a window. rmux mints host tokens itself from then on,
+//! so no credential is ever typed into rmux and none is carried by hand between
+//! two apps that can talk to each other perfectly well.
+//!
+//! That is also what Redstone's desktop specification prescribes — *"do not
+//! build a native login screen; do not handle passwords in the shell"* — and the
+//! reason it works against **every** deployment: it needs nothing the server has
+//! not already got, unlike the device grant below.
+//!
+//! Two alternatives were rejected. The `password` grant is gated on a
+//! `client_secret`, and a secret compiled into a desktop app is a secret
+//! published to everyone who downloads it. The device grant (RFC 8628) is the
+//! tidier long-term answer and [`redstone_sign_in_start`] implements the client
+//! half, but no deployment ships it yet — so it stays available and is not
+//! waited on.
+//!
+//! **Never work around a missing flow by embedding a secret.**
 
 use std::collections::HashMap;
 
@@ -257,12 +266,13 @@ pub async fn redstone_enrol(
     let session = load_session().ok_or(
         "sign in to Redstone first, or enrol with a token pasted from its web UI",
     )?;
+    let base = session.base_url.trim_end_matches('/');
 
     // Ask Redstone for a token belonging to this machine. The hostname is a
     // *label* — every fresh cloud image is `localhost` — so Redstone keys on its
     // own id and rmux keeps whatever it is given.
     let minted: Minted = reqwest::Client::new()
-        .post(format!("{}/api/v1/rmux/hosts", session.base_url.trim_end_matches('/')))
+        .post(format!("{base}/api/v1/rmux/hosts"))
         .bearer_auth(&session.access_token)
         .json(&serde_json::json!({
             "label": target.host.clone().unwrap_or_else(|| "this machine".into()),
@@ -283,7 +293,7 @@ pub async fn redstone_enrol(
         &app,
         &target,
         rmux_bridge::Enrolment {
-            endpoint: minted.endpoint,
+            endpoint: minted.endpoint.unwrap_or_else(|| default_endpoint(base)),
             token: minted.token,
             host_id: Some(minted.host_id),
             enrolled_by: session.user.clone(),
@@ -397,7 +407,12 @@ struct Minted {
     /// because a deployment may terminate WebSockets somewhere else entirely and
     /// guessing at the scheme and path is how an integration breaks on the one
     /// installation that does.
-    endpoint: String,
+    ///
+    /// Optional only so an older deployment that omits it still enrols against
+    /// the conventional path, rather than failing on a missing field. A value
+    /// the server *did* send always wins.
+    #[serde(default)]
+    endpoint: Option<String>,
 }
 
 /// Whether this host is enrolled, and whether its bridge is actually up.
@@ -466,6 +481,160 @@ pub async fn redstone_unenrol(
     }
 
     Ok(HostStatus::default())
+}
+
+/// Sign in by letting the operator use Redstone's own login page.
+///
+/// **This is what makes the panel a domain field rather than a token field.**
+/// The operator types `redstone.example`, signs in the way they already do, and
+/// rmux mints host tokens itself from then on. No credential is ever typed into
+/// rmux, and no token is carried by hand.
+///
+/// It is also exactly what Redstone's own desktop specification prescribes:
+/// *"The user logs in through the normal web login form. Do not build a native
+/// login screen; do not handle passwords in the shell."* The web app sets an
+/// `rs_token` cookie on its origin, and the shell reads it back.
+///
+/// ## Why this beats the device grant it replaces
+///
+/// The device flow (§2.3) needs the server to implement a grant type it has not
+/// shipped. This needs **nothing from Redstone at all** — it works against any
+/// deployment whose web app can be logged into, which is all of them. The device
+/// grant stays the tidier long-term answer, and this removes the wait.
+///
+/// ## Why the login window cannot touch rmux
+///
+/// It loads a **remote origin**, so it gets no Tauri IPC: a remote domain has to
+/// be listed in `dangerousRemoteDomainIpcAccess` to reach any command, and rmux
+/// lists none. The window can render Redstone and nothing else. rmux reads one
+/// cookie out of it and never injects a line of script.
+#[tauri::command]
+pub async fn redstone_sign_in(app: tauri::AppHandle, base_url: String) -> Result<SessionView, String> {
+    let base = normalise_base(&base_url)?;
+
+    let url: tauri::Url = base.parse().map_err(|e| format!("{base} is not a URL: {e}"))?;
+
+    // Closed first if one is already open, so a second attempt does not fail on
+    // the duplicate label — the same reason `open_settings` focuses rather than
+    // rebuilds, except here a stale half-finished login is worth discarding.
+    if let Some(existing) = app.get_webview_window(LOGIN_LABEL) {
+        let _ = existing.close();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        LOGIN_LABEL,
+        tauri::WebviewUrl::External(url.clone()),
+    )
+    .title("Sign in to Redstone")
+    .inner_size(920.0, 760.0)
+    .min_inner_size(480.0, 520.0)
+    .build()
+    .map_err(|e| format!("could not open the sign-in window: {e}"))?;
+
+    // Poll for the cookie the web app sets. Polling rather than a navigation
+    // hook because the sign-in may take any number of redirects, SSO hops and
+    // second factors, and none of those are ours to model — the only thing that
+    // reliably marks success is the credential existing.
+    let deadline = std::time::Instant::now() + SIGN_IN_TIMEOUT;
+    loop {
+        if std::time::Instant::now() > deadline {
+            let _ = window.close();
+            return Err("sign-in timed out".into());
+        }
+        // The operator closing the window is a cancellation, not a failure.
+        if app.get_webview_window(LOGIN_LABEL).is_none() {
+            return Err("sign-in cancelled".into());
+        }
+
+        if let Some(token) = window
+            .cookies_for_url(url.clone())
+            .ok()
+            .and_then(|cookies| {
+                cookies
+                    .into_iter()
+                    .find(|c| c.name() == TOKEN_COOKIE)
+                    .map(|c| c.value().to_owned())
+            })
+            .filter(|t| !t.is_empty())
+        {
+            // **Proved before it is believed.** A cookie by that name may be a
+            // stale or half-written value, and storing one that does not work
+            // means the failure surfaces later, at enrolment, pointing at the
+            // wrong thing. `/rmux/hosts` needs authentication and is known to
+            // exist, so a 200 is proof without guessing at an identity route.
+            let ok = reqwest::Client::new()
+                .get(format!("{base}/api/v1/rmux/hosts"))
+                .bearer_auth(&token)
+                .timeout(std::time::Duration::from_secs(15))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+
+            if ok {
+                let session = Session {
+                    base_url: base.clone(),
+                    user: subject_of(&token),
+                    access_token: token,
+                    refresh_token: None,
+                };
+                store_session(&session)?;
+                let _ = window.close();
+                return Ok(SessionView { base_url: session.base_url, user: session.user });
+            }
+        }
+
+        tokio::time::sleep(SIGN_IN_POLL).await;
+    }
+}
+
+/// The window that holds Redstone's own login page.
+const LOGIN_LABEL: &str = "redstone-signin";
+/// The cookie Redstone's web app stores its session in.
+const TOKEN_COOKIE: &str = "rs_token";
+/// Long enough for an SSO hop and a second factor, short enough that a window
+/// left open overnight does not keep a task alive for ever.
+const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const SIGN_IN_POLL: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// Turn what an operator typed into a base URL.
+///
+/// They will type `redstone.example`, because that is what the field asks for.
+/// Requiring a scheme would be a validation error for the most likely input.
+fn normalise_base(input: &str) -> Result<String, String> {
+    let trimmed = input.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("enter your Redstone address".into());
+    }
+    // A pasted bridge endpoint is a realistic input here; take the origin from it
+    // rather than refusing.
+    let trimmed = trimmed
+        .strip_suffix("/api/v1/rmux/bridge")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_owned()
+    } else if let Some(rest) = trimmed.strip_prefix("wss://").or_else(|| trimmed.strip_prefix("ws://")) {
+        // Someone pasting the websocket URL means the right host; https is the
+        // only sane reading of `wss`.
+        format!("https://{rest}")
+    } else {
+        // Default to https rather than http. A plain hostname over http would
+        // send a session cookie in the clear.
+        format!("https://{trimmed}")
+    };
+    Ok(with_scheme.trim_end_matches('/').to_owned())
+}
+
+/// Where the bridge lives on a deployment, when Redstone did not say.
+///
+/// Only used as a fallback: `POST /rmux/hosts` returns an explicit `endpoint`,
+/// and that always wins — a deployment may terminate websockets elsewhere.
+fn default_endpoint(base: &str) -> String {
+    format!("{}/api/v1/rmux/bridge", base.replacen("http", "ws", 1).trim_end_matches('/'))
 }
 
 /// Begin signing in.
@@ -740,6 +909,63 @@ mod tests {
         // `install`. A second call site means the paths have diverged.
         let calls = code.matches("write_enrolment_script(&home)").count();
         assert_eq!(calls, 1, "the enrolment write is duplicated across paths");
+    }
+
+    #[test]
+    fn an_address_is_taken_the_way_a_person_types_it() {
+        // The field asks for an address, so `redstone.example` is the *likely*
+        // input. Refusing it for want of a scheme would be a validation error on
+        // the most ordinary thing anyone can enter.
+        assert_eq!(normalise_base("redstone.example").unwrap(), "https://redstone.example");
+        assert_eq!(normalise_base("  redstone.example/  ").unwrap(), "https://redstone.example");
+        assert_eq!(
+            normalise_base("https://redstone.example").unwrap(),
+            "https://redstone.example"
+        );
+    }
+
+    #[test]
+    fn a_pasted_bridge_url_is_reduced_to_its_origin() {
+        // Realistic: the operator has the wss endpoint on their clipboard from
+        // the previous flow and pastes it into the address field. Taking the
+        // origin beats refusing it — and `wss` can only sensibly mean `https`,
+        // never `http`, or the session cookie would travel in the clear.
+        for input in [
+            "wss://redstone.example/api/v1/rmux/bridge",
+            "ws://redstone.example/api/v1/rmux/bridge",
+            "https://redstone.example/api/v1/rmux/bridge",
+        ] {
+            assert_eq!(normalise_base(input).unwrap(), "https://redstone.example", "{input}");
+        }
+    }
+
+    #[test]
+    fn a_bare_host_never_defaults_to_plaintext() {
+        // A session cookie over http is a session cookie on the wire.
+        assert!(normalise_base("redstone.example").unwrap().starts_with("https://"));
+        assert!(normalise_base("10.0.0.5:8080").unwrap().starts_with("https://"));
+        // …but an explicit http:// is honoured, because a local dev deployment
+        // is a real thing and refusing it would be us overruling the operator.
+        assert_eq!(normalise_base("http://localhost:8000").unwrap(), "http://localhost:8000");
+    }
+
+    #[test]
+    fn an_empty_address_says_what_to_do() {
+        assert!(normalise_base("   ").unwrap_err().contains("Redstone address"));
+    }
+
+    #[test]
+    fn the_bridge_endpoint_is_only_derived_as_a_fallback() {
+        // Redstone's own `endpoint` always wins — a deployment may terminate
+        // websockets elsewhere. This is what an older one that omits it gets.
+        assert_eq!(
+            default_endpoint("https://redstone.example"),
+            "wss://redstone.example/api/v1/rmux/bridge",
+        );
+        assert_eq!(
+            default_endpoint("http://localhost:8000"),
+            "ws://localhost:8000/api/v1/rmux/bridge",
+        );
     }
 
     #[test]

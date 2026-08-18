@@ -23,6 +23,9 @@ export type RedstoneCapabilities = {
  * `enrolled` and `running` are deliberately separate: the token being on the
  * box says nothing about whether the bridge process survived.
  */
+/** Who rmux is signed in to Redstone as. The token never crosses this line. */
+export type SessionView = { baseUrl: string; user?: string };
+
 export type RedstoneHost = {
   enrolled: boolean;
   running: boolean;
@@ -782,6 +785,22 @@ export const api = {
   // host is enrolled and whether its bridge is actually running — two separate
   // facts, because a host whose file is present but whose bridge died is the
   // failure that otherwise looks like success.
+
+  /**
+   * Sign in by opening Redstone's own login page in a window.
+   *
+   * Resolves when the operator has signed in and the session has been proved
+   * against the server; rejects on cancel or timeout. No password is ever typed
+   * into rmux, and the login window is a remote origin with no IPC access.
+   */
+  redstoneSignIn: (baseUrl: string) => call<SessionView>("redstone_sign_in", { baseUrl }),
+
+  redstoneSession: () => call<SessionView | null>("redstone_session"),
+
+  redstoneSignOut: () => call<void>("redstone_sign_out"),
+
+  /** Mint a token for this host and enrol it. Needs a signed-in session. */
+  redstoneEnrol: (target: TargetRef) => call<RedstoneHost>("redstone_enrol", { target }),
 
   /** What a deployment supports. Asked before any Redstone control is shown. */
   redstoneCapabilities: (baseUrl: string) =>
