@@ -36,11 +36,11 @@ use std::collections::HashMap;
 use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use rmux_bridge::protocol::{
-    Conversation, ErrorCode, Event, Frame, Hello, HostInfo, Kind, Message, Request, Response,
-    Role, Session, Status, VERSION,
+    Agent, Conversation, ErrorCode, Event, Frame, Hello, HostInfo, Kind, Message, Request,
+    Response, Role, Session, Status, VERSION,
 };
 use rmux_bridge::Enrolment;
-use rmux_claude_core::{keys, launch, sessions as claude_sessions, transcript};
+use rmux_claude_core::{keys, launch, pi, sessions as claude_sessions, transcript};
 use tokio_tungstenite::tungstenite;
 
 use crate::attach::StreamEvent;
@@ -440,17 +440,27 @@ async fn dispatch(request: Request) -> Response {
             Err(e) => failed(e),
         },
 
-        Request::ListConversations { limit, folder } => {
-            match conversations(limit, folder.as_deref()).await {
+        Request::ListConversations { limit, folder, agent } => {
+            let result = match agent {
+                Agent::Claude => conversations(limit, folder.as_deref()).await,
+                Agent::Pi => pi_conversations(limit, folder.as_deref()),
+            };
+            match result {
                 Ok(conversations) => Response::Conversations { conversations },
                 Err(e) => failed(e),
             }
         }
 
-        Request::ReadConversation { conversation, max_bytes } => match read_conversation(&conversation, max_bytes) {
-            Ok((messages, truncated)) => Response::Conversation { messages, truncated },
-            Err(e) => failed(e),
-        },
+        Request::ReadConversation { conversation, max_bytes, agent } => {
+            let result = match agent {
+                Agent::Claude => read_conversation(&conversation, max_bytes),
+                Agent::Pi => pi_read_conversation(&conversation, max_bytes),
+            };
+            match result {
+                Ok((messages, truncated)) => Response::Conversation { messages, truncated },
+                Err(e) => failed(e),
+            }
+        }
 
         Request::Send { session, message } => {
             if message.trim().is_empty() {
@@ -534,8 +544,8 @@ async fn dispatch(request: Request) -> Response {
             }
         }
 
-        Request::Spawn { folder, prompt, name, model_profile } => {
-            match spawn(&folder, prompt.as_deref(), name.as_deref(), model_profile.as_deref())
+        Request::Spawn { folder, prompt, name, model_profile, agent } => {
+            match spawn(agent, &folder, prompt.as_deref(), name.as_deref(), model_profile.as_deref())
                 .await
             {
                 Ok(session) => Response::Spawned { session },
@@ -674,7 +684,13 @@ async fn live_sessions() -> anyhow::Result<Vec<Session>> {
     Ok(summaries
         .into_iter()
         .map(|s| {
-            let kind = if s.name.starts_with("claude-") { Kind::Claude } else { Kind::Shell };
+            let kind = if s.name.starts_with("claude-") {
+                Kind::Claude
+            } else if s.name.starts_with("pi-") {
+                Kind::Pi
+            } else {
+                Kind::Shell
+            };
 
             // Matched on pid, which is the only field both sides agree on: the
             // daemon knows the shell's pid, and Claude records its own. Matching
@@ -848,8 +864,166 @@ fn find_transcript(id: &str) -> anyhow::Result<std::path::PathBuf> {
     anyhow::bail!("no transcript for conversation {id} on this host")
 }
 
-/// Start a Claude session in `folder`.
+/// Every pi conversation on this host.
+///
+/// Read straight off the local filesystem, not through a shell script: the
+/// bridge runs on the host, so `~/.pi/agent/sessions/*/*.jsonl` is right there.
+/// (The Claude path shells out only because the desktop app reads it over ssh.)
+/// pi's directory encodes the cwd, but the header's own `cwd` is the authority —
+/// the same belt-and-braces the Claude reader uses.
+fn pi_conversations(limit: Option<u32>, folder: Option<&str>) -> anyhow::Result<Vec<Conversation>> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    let root = std::path::PathBuf::from(pi::sessions_root(&home.to_string_lossy()));
+
+    let running = status::snapshot(); // pi has no status file; this stays empty of pi ids
+    let wanted_folder = folder.map(|f| f.trim_end_matches('/').to_owned());
+
+    let mut all: Vec<Conversation> = Vec::new();
+    let Ok(dirs_iter) = std::fs::read_dir(&root) else { return Ok(all) };
+    for dir in dirs_iter.flatten() {
+        let Ok(files) = std::fs::read_dir(dir.path()) else { continue };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(convo) = pi_conversation_at(&path) else { continue };
+
+            if let Some(want) = &wanted_folder {
+                let matches = convo.cwd.as_deref().is_some_and(|f| {
+                    let f = f.trim_end_matches('/');
+                    f == want || f.strip_prefix(want.as_str()).is_some_and(|r| r.starts_with('/'))
+                });
+                if !matches {
+                    continue;
+                }
+            }
+
+            all.push(Conversation {
+                running: running.iter().any(|r| r.session_id == convo.id),
+                id: convo.id,
+                folder: convo.cwd,
+                summary: convo.summary,
+                modified: convo.modified,
+                size: convo.size,
+            });
+        }
+    }
+
+    all.sort_by_key(|c| std::cmp::Reverse(c.modified.unwrap_or(0)));
+    if let Some(limit) = limit {
+        all.truncate(limit as usize);
+    }
+    Ok(all)
+}
+
+/// One pi conversation on disk: id, cwd, summary, mtime, size.
+fn pi_conversation_at(path: &std::path::Path) -> Option<pi::Conversation> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+
+    // The id is the filename stem, confirmed against the header where readable.
+    let stem = path.file_stem().and_then(|s| s.to_str())?.to_owned();
+
+    // Header is the first line; the first human message is the summary. Reading a
+    // bounded prefix keeps a giant transcript from being slurped just to list it.
+    let prefix = read_prefix(path, 64 * 1024).unwrap_or_default();
+    let mut lines = prefix.split(|&b| b == b'\n');
+    let header = lines.next().and_then(pi::parse_header).unwrap_or_default();
+    let summary = pi::parse(&prefix, false)
+        .entries
+        .into_iter()
+        .find(|e| matches!(e.speaker, rmux_claude_core::Speaker::User))
+        .map(|e| e.text.lines().next().unwrap_or("").trim().to_owned())
+        .filter(|s| !s.is_empty());
+
+    Some(pi::Conversation {
+        id: header.id.unwrap_or(stem),
+        cwd: header.cwd,
+        summary,
+        modified,
+        size: Some(meta.len()),
+    })
+}
+
+/// The first `max` bytes of a file, for a cheap header + summary read.
+fn read_prefix(path: &std::path::Path, max: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; max];
+    let n = file.read(&mut buf)?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+/// Read one pi conversation back, tail-bounded.
+fn pi_read_conversation(id: &str, max_bytes: Option<u64>) -> anyhow::Result<(Vec<Message>, bool)> {
+    let tail = max_bytes.unwrap_or(DEFAULT_TAIL_BYTES).clamp(1, MAX_TAIL_BYTES);
+    let path = find_pi_transcript(id)?;
+    let size = std::fs::metadata(&path)?.len();
+    let truncated = size > tail;
+
+    let bytes = if truncated {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(&path)?;
+        file.seek(SeekFrom::Start(size - tail))?;
+        let mut buf = Vec::with_capacity(tail as usize);
+        file.take(tail).read_to_end(&mut buf)?;
+        buf
+    } else {
+        std::fs::read(&path)?
+    };
+
+    let parsed = pi::parse(&bytes, truncated);
+    Ok((
+        parsed
+            .entries
+            .into_iter()
+            .map(|e| Message {
+                role: match e.speaker {
+                    rmux_claude_core::Speaker::User => Role::User,
+                    rmux_claude_core::Speaker::Assistant => Role::Assistant,
+                    rmux_claude_core::Speaker::Tool => Role::Tool,
+                    rmux_claude_core::Speaker::System => Role::System,
+                },
+                text: e.text,
+                at: e.timestamp,
+                tool: e.tool,
+            })
+            .collect(),
+        truncated,
+    ))
+}
+
+/// Where pi keeps the transcript for a conversation id.
+///
+/// Searched by filename across every cwd-encoded directory, because a caller
+/// knows the id, not the folder. Validated first — the id lands in a path.
+fn find_pi_transcript(id: &str) -> anyhow::Result<std::path::PathBuf> {
+    anyhow::ensure!(
+        !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "{id:?} is not a conversation id",
+    );
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    let root = std::path::PathBuf::from(pi::sessions_root(&home.to_string_lossy()));
+    let wanted = format!("{id}.jsonl");
+
+    for dir in std::fs::read_dir(&root)?.flatten() {
+        let candidate = dir.path().join(&wanted);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!("no pi transcript for conversation {id} on this host")
+}
+
+/// Start a coding-agent session in `folder`.
 async fn spawn(
+    agent: Agent,
     folder: &str,
     prompt: Option<&str>,
     name: Option<&str>,
@@ -879,19 +1053,28 @@ async fn spawn(
     // `launch_line` shell-quotes it, which is the injection boundary that matters
     // most in this whole feature — it is free text from a remote caller landing
     // in a login shell.
-    let args: Vec<String> = prompt
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|p| vec![p.to_owned()])
-        .unwrap_or_default();
-    let line = launch::launch_line(None, &args, launch::Rendering::default());
+    // The prompt is a launch argument for both agents — Claude quotes it after
+    // `claude`, pi as a `--` positional — because typing it in afterwards means
+    // guessing when the TUI is ready and losing it into a composer not yet drawn.
+    let (line, prefix) = match agent {
+        Agent::Claude => {
+            let args: Vec<String> = prompt
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| vec![p.to_owned()])
+                .unwrap_or_default();
+            (launch::launch_line(None, &args, launch::Rendering::default()), "claude")
+        }
+        // pi runs inline (`--tui-mode regular`) for the same reasons Claude opts
+        // out of the alternate screen — see `pi::launch_line`.
+        Agent::Pi => (pi::launch_line(prompt, name, None), "pi"),
+    };
 
-    // Named like every other Claude session, so rmux's rail adopts it as one
-    // rather than showing a stranger. The suffix is the host's clock rather than
-    // a counter: two spawns in the same second from different callers must not
-    // collide onto one shell.
+    // Named for its agent so rmux's rail adopts it as the right kind rather than
+    // a stranger. The suffix is the host's clock, not a counter: two spawns in
+    // the same second from different callers must not collide onto one shell.
     let session = format!(
-        "claude-{:x}",
+        "{prefix}-{:x}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -925,7 +1108,10 @@ async fn spawn(
         .find(|s| s.name == session)
         .unwrap_or(Session {
             name: session,
-            kind: Kind::Claude,
+            kind: match agent {
+                Agent::Claude => Kind::Claude,
+                Agent::Pi => Kind::Pi,
+            },
             folder: Some(folder),
             title: name.map(str::to_owned),
             ..Default::default()

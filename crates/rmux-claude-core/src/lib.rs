@@ -33,6 +33,7 @@
 
 pub mod keys;
 pub mod launch;
+pub mod pi;
 pub mod sessions;
 pub mod transcript;
 

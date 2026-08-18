@@ -31,8 +31,8 @@
 pub mod protocol;
 
 pub use protocol::{
-    Conversation, ErrorCode, Event, Frame, Hello, HostInfo, Kind, Message, Request, Response,
-    Role, Session, Status, Welcome, VERSION,
+    Agent, Conversation, ErrorCode, Event, Frame, Hello, HostInfo, Kind, Message, Request,
+    Response, Role, Session, Status, Welcome, VERSION,
 };
 
 use std::path::PathBuf;

@@ -179,6 +179,9 @@ pub enum Request {
         /// silent change of provider is the failure worth being loud about.
         #[serde(skip_serializing_if = "Option::is_none")]
         model_profile: Option<String>,
+        /// Which coding agent to start. Defaults to Claude.
+        #[serde(default)]
+        agent: Agent,
     },
 
     /// Type a message into a running Claude and submit it.
@@ -211,6 +214,9 @@ pub enum Request {
         /// Restrict to conversations whose recorded `cwd` is under this folder.
         #[serde(skip_serializing_if = "Option::is_none")]
         folder: Option<String>,
+        /// Whose conversations — Claude's or pi's. Defaults to Claude.
+        #[serde(default)]
+        agent: Agent,
     },
 
     /// Read one conversation back.
@@ -229,6 +235,9 @@ pub enum Request {
         /// answer says whether it truncated.
         #[serde(skip_serializing_if = "Option::is_none")]
         max_bytes: Option<u64>,
+        /// Whose transcript — Claude's or pi's. Defaults to Claude.
+        #[serde(default)]
+        agent: Agent,
     },
 
     // --- terminals -----------------------------------------------------------
@@ -455,13 +464,28 @@ pub struct Session {
     pub attached: bool,
 }
 
-/// Shell or conversation.
+/// Which coding agent a session runs, or a plain shell.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum Kind {
     Claude,
+    /// The pi coding agent (`@earendil-works/pi-coding-agent`).
+    Pi,
     #[default]
     Shell,
+}
+
+/// Which coding agent to start, or read the conversations of.
+///
+/// A request field rather than a separate set of verbs, so `spawn` and the
+/// conversation reads stay one method each. **Defaults to Claude**, so every
+/// request written before pi existed means exactly what it did before.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Agent {
+    #[default]
+    Claude,
+    Pi,
 }
 
 /// One of Claude's conversations on disk, running or not.
@@ -667,12 +691,12 @@ mod tests {
         let requests = [
             Request::ListSessions,
             Request::HostInfo,
-            Request::Spawn { folder: "/tmp".into(), prompt: None, name: None, model_profile: None },
+            Request::Spawn { folder: "/tmp".into(), prompt: None, name: None, model_profile: None, agent: Agent::Pi },
             Request::Send { session: "s".into(), message: "m".into() },
             Request::Interrupt { session: "s".into() },
             Request::Close { session: "s".into() },
-            Request::ListConversations { limit: None, folder: None },
-            Request::ReadConversation { conversation: "c".into(), max_bytes: None },
+            Request::ListConversations { limit: None, folder: None, agent: Agent::Claude },
+            Request::ReadConversation { conversation: "c".into(), max_bytes: None, agent: Agent::Claude },
             Request::ReadTerminal { session: "s".into(), max_bytes: None },
             Request::SendTerminal { session: "s".into(), input: "x".into(), submit: false },
             Request::AttachTerminal { session: "s".into(), cols: 80, rows: 24 },
@@ -724,12 +748,13 @@ mod tests {
                 prompt: Some("go".into()),
                 name: Some("n".into()),
                 model_profile: Some("p".into()),
+                agent: Agent::Claude,
             },
             Request::Send { session: "s".into(), message: "m".into() },
             Request::Interrupt { session: "s".into() },
             Request::Close { session: "s".into() },
-            Request::ListConversations { limit: Some(10), folder: Some("/tmp".into()) },
-            Request::ReadConversation { conversation: "c".into(), max_bytes: Some(1) },
+            Request::ListConversations { limit: Some(10), folder: Some("/tmp".into()), agent: Agent::Pi },
+            Request::ReadConversation { conversation: "c".into(), max_bytes: Some(1), agent: Agent::Claude },
         ];
 
         for request in requests {
@@ -892,6 +917,7 @@ mod tests {
             prompt: Some("fix the failing test".into()),
             name: None,
             model_profile: None,
+            agent: Agent::Claude,
         })
         .unwrap();
 
