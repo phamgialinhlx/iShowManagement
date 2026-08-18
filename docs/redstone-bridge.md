@@ -373,6 +373,45 @@ session may have ended. Say "that conversation has finished", not "failed".
 `user` is **the ceiling on everything this connection can do** — the bridge has no
 privilege beyond that account's. Worth showing in the UI.
 
+### 3.2 Terminals — read, drive, and stream live
+
+**These verbs run commands.** A terminal has no permission prompt, so anything
+sent to one runs at once. Bounded to terminals the operator already opened —
+there is no verb that opens a shell — but this is real command execution; see §4.
+
+Request/response, for running a command and reading the result:
+
+```
+readTerminal  { session, maxBytes? }     -> { output, truncated }   // output cleaned best-effort
+sendTerminal  { session, input, submit } -> ok                      // submit:true appends CR = runs it
+```
+
+Live stream, for showing a terminal in Redstone's UI like a normal terminal:
+
+```
+attachTerminal { session, cols, rows }   -> terminalAttached
+  event terminalOutput { session, data } // base64 RAW bytes, backlog then live — feed to xterm.js, do not strip
+terminalInput  { session, data }         // base64 keystrokes
+resizeTerminal { session, cols, rows }
+detachTerminal { session }               // keeps running; detach is not close
+  event terminalExited { session, code }
+```
+
+All require an existing `session` and never create one; `notFound` if it is gone.
+
+### 3.3 Coding agents: Claude and pi
+
+`spawn`, `listConversations` and `readConversation` take an optional `agent`
+field — `"claude"` (default) or `"pi"`. Omit it and everything means what it did
+before pi existed. `send`, `interrupt` and the terminal verbs need no agent
+field. A running session's `kind` is `"claude"`, `"pi"` or `"shell"`.
+
+pi has no live status file, so a running pi session's `status` is `"unknown"` and
+it is not auto-linked to its transcript by id — but it is fully drivable as a
+terminal and its conversations are fully readable.
+
+Renumbered: Errors is now §3.4, Events §3.5, Compatibility §3.6.
+
 ### 3.2 Errors
 
 ```json
