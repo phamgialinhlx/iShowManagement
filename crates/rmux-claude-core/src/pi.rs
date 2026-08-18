@@ -114,12 +114,23 @@ pub struct Header {
 /// filename for the id.
 pub fn parse_header(line: &[u8]) -> Option<Header> {
     let v: serde_json::Value = serde_json::from_slice(line).ok()?;
-    if v.get("kind").and_then(|k| k.as_str()) != Some("header") {
+    // **Two formats in the wild.** The shipped pi (v0.84.2) writes a *version 3*
+    // header as `{"type":"session",…}`; a newer *version 4* writes
+    // `{"kind":"header",…}`. Reading zero messages from a real transcript is
+    // exactly the "never bind to the schema" failure this whole module warns
+    // about — and it is what a synthetic test written against the source, rather
+    // than a real file, will happily pass.
+    let is_v3 = v.get("type").and_then(|t| t.as_str()) == Some("session");
+    let is_v4 = v.get("kind").and_then(|k| k.as_str()) == Some("header");
+    if !is_v3 && !is_v4 {
         return None;
     }
     Some(Header {
         id: v.get("id").and_then(|s| s.as_str()).map(str::to_owned),
         cwd: v.get("cwd").and_then(|s| s.as_str()).map(str::to_owned),
+        // v4 carries `createdAt` in ms; v3 carries an ISO `timestamp` string,
+        // which is not a u64 and is left as `None` — the listing uses the file's
+        // own mtime for ordering, so this is display sugar, not load-bearing.
         created_at: v.get("createdAt").and_then(serde_json::Value::as_u64),
     })
 }
@@ -148,10 +159,17 @@ pub fn parse(bytes: &[u8], tailed: bool) -> Transcript {
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
 
-        if v.get("kind").and_then(|k| k.as_str()) != Some("entry") {
-            continue;
-        }
-        if v.get("type").and_then(|t| t.as_str()) != Some("message") {
+        // A message record in either format:
+        //   v3: `{"type":"message","message":{…}}`            (shipped pi)
+        //   v4: `{"kind":"entry","type":"message","message":{…}}`
+        // Everything else — session/model_change/thinking_level_change/record —
+        // is bookkeeping and skipped.
+        let type_field = v.get("type").and_then(|t| t.as_str());
+        let is_v3_message = type_field == Some("message")
+            && v.get("kind").is_none();
+        let is_v4_message = v.get("kind").and_then(|k| k.as_str()) == Some("entry")
+            && type_field == Some("message");
+        if !is_v3_message && !is_v4_message {
             continue;
         }
         let Some(message) = v.get("message") else { continue };
@@ -175,10 +193,12 @@ pub fn parse(bytes: &[u8], tailed: bool) -> Transcript {
             speaker,
             text: body,
             tool,
-            timestamp: v
-                .get("timestamp")
-                .and_then(serde_json::Value::as_u64)
-                .map(|ms| ms.to_string()),
+            // The record's own `timestamp`: an ISO-8601 string in v3, a number
+            // in v4. Kept as text either way — a reader wants a label, and the
+            // ordering comes from the file's mtime.
+            timestamp: v.get("timestamp").and_then(|t| {
+                t.as_str().map(str::to_owned).or_else(|| t.as_u64().map(|n| n.to_string()))
+            }),
         });
     }
 
@@ -262,40 +282,63 @@ mod tests {
     }
 
     #[test]
-    fn the_header_yields_id_and_cwd_or_nothing() {
-        let h = parse_header(br#"{"kind":"header","version":4,"id":"s1","createdAt":1730000000000,"cwd":"/srv/api"}"#).unwrap();
-        assert_eq!(h.id.as_deref(), Some("s1"));
-        assert_eq!(h.cwd.as_deref(), Some("/srv/api"));
-        assert_eq!(h.created_at, Some(1_730_000_000_000));
-        // A non-header first line (a tail that began mid-file) is not a header.
-        assert!(parse_header(br#"{"kind":"entry","type":"message"}"#).is_none());
+    fn the_header_is_read_in_both_real_and_future_formats() {
+        // v3 — the *real* shipped format, captured verbatim from pi v0.84.2.
+        let v3 = parse_header(br#"{"type":"session","version":3,"id":"rmuxlive01","timestamp":"2026-08-18T09:59:47.711Z","cwd":"/root/pi-live"}"#).unwrap();
+        assert_eq!(v3.id.as_deref(), Some("rmuxlive01"));
+        assert_eq!(v3.cwd.as_deref(), Some("/root/pi-live"));
+
+        // v4 — the newer format from the source, for when pi ships it.
+        let v4 = parse_header(br#"{"kind":"header","version":4,"id":"s1","createdAt":1730000000000,"cwd":"/srv/api"}"#).unwrap();
+        assert_eq!(v4.id.as_deref(), Some("s1"));
+        assert_eq!(v4.created_at, Some(1_730_000_000_000));
+
+        // A message line (a tail that began mid-file) is not a header.
+        assert!(parse_header(br#"{"type":"message","message":{"role":"user"}}"#).is_none());
     }
 
     #[test]
-    fn a_conversation_reads_back_in_order_and_skips_bookkeeping() {
+    fn a_real_v3_conversation_reads_back_and_skips_bookkeeping() {
+        // **Captured verbatim from pi v0.84.2 on a real host.** The message
+        // records are top-level `type:"message"` with no `kind` wrapper, and the
+        // model/thinking-level records are the bookkeeping this must skip. This
+        // is the format a synthetic test written against the source got wrong.
+        let jsonl = concat!(
+            r#"{"type":"session","version":3,"id":"rmuxlive01","timestamp":"2026-08-18T09:59:47.711Z","cwd":"/root/pi-live"}"#, "\n",
+            r#"{"type":"model_change","id":"59b7","parentId":null,"timestamp":"2026-08-18T09:59:47.758Z","provider":"openai-codex","modelId":"gpt-5.6-terra"}"#, "\n",
+            r#"{"type":"thinking_level_change","id":"8ccb","parentId":"59b7","timestamp":"2026-08-18T09:59:47.759Z","thinkingLevel":"medium"}"#, "\n",
+            r#"{"type":"message","id":"d593","parentId":"8ccb","timestamp":"2026-08-18T09:59:47.768Z","message":{"role":"user","content":[{"type":"text","text":"In one short sentence, what is 17 times 23?"}],"timestamp":1787047187767}}"#, "\n",
+            r#"{"type":"message","id":"3bc3","parentId":"d593","timestamp":"2026-08-18T09:59:53.689Z","message":{"role":"assistant","content":[{"type":"text","text":"17 times 23 is 391."}]},"usage":{"totalTokens":1068}}"#, "\n",
+        );
+        let t = parse(jsonl.as_bytes(), false);
+        assert_eq!(t.entries.len(), 2, "model_change/thinking_level_change must be skipped");
+        assert_eq!(t.entries[0].speaker, Speaker::User);
+        assert_eq!(t.entries[0].text, "In one short sentence, what is 17 times 23?");
+        assert_eq!(t.entries[0].timestamp.as_deref(), Some("2026-08-18T09:59:47.768Z"));
+        assert_eq!(t.entries[1].speaker, Speaker::Assistant);
+        assert_eq!(t.entries[1].text, "17 times 23 is 391.");
+    }
+
+    #[test]
+    fn a_v4_conversation_also_reads_when_pi_ships_it() {
+        // The newer wrapped format, so the parser is ready for it.
         let jsonl = concat!(
             r#"{"kind":"header","version":4,"id":"s1","createdAt":1,"cwd":"/srv/api"}"#, "\n",
             r#"{"kind":"entry","type":"message","id":"e1","timestamp":10,"message":{"role":"user","content":"run the tests"}}"#, "\n",
             r#"{"kind":"record","type":"operation_started","id":"r1"}"#, "\n",
-            r#"{"kind":"entry","type":"model_change","id":"e2","message":{"role":"assistant"}}"#, "\n",
-            r#"{"kind":"entry","type":"message","id":"e3","timestamp":20,"message":{"role":"assistant","content":[{"type":"text","text":"Three failures."},{"type":"image","data":"…"}]}}"#, "\n",
-            r#"{"kind":"entry","type":"message","id":"e4","timestamp":30,"message":{"role":"bashExecution","content":"npm test"}}"#, "\n",
+            r#"{"kind":"entry","type":"message","id":"e2","timestamp":20,"message":{"role":"bashExecution","content":"npm test"}}"#, "\n",
         );
         let t = parse(jsonl.as_bytes(), false);
-        assert_eq!(t.entries.len(), 3, "bookkeeping and non-message entries must be skipped");
-        assert_eq!(t.entries[0].speaker, Speaker::User);
+        assert_eq!(t.entries.len(), 2);
         assert_eq!(t.entries[0].text, "run the tests");
-        assert_eq!(t.entries[1].speaker, Speaker::Assistant);
-        assert_eq!(t.entries[1].text, "Three failures.", "image parts carry no text");
-        assert_eq!(t.entries[2].speaker, Speaker::Tool);
-        assert_eq!(t.entries[2].tool.as_deref(), Some("bash"));
+        assert_eq!(t.entries[1].speaker, Speaker::Tool);
     }
 
     #[test]
     fn a_tailed_read_drops_the_leading_partial_line() {
         let jsonl = concat!(
-            r#"pe":"message","message":{"role":"assistant","content":"cut off"}}"#, "\n",
-            r#"{"kind":"entry","type":"message","id":"e","timestamp":1,"message":{"role":"user","content":"kept"}}"#, "\n",
+            r#"ssage","message":{"role":"assistant","content":"cut off"}}"#, "\n",
+            r#"{"type":"message","id":"e","timestamp":1,"message":{"role":"user","content":"kept"}}"#, "\n",
         );
         let t = parse(jsonl.as_bytes(), true);
         assert_eq!(t.entries.len(), 1);
@@ -305,10 +348,10 @@ mod tests {
     #[test]
     fn an_unknown_message_shape_does_not_panic_or_poison_the_rest() {
         let jsonl = concat!(
-            r#"{"kind":"entry","type":"message","message":{"role":"user"}}"#, "\n",           // no content
-            r#"{"kind":"entry","type":"message","message":{"content":"orphan"}}"#, "\n",       // no role → System
+            r#"{"type":"message","message":{"role":"user"}}"#, "\n",           // no content
+            r#"{"type":"message","message":{"content":"orphan"}}"#, "\n",       // no role → System
             r#"garbage not json"#, "\n",
-            r#"{"kind":"entry","type":"message","id":"e","timestamp":1,"message":{"role":"assistant","content":"survived"}}"#, "\n",
+            r#"{"type":"message","id":"e","timestamp":1,"message":{"role":"assistant","content":"survived"}}"#, "\n",
         );
         let t = parse(jsonl.as_bytes(), false);
         assert!(t.entries.iter().any(|e| e.text == "survived"));

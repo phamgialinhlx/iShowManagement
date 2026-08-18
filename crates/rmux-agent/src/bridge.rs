@@ -1010,12 +1010,28 @@ fn find_pi_transcript(id: &str) -> anyhow::Result<std::path::PathBuf> {
     );
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
     let root = std::path::PathBuf::from(pi::sessions_root(&home.to_string_lossy()));
-    let wanted = format!("{id}.jsonl");
 
+    // **pi names files `<ISO-timestamp>_<id>.jsonl`, not `<id>.jsonl`.** Measured
+    // on a real host: `2026-08-18T09-59-47-711Z_rmuxlive01.jsonl` for id
+    // `rmuxlive01`. So the id is matched against the header's own `id` (the
+    // authority), with a filename-suffix fallback for a truncated/odd header.
     for dir in std::fs::read_dir(&root)?.flatten() {
-        let candidate = dir.path().join(&wanted);
-        if candidate.is_file() {
-            return Ok(candidate);
+        let Ok(files) = std::fs::read_dir(dir.path()) else { continue };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let header_id = read_prefix(&path, 8 * 1024)
+                .ok()
+                .and_then(|b| b.split(|&c| c == b'\n').next().and_then(pi::parse_header).and_then(|h| h.id));
+            if header_id.as_deref() == Some(id)
+                || name == format!("{id}.jsonl")
+                || name.ends_with(&format!("_{id}.jsonl"))
+            {
+                return Ok(path);
+            }
         }
     }
     anyhow::bail!("no pi transcript for conversation {id} on this host")
