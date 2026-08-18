@@ -12,12 +12,15 @@
 //! on hotel wifi and a VPC with no ingress at all are all reachable this way,
 //! and none of them needs a firewall change, a public address or a certificate.
 //!
-//! ## Everything it can do, the operator could have done from rmux
+//! ## Everything it can do drives a session the operator opened
 //!
-//! The dispatch table below is the entire capability of a stolen token, and it is
-//! deliberately narrow: list what is running, start a Claude in a folder that
-//! already exists, type into one, read a transcript. **There is no `exec`**, and
-//! `rmux_bridge::protocol` carries a test that fails if anyone adds one.
+//! The verbs are a closed set: list what is running, drive a Claude conversation,
+//! read a transcript, and — against a terminal the operator already opened —
+//! read its output, type into it, and stream it live. **No verb creates a shell
+//! from nothing**: the only session a remote caller can start is a Claude one,
+//! which runs under its permission prompts. Terminal access is real command
+//! execution and is deliberately bounded to existing sessions; the full
+//! reasoning, and the line that must not move, is in `rmux_bridge::protocol`.
 //!
 //! ## Reconnection is expected, not exceptional
 //!
@@ -28,15 +31,19 @@
 
 use std::time::Duration;
 
+use std::collections::HashMap;
+
+use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use rmux_bridge::protocol::{
-    Conversation, ErrorCode, Frame, Hello, HostInfo, Kind, Message, Request, Response,
+    Conversation, ErrorCode, Event, Frame, Hello, HostInfo, Kind, Message, Request, Response,
     Role, Session, Status, VERSION,
 };
 use rmux_bridge::Enrolment;
 use rmux_claude_core::{keys, launch, sessions as claude_sessions, transcript};
 use tokio_tungstenite::tungstenite;
 
+use crate::attach::StreamEvent;
 use crate::{alias, attach, status};
 
 /// How long to wait before redialling, and the ceiling on that wait.
@@ -169,12 +176,29 @@ async fn serve(enrolment: &Enrolment) -> anyhow::Result<Option<u16>> {
         request
     })?;
 
-    let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
+    let (socket, _) = tokio_tungstenite::connect_async(request).await?;
     tracing::info!(endpoint = %enrolment.endpoint, "bridge connected");
+
+    // **The sink is behind a single writer task.** Terminal streams push output
+    // from their own tasks, so more than one place needs to write to the socket
+    // — and a `SplitSink` is not `Sync` to share. Everything that goes out is a
+    // `Message` on this channel; the writer drains it. This is also what makes
+    // the keepalive correct: a queued pong that never flushes dies at the load
+    // balancer's idle timeout, so pings are answered by pushing a pong *here*,
+    // where the writer flushes it, rather than trusting the library to.
+    let (mut sink, mut stream) = socket.split();
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<tungstenite::Message>(256);
+    let writer = tokio::spawn(async move {
+        while let Some(message) = out_rx.recv().await {
+            if sink.send(message).await.is_err() {
+                break;
+            }
+        }
+    });
 
     // Greet first, unprompted. Redstone needs the agent's version to explain a
     // missing method by naming the release that has it.
-    socket
+    out_tx
         .send(tungstenite::Message::Text(
             serde_json::to_string(&Hello {
                 protocol: VERSION,
@@ -183,50 +207,55 @@ async fn serve(enrolment: &Enrolment) -> anyhow::Result<Option<u16>> {
             })?
             .into(),
         ))
-        .await?;
+        .await
+        .ok();
 
-    while let Some(message) = socket.next().await {
+    // Live terminal attachments: session name → a control channel to its pump.
+    // Only the read loop touches this, so a plain map needs no lock. Dropping the
+    // sender detaches the terminal (the pump's `recv` returns `None`).
+    let mut terminals: HashMap<String, tokio::sync::mpsc::Sender<TerminalCtrl>> = HashMap::new();
+
+    let close_code = loop {
+        let Some(message) = stream.next().await else { break None };
         match message? {
             tungstenite::Message::Text(text) => {
-                // A frame this build cannot parse is answered, not fatal. A newer
-                // Redstone talking to an older agent is the ordinary case — a
-                // host may be running a daemon from weeks ago — and dropping the
-                // connection over it would turn a missing feature into a machine
-                // that appears offline.
-                let response = match serde_json::from_str::<Frame>(&text) {
-                    Ok(Frame::Request { id, request }) => (id, dispatch(request).await),
-
+                let parsed = serde_json::from_str::<Frame>(&text);
+                match parsed {
+                    // A control verb for a live terminal is handled here rather
+                    // than in `dispatch`, because it needs the attachment map and
+                    // the outbound channel that streaming owns.
+                    Ok(Frame::Request { id, request })
+                        if is_terminal_stream_verb(&request) =>
+                    {
+                        let response =
+                            handle_terminal_stream(request, &mut terminals, &out_tx).await;
+                        send_response(&out_tx, id, response).await;
+                    }
+                    Ok(Frame::Request { id, request }) => {
+                        let response = dispatch(request).await;
+                        send_response(&out_tx, id, response).await;
+                    }
                     // Responses and events flow the other way. Redstone sending
                     // one is a bug on its side, not something to act on.
-                    Ok(_) => continue,
-
-                    // **Answered, not dropped.** The first version `continue`d
-                    // here, and a live run against a method this build does not
-                    // know produced no reply at all — the caller simply hung
-                    // until it timed out. A caller cannot tell that apart from a
-                    // dead host, which is precisely the wrong conclusion: a newer
-                    // Redstone against an older agent is the *ordinary* case,
-                    // since a host may run a daemon from weeks ago.
-                    //
-                    // The id is recovered on its own, because the request half is
-                    // what failed to parse. Without an id there is nobody to
-                    // answer, and only then is dropping it right.
+                    Ok(_) => {}
+                    // **Answered, not dropped.** A method this build does not know
+                    // must get an `unsupported` reply, or the caller hangs until
+                    // it times out — indistinguishable from a dead host, and a
+                    // newer Redstone against an older agent is the ordinary case.
                     Err(e) => {
-                        let Some(id) = serde_json::from_str::<serde_json::Value>(&text)
-                            .ok()
-                            .and_then(|v| v.get("id").and_then(serde_json::Value::as_u64))
+                        let value = serde_json::from_str::<serde_json::Value>(&text).ok();
+                        let Some(id) =
+                            value.as_ref().and_then(|v| v.get("id")).and_then(serde_json::Value::as_u64)
                         else {
                             tracing::debug!(%text, "unparseable frame with no id to answer");
                             continue;
                         };
-                        let method = serde_json::from_str::<serde_json::Value>(&text)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("method").and_then(|m| m.as_str()).map(str::to_owned)
-                            })
+                        let method = value
+                            .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_owned))
                             .unwrap_or_else(|| "that request".to_owned());
                         tracing::debug!(%text, error = %e, "unsupported request");
-                        (
+                        send_response(
+                            &out_tx,
                             id,
                             Response::Error {
                                 code: ErrorCode::Unsupported,
@@ -236,25 +265,169 @@ async fn serve(enrolment: &Enrolment) -> anyhow::Result<Option<u16>> {
                                 ),
                             },
                         )
+                        .await;
                     }
-                };
-                let (id, response) = response;
-                socket
-                    .send(tungstenite::Message::Text(
-                        serde_json::to_string(&Frame::Response { id, response })?.into(),
-                    ))
-                    .await?;
+                }
             }
-            // Answered by the library, but matched explicitly so a future
-            // message kind is a compile error rather than a silent drop.
-            tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_) => {}
-            tungstenite::Message::Close(frame) => {
-                return Ok(frame.map(|f| u16::from(f.code)));
+            // Answered here rather than left to the library: with a split sink the
+            // automatic pong is queued but never flushed, and an unflushed pong is
+            // a connection the load balancer drops. Pushing it through the writer
+            // flushes it.
+            tungstenite::Message::Ping(payload) => {
+                out_tx.send(tungstenite::Message::Pong(payload)).await.ok();
             }
+            tungstenite::Message::Pong(_) => {}
+            tungstenite::Message::Close(frame) => break frame.map(|f| u16::from(f.code)),
             tungstenite::Message::Binary(_) | tungstenite::Message::Frame(_) => {}
         }
+    };
+
+    // Returning drops `terminals` (detaching every live view) and `out_tx` (which
+    // ends the writer task and closes the sink).
+    drop(terminals);
+    drop(out_tx);
+    let _ = writer.await;
+    Ok(close_code)
+}
+
+/// Control messages for a live terminal's pump task.
+enum TerminalCtrl {
+    Input(Vec<u8>),
+    Resize(u16, u16),
+}
+
+fn is_terminal_stream_verb(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::AttachTerminal { .. }
+            | Request::TerminalInput { .. }
+            | Request::ResizeTerminal { .. }
+            | Request::DetachTerminal { .. }
+    )
+}
+
+async fn send_response(
+    out_tx: &tokio::sync::mpsc::Sender<tungstenite::Message>,
+    id: u64,
+    response: Response,
+) {
+    if let Ok(text) = serde_json::to_string(&Frame::Response { id, response }) {
+        out_tx.send(tungstenite::Message::Text(text.into())).await.ok();
     }
-    Ok(None)
+}
+
+/// The four live-terminal verbs, which need the attachment map streaming owns.
+async fn handle_terminal_stream(
+    request: Request,
+    terminals: &mut HashMap<String, tokio::sync::mpsc::Sender<TerminalCtrl>>,
+    out_tx: &tokio::sync::mpsc::Sender<tungstenite::Message>,
+) -> Response {
+    match request {
+        Request::AttachTerminal { session, cols, rows } => {
+            // Re-attaching over an existing attachment replaces it, so the old
+            // pump is dropped and its terminal detached first.
+            terminals.remove(&session);
+
+            match attach::open_terminal_stream(&session, cols, rows).await {
+                Ok(Some(mut term)) => {
+                    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel::<TerminalCtrl>(64);
+                    terminals.insert(session.clone(), ctrl_tx);
+
+                    let out = out_tx.clone();
+                    let sess = session.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                event = term.next() => match event {
+                                    Some(StreamEvent::Output(bytes)) => {
+                                        let data =
+                                            base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                        let frame = Frame::Event(Event::TerminalOutput {
+                                            session: sess.clone(),
+                                            data,
+                                        });
+                                        match serde_json::to_string(&frame) {
+                                            Ok(text) => {
+                                                if out
+                                                    .send(tungstenite::Message::Text(text.into()))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    break;
+                                                }
+                                            }
+                                            Err(_) => break,
+                                        }
+                                    }
+                                    Some(StreamEvent::Exited(code)) => {
+                                        let frame = Frame::Event(Event::TerminalExited {
+                                            session: sess.clone(),
+                                            code,
+                                        });
+                                        if let Ok(text) = serde_json::to_string(&frame) {
+                                            out.send(tungstenite::Message::Text(text.into()))
+                                                .await
+                                                .ok();
+                                        }
+                                        break;
+                                    }
+                                    None => break,
+                                },
+                                ctrl = ctrl_rx.recv() => match ctrl {
+                                    Some(TerminalCtrl::Input(data)) => { term.input(data).await; }
+                                    Some(TerminalCtrl::Resize(c, r)) => { term.resize(c, r).await; }
+                                    // The map entry was dropped — detach.
+                                    None => break,
+                                },
+                            }
+                        }
+                        // `term` drops here, which detaches from the daemon.
+                    });
+
+                    Response::TerminalAttached { session }
+                }
+                Ok(None) => not_found(&session),
+                Err(e) => failed(e),
+            }
+        }
+
+        Request::TerminalInput { session, data } => {
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data.as_bytes())
+            else {
+                return refused("terminal input must be base64");
+            };
+            match terminals.get(&session) {
+                Some(ctrl) if ctrl.send(TerminalCtrl::Input(bytes)).await.is_ok() => Response::Ok,
+                // No live attachment (or its pump has ended). The caller must
+                // attach before it can type.
+                _ => not_attached(&session),
+            }
+        }
+
+        Request::ResizeTerminal { session, cols, rows } => match terminals.get(&session) {
+            Some(ctrl) if ctrl.send(TerminalCtrl::Resize(cols, rows)).await.is_ok() => Response::Ok,
+            _ => not_attached(&session),
+        },
+
+        Request::DetachTerminal { session } => {
+            // Dropping the control sender ends the pump, which drops the stream
+            // and detaches. The session keeps running — detach is not close.
+            match terminals.remove(&session) {
+                Some(_) => Response::Ok,
+                None => not_attached(&session),
+            }
+        }
+
+        // `is_terminal_stream_verb` gates this function, so nothing else arrives.
+        other => failed(format!("not a terminal-stream verb: {other:?}")),
+    }
+}
+
+fn not_attached(session: &str) -> Response {
+    Response::Error {
+        code: ErrorCode::NotFound,
+        message: format!("no live terminal attachment for {session}; attach first"),
+    }
 }
 
 /// Answer one request.
@@ -308,6 +481,16 @@ async fn dispatch(request: Request) -> Response {
             Err(e) => failed(e),
         },
 
+        // Handled in `serve` before `dispatch` is reached — see
+        // `is_terminal_stream_verb`. Listed so the match stays exhaustive and a
+        // new verb is a compile error rather than a silent drop.
+        Request::AttachTerminal { .. }
+        | Request::TerminalInput { .. }
+        | Request::ResizeTerminal { .. }
+        | Request::DetachTerminal { .. } => {
+            failed("terminal-stream verb reached dispatch")
+        }
+
         Request::Close { session } => {
             // Looked up first so a name nobody holds is `notFound` rather than a
             // cheerful `ok`. `kill` is deliberately idempotent and silent, which
@@ -318,6 +501,36 @@ async fn dispatch(request: Request) -> Response {
                     Ok(()) => Response::Ok,
                     Err(e) => failed(e),
                 },
+            }
+        }
+
+        Request::ReadTerminal { session, max_bytes } => {
+            match attach::read(&session).await {
+                Ok(Some(bytes)) => {
+                    let tail = max_bytes.unwrap_or(DEFAULT_TAIL_BYTES).clamp(1, MAX_TAIL_BYTES) as usize;
+                    let truncated = bytes.len() > tail;
+                    let slice = if truncated { &bytes[bytes.len() - tail..] } else { &bytes[..] };
+                    Response::Terminal { output: readable(slice), truncated }
+                }
+                Ok(None) => not_found(&session),
+                Err(e) => failed(e),
+            }
+        }
+
+        Request::SendTerminal { session, input, submit } => {
+            // A terminal takes raw bytes and a carriage return to run. This is the
+            // verb the module note calls out: it types into a shell the operator
+            // opened, exactly as if they were at the keyboard, and `submit` is
+            // what makes it *run*. Bounded to a session that already exists —
+            // `attach::write` never creates one.
+            let mut bytes = input.into_bytes();
+            if submit {
+                bytes.push(b'\r');
+            }
+            match attach::write(&session, &bytes).await {
+                Ok(true) => Response::Ok,
+                Ok(false) => not_found(&session),
+                Err(e) => failed(e),
             }
         }
 
@@ -338,6 +551,63 @@ fn failed(e: impl std::fmt::Display) -> Response {
 
 fn refused(message: &str) -> Response {
     Response::Error { code: ErrorCode::Refused, message: message.to_owned() }
+}
+
+/// Turn a raw terminal buffer into legible text.
+///
+/// Best-effort, and honest about being so: the daemon stores exactly what the
+/// shell wrote, escape sequences and all, and there is no emulator on this side
+/// to render it (the agent cannot carry `alacritty_terminal`). So this strips the
+/// commonest control sequences — CSI, OSC, and the single-character escapes — so
+/// an agent reading command output gets words rather than `\x1b[0m` noise. It is
+/// not a terminal; anything that needs the real screen attaches and renders the
+/// raw stream instead.
+fn readable(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            // Drop the other C0 control codes except tab and newline, which carry
+            // layout a reader wants.
+            if ch == '\t' || ch == '\n' || !ch.is_control() {
+                out.push(ch);
+            }
+            continue;
+        }
+        match chars.peek() {
+            // CSI: ESC [ ... final byte in 0x40..=0x7e
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: ESC ] ... terminated by BEL or ESC \
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            // Any other escape: drop ESC and the one byte that follows.
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
 }
 
 fn not_found(session: &str) -> Response {

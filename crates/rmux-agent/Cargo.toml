@@ -20,6 +20,7 @@ rmux-claude-core.workspace = true
 rmux-transport.workspace = true
 
 anyhow.workspace = true
+base64.workspace = true
 camino.workspace = true
 dirs.workspace = true
 notify.workspace = true

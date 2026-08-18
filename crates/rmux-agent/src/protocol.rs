@@ -32,6 +32,8 @@ const KIND_LIST: u8 = 6;
 const KIND_SESSIONS: u8 = 7;
 const KIND_WRITE: u8 = 8;
 const KIND_ACK: u8 = 9;
+const KIND_READ: u8 = 10;
+const KIND_SCROLLBACK: u8 = 11;
 
 /// What an attaching client asks for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +133,24 @@ pub enum Frame {
     /// is no such session any more" — and a remote caller working from a list it
     /// fetched a minute ago hits the second case routinely.
     Ack { ok: bool },
+    /// Client → daemon: hand back a session's recent output **without attaching**.
+    ///
+    /// The read half of the same idea as [`Frame::Write`]: Redstone wants to
+    /// show a terminal's history without flipping `attached`, resizing it, or
+    /// joining its live stream. Answered during the handshake for the same
+    /// reason `Write` is — the caller reads one reply and closes.
+    ///
+    /// It is the daemon's scrollback buffer verbatim: raw bytes, escape
+    /// sequences and all. The daemon performs no emulation (that is its founding
+    /// invariant), so it cannot hand back a rendered screen — only what the shell
+    /// actually wrote.
+    Read { session: String },
+    /// Daemon → client: the scrollback, in answer to [`Frame::Read`].
+    ///
+    /// Empty when the session does not exist — told apart from a genuinely empty
+    /// buffer by the [`Frame::Ack`] that is *not* sent, i.e. a caller that needs
+    /// the distinction uses `Write`/`Ack`; a reader just takes what it gets.
+    Scrollback(Vec<u8>),
 }
 
 /// One session, as the daemon sees it.
@@ -211,6 +231,8 @@ impl Frame {
                 (KIND_WRITE, p)
             }
             Frame::Ack { ok } => (KIND_ACK, vec![u8::from(*ok)]),
+            Frame::Read { session } => (KIND_READ, session.as_bytes().to_vec()),
+            Frame::Scrollback(bytes) => (KIND_SCROLLBACK, bytes.clone()),
         };
 
         let mut out = Vec::with_capacity(5 + payload.len());
@@ -280,6 +302,8 @@ impl Frame {
                 anyhow::ensure!(payload.len() == 1, "malformed ack frame");
                 Frame::Ack { ok: payload[0] != 0 }
             }
+            KIND_READ => Frame::Read { session: String::from_utf8(payload.to_vec())? },
+            KIND_SCROLLBACK => Frame::Scrollback(payload.to_vec()),
             other => anyhow::bail!("unknown frame kind {other}"),
         };
 

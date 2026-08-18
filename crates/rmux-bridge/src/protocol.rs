@@ -27,25 +27,37 @@
 //! socket, so a client can be ported between the two by changing the transport
 //! and nothing else.
 //!
-//! ## What this protocol deliberately cannot do
-//!
-//! **There is no `exec`, and there must never be one.** This is the single most
-//! important sentence in the file.
+//! ## The boundary, and where it moved
 //!
 //! The bridge is a credential sitting on a development server, reachable by
-//! whoever holds the token. Its verbs are a closed set — list what is running,
-//! start a Claude in a folder, type into one, read a transcript — and every one
-//! of them is something the operator could have done from rmux's own UI. Add a
-//! method that runs a command and the token stops being "drive my Claude
-//! sessions" and becomes "shell on every machine I have ever ssh'd into", which
-//! is a different security decision that nobody made.
+//! whoever holds the token. What it can do is a **closed set of verbs, every one
+//! of which drives a session the operator already opened** — a Claude
+//! conversation or a terminal. Nothing here reaches a host the operator has not
+//! both enrolled *and* got a live session on.
 //!
-//! The pressure to add one will be real: an agent that can run `ls` is more
-//! capable than an agent that cannot. The answer is that Claude *already runs
-//! commands* — inside a session, under its own permission prompts, with the
-//! operator able to see and interrupt it. Routing shell access through a Claude
-//! session keeps the existing safety machinery in the path. A bare `exec`
-//! removes it.
+//! That boundary was drawn tighter once, and the operator deliberately widened
+//! it. The first version had **no terminal access at all**: the rule was "there
+//! is no `exec`, and there never will be", on the reasoning that a command verb
+//! turns the token from "drive my Claude sessions" into "shell on every machine
+//! I have ever ssh'd into". Terminal I/O to an *existing* session is a smaller
+//! thing than that — it is the operator's own keyboard reaching a shell they
+//! started, on a host they chose, and it cannot reach a host with no session
+//! open — but it is honestly **more** than the Claude path, because a terminal
+//! has no permission prompt. A command sent to a shell runs at once. That is the
+//! trade the operator asked for, with eyes open, and it is written down here so
+//! nobody has to reconstruct it later.
+//!
+//! What has **not** moved, and must not:
+//!
+//! - **No verb creates a shell from nothing.** There is no "open a terminal on
+//!   this host" and no bare `exec`. The only session a remote caller can start
+//!   is a Claude one ([`Request::Spawn`]), which runs with its permission
+//!   prompts on. Every terminal verb carries a `session` that must already
+//!   exist. `protocol.rs` has a test that fails if a verb both executes and
+//!   lacks a session.
+//! - **The blast radius stays "hosts the operator enrolled and has a session
+//!   on."** Widening terminal access to spawn shells would make it "every
+//!   machine", which is the line the whole feature exists behind.
 //!
 //! ## Transcripts, never the screen
 //!
@@ -218,6 +230,63 @@ pub enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         max_bytes: Option<u64>,
     },
+
+    // --- terminals -----------------------------------------------------------
+    //
+    // Every one of these carries a `session` that must already exist. There is
+    // deliberately no verb that opens a terminal — see the module note.
+
+    /// A terminal's recent output, as readable text, **without attaching**.
+    ///
+    /// The request/response shape, for an agent that wants to run a command and
+    /// look at the result rather than hold a live view open. Escape sequences are
+    /// stripped best-effort so the text is legible; the raw stream is available
+    /// through [`Request::AttachTerminal`] for anything that renders a real
+    /// terminal.
+    ReadTerminal {
+        session: String,
+        /// How much of the tail to return. Bounded like a transcript read.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<u64>,
+    },
+
+    /// Type into a terminal and optionally submit it, **without attaching**.
+    ///
+    /// `submit` appends a carriage return, which for a shell means "run it". The
+    /// output does not come back here — read it with [`Request::ReadTerminal`],
+    /// or watch [`Event::TerminalOutput`] on a live attachment. This is the verb
+    /// that most obviously "runs a command", and the module note is where the
+    /// decision to allow it against an existing session is recorded.
+    SendTerminal {
+        session: String,
+        input: String,
+        #[serde(default)]
+        submit: bool,
+    },
+
+    /// Begin streaming a terminal, both ways — the live view.
+    ///
+    /// Redstone gets the scrollback first (as [`Event::TerminalOutput`]), then
+    /// every byte as it arrives, until [`Request::DetachTerminal`] or the shell
+    /// exits. `cols`/`rows` size the terminal for this viewer; last attach wins,
+    /// exactly as a multiplexer does. Answered with [`Response::TerminalAttached`].
+    ///
+    /// It **cannot create** a session: an unknown name is `notFound`, never a new
+    /// shell.
+    AttachTerminal { session: String, cols: u16, rows: u16 },
+
+    /// Keystrokes for a live-attached terminal.
+    ///
+    /// `data` is base64, because it is raw bytes — arrow keys, control codes and
+    /// UTF-8 all travel through here, and base64 is the only encoding that
+    /// survives a JSON string unchanged.
+    TerminalInput { session: String, data: String },
+
+    /// The live viewer's terminal changed size.
+    ResizeTerminal { session: String, cols: u16, rows: u16 },
+
+    /// Stop streaming. The session keeps running — detach is not close.
+    DetachTerminal { session: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +308,15 @@ pub enum Response {
         /// appears to begin mid-sentence.
         truncated: bool,
     },
+    /// Answer to [`Request::ReadTerminal`]: the scrollback as legible text.
+    Terminal {
+        output: String,
+        /// Whether the tail limit cut the front off.
+        truncated: bool,
+    },
+    /// Answer to [`Request::AttachTerminal`]: the stream is now live and the
+    /// scrollback is arriving as [`Event::TerminalOutput`].
+    TerminalAttached { session: String },
     Ok,
     /// Typed, because a client matching on error *text* breaks the first time
     /// anyone rewords a message.
@@ -294,6 +372,16 @@ pub enum Event {
     /// It ended. `name` rather than the whole session: it is gone, and there is
     /// nothing left to describe.
     SessionClosed { session: String },
+    /// Raw bytes from a live-attached terminal — backlog first, then live.
+    ///
+    /// `data` is base64. A viewer feeds it straight into a terminal emulator; the
+    /// escape sequences are the terminal's own and must not be stripped here, or
+    /// the cursor, colours and clears all break.
+    TerminalOutput { session: String, data: String },
+
+    /// A live-attached terminal's shell exited. No more output will come.
+    TerminalExited { session: String, code: i32 },
+
     /// The bridge is stopping. Clients should stand down rather than
     /// reconnect-loop against a host that is deliberately going away.
     GoingAway {
@@ -566,43 +654,54 @@ mod tests {
     }
 
     #[test]
-    fn there_is_no_exec_method() {
-        // The invariant in the module note, pinned. If someone adds a way to run
-        // a command, this fails and they have to come and read why it is here.
+    fn no_verb_creates_a_shell_from_nothing() {
+        // The invariant in the module note, pinned. Terminal I/O is allowed —
+        // against a session that already exists. What is *not* allowed is a verb
+        // that hands a caller execution on a host with no session behind it: a
+        // bare exec/run/shell, or an "open a terminal" that spawns a shell from
+        // nothing. The one session a remote caller may start is a Claude one,
+        // which runs under permission prompts.
         //
-        // Checked against the *serialised* form of every variant rather than a
-        // list of names, so a variant added later is covered without anyone
-        // remembering to extend the test.
+        // Checked against the serialised form of every variant, so a variant
+        // added later is covered without anyone remembering to extend the list.
         let requests = [
             Request::ListSessions,
             Request::HostInfo,
-            Request::Spawn {
-                folder: "/tmp".into(),
-                prompt: None,
-                name: None,
-                model_profile: None,
-            },
+            Request::Spawn { folder: "/tmp".into(), prompt: None, name: None, model_profile: None },
             Request::Send { session: "s".into(), message: "m".into() },
             Request::Interrupt { session: "s".into() },
             Request::Close { session: "s".into() },
             Request::ListConversations { limit: None, folder: None },
             Request::ReadConversation { conversation: "c".into(), max_bytes: None },
+            Request::ReadTerminal { session: "s".into(), max_bytes: None },
+            Request::SendTerminal { session: "s".into(), input: "x".into(), submit: false },
+            Request::AttachTerminal { session: "s".into(), cols: 80, rows: 24 },
+            Request::TerminalInput { session: "s".into(), data: "AA==".into() },
+            Request::ResizeTerminal { session: "s".into(), cols: 80, rows: 24 },
+            Request::DetachTerminal { session: "s".into() },
         ];
 
         for request in &requests {
-            let json = serde_json::to_string(request).unwrap();
-            let method = serde_json::from_str::<serde_json::Value>(&json).unwrap()["method"]
-                .as_str()
-                .unwrap()
-                .to_owned();
+            let value = serde_json::to_value(request).unwrap();
+            let method = value["method"].as_str().unwrap().to_owned();
+
             assert!(
-                !method.contains("exec")
-                    && !method.contains("shell")
-                    && !method.contains("command")
-                    && !method.contains("run"),
-                "a method that runs commands was added: {method}. \
-                 Read the module note before removing this assertion."
+                !method.contains("exec") && !method.contains("run"),
+                "a bare command runner was added: {method}. Read the module note first."
             );
+            assert!(
+                !(method.to_lowercase().contains("terminal")
+                    && (method.contains("spawn")
+                        || method.contains("open")
+                        || method.contains("create"))),
+                "a verb that opens a terminal was added: {method}. That crosses the line."
+            );
+            if method.to_lowercase().contains("terminal") {
+                assert!(
+                    value.get("session").and_then(|v| v.as_str()).is_some(),
+                    "{method} touches a terminal without naming a session"
+                );
+            }
         }
     }
 

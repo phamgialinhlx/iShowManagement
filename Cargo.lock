@@ -3383,6 +3383,7 @@ name = "rmux-agent"
 version = "0.2.20"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "camino",
  "dirs",
  "futures",

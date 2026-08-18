@@ -164,7 +164,9 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
                 | Frame::List
                 | Frame::Sessions(_)
                 | Frame::Write { .. }
-                | Frame::Ack { .. } => {}
+                | Frame::Ack { .. }
+                | Frame::Read { .. }
+                | Frame::Scrollback(_) => {}
             }
         }
     }
@@ -545,6 +547,189 @@ pub async fn spawn_detached(
 /// the build that created it, so after an upgrade the name being written to is
 /// held by a *previous* daemon. Asking only our own would answer `false` for a
 /// session that is plainly running — and the caller would report it gone.
+/// Where a session lives, resolved across every installed build.
+///
+/// A session belongs to the daemon of the build that created it, so after an
+/// upgrade the name a caller wants is held by a *previous* daemon. This is the
+/// resolution `write` and `kill` do inline; the streaming helpers below share it.
+async fn owning_endpoint(session: &str) -> anyhow::Result<ipc::Endpoint> {
+    let endpoint = daemon::endpoint()?;
+    if !sessions_of(&endpoint).await.iter().any(|s| s.name == session)
+        && let Some(binary) = owner_of(session).await
+        && let Some(name) = binary.file_name().and_then(|n| n.to_str())
+        && let Ok(other) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name)
+    {
+        return Ok(other);
+    }
+    Ok(endpoint)
+}
+
+/// A session's recent output, **without attaching to it**.
+///
+/// The read twin of [`write`]. `None` when no daemon on this host holds the
+/// name — the ordinary outcome for a remote caller working from a slightly stale
+/// list, and told apart from an empty-but-live buffer by that fact.
+///
+/// The bytes are the scrollback verbatim: escape sequences and all, exactly as
+/// the shell wrote them. The daemon does not emulate a terminal, so it is
+/// physically unable to hand back a rendered screen — only the raw stream.
+pub async fn read(session: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    // Existence is decided from the union of every daemon, so a session held by
+    // an older build still reads rather than reporting as gone.
+    if !list().await.unwrap_or_default().iter().any(|s| s.name == session) {
+        return Ok(None);
+    }
+    let endpoint = owning_endpoint(session).await?;
+    let Ok(mut stream) = ipc::connect(&endpoint).await else { return Ok(None) };
+
+    stream.write_all(&Frame::Read { session: session.to_owned() }.encode()).await?;
+    stream.flush().await?;
+
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Some((frame, _)) = Frame::decode(&buf)? {
+            return match frame {
+                Frame::Scrollback(bytes) => Ok(Some(bytes)),
+                other => anyhow::bail!("expected scrollback, got {other:?}"),
+            };
+        }
+        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut chunk).await?;
+        // An older daemon that does not know `Read` closes without answering.
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// One thing that happened on a streamed terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    /// Raw bytes the shell produced — backlog first on attach, then live.
+    Output(Vec<u8>),
+    /// The shell exited; no more output will come.
+    Exited(i32),
+}
+
+/// A live attachment to an existing terminal session.
+///
+/// This is the machinery behind "see the terminal in Redstone, like a normal
+/// terminal": it attaches to a session the operator already opened and pumps its
+/// bytes both ways. Dropping it detaches — the session keeps running, because
+/// that is the whole point of the daemon.
+///
+/// It **cannot create a session**: [`open_terminal_stream`] verifies the name
+/// exists first and only then attaches. There is deliberately no path here that
+/// spawns a shell, so a live terminal only ever reaches a host the operator both
+/// enrolled and already has a session on.
+pub struct TerminalStream {
+    to_daemon: tokio::sync::mpsc::Sender<Frame>,
+    output: tokio::sync::mpsc::Receiver<StreamEvent>,
+}
+
+impl TerminalStream {
+    /// Type bytes into the terminal. `false` once the connection has ended.
+    pub async fn input(&self, data: Vec<u8>) -> bool {
+        self.to_daemon.send(Frame::Data(data)).await.is_ok()
+    }
+
+    /// Tell the far side the viewport changed. Last attach wins on size, which is
+    /// what every multiplexer does and what "a normal terminal" expects.
+    pub async fn resize(&self, cols: u16, rows: u16) -> bool {
+        self.to_daemon.send(Frame::Resize { cols, rows }).await.is_ok()
+    }
+
+    /// The next thing the terminal did, or `None` once it is gone.
+    pub async fn next(&mut self) -> Option<StreamEvent> {
+        self.output.recv().await
+    }
+}
+
+/// Attach to an existing terminal and stream it both ways.
+///
+/// `None` when the session does not exist on any daemon — never a new shell.
+pub async fn open_terminal_stream(
+    session: &str,
+    cols: u16,
+    rows: u16,
+) -> anyhow::Result<Option<TerminalStream>> {
+    if !list().await.unwrap_or_default().iter().any(|s| s.name == session) {
+        return Ok(None);
+    }
+    let endpoint = owning_endpoint(session).await?;
+    let Ok(stream) = ipc::connect(&endpoint).await else { return Ok(None) };
+
+    let (mut reader, mut writer) = tokio::io::split(stream);
+
+    // A `Hello` for a name that already exists *reattaches* — see
+    // `daemon::open_or_attach`. Existence was just checked, so this joins the
+    // live session rather than creating one. `program: None` is irrelevant on
+    // the reattach path; it only matters when a session is being created.
+    let hello = Hello {
+        session: session.to_owned(),
+        cwd: None,
+        program: None,
+        args: Vec::new(),
+        login_command: None,
+        env: Default::default(),
+        cols,
+        rows,
+    };
+    writer.write_all(&Frame::Hello(hello).encode()).await?;
+    writer.flush().await?;
+
+    // Bounded, because a remote viewer that stops reading must not let the host's
+    // memory grow without limit — the channel fills, `send` blocks the pump, and
+    // back-pressure reaches the shell exactly as a slow local terminal would.
+    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<StreamEvent>(256);
+    let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<Frame>(64);
+
+    tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            tokio::select! {
+                // Input from the viewer → daemon. `None` means the
+                // `TerminalStream` was dropped, which is our cue to detach.
+                frame = in_rx.recv() => {
+                    let Some(frame) = frame else { break };
+                    if writer.write_all(&frame.encode()).await.is_err() {
+                        break;
+                    }
+                }
+                // Daemon output → viewer.
+                read = reader.read(&mut chunk) => {
+                    let Ok(n) = read else { break };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    while let Ok(Some((frame, used))) = Frame::decode(&buf) {
+                        buf.drain(..used);
+                        match frame {
+                            Frame::Data(bytes) => {
+                                // A closed receiver means the viewer went away;
+                                // stop rather than spin.
+                                if out_tx.send(StreamEvent::Output(bytes)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Frame::Exited { code } => {
+                                let _ = out_tx.send(StreamEvent::Exited(code)).await;
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(Some(TerminalStream { to_daemon: in_tx, output: out_rx }))
+}
+
 pub async fn write(session: &str, data: &[u8]) -> anyhow::Result<bool> {
     let mut endpoint = daemon::endpoint()?;
     let ours = sessions_of(&endpoint).await;

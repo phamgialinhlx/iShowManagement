@@ -193,6 +193,24 @@ where
                     writer.flush().await?;
                     return Ok(());
                 }
+                // The read twin of `Write`, answered here for the same reason:
+                // the caller reads one reply and hangs up, so anything that
+                // attaches first writes a replay into a socket already gone.
+                //
+                // Looks the session up rather than creating — a scrollback read
+                // for a name that has ended is an empty buffer, never a new
+                // shell.
+                Frame::Read { session } => {
+                    let scrollback = sessions
+                        .lock()
+                        .by_name
+                        .get(&session)
+                        .map(|s| s.terminal.replay().to_vec())
+                        .unwrap_or_default();
+                    writer.write_all(&Frame::Scrollback(scrollback).encode()).await?;
+                    writer.flush().await?;
+                    return Ok(());
+                }
                 other => anyhow::bail!("expected Hello, got {other:?}"),
             }
         }
@@ -287,7 +305,10 @@ where
                     // its own session, so honouring a one-shot write here would
                     // be a second way to do the same thing — pointed at a session
                     // that need not be the one this connection holds.
-                    Frame::List | Frame::Write { .. } => {}
+                    Frame::List
+                    | Frame::Write { .. }
+                    | Frame::Read { .. }
+                    | Frame::Scrollback(_) => {}
                 }
             }
 
@@ -598,6 +619,75 @@ mod tests {
             "a one-shot write must never create a session"
         );
         assert_eq!(sessions.lock().by_name.len(), 1, "only the original session should exist");
+    }
+
+    /// A scrollback read hands back what the shell wrote, and creates nothing.
+    ///
+    /// The read twin of the write test. Redstone asks a host for a terminal's
+    /// history; the daemon returns its buffer without attaching, and a name that
+    /// does not exist is an empty answer rather than a fresh shell.
+    #[tokio::test]
+    async fn a_read_returns_the_scrollback_and_creates_nothing() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        let size = TermSize { cols: 80, rows: 24 };
+
+        // `echo` writes a known line and exits; its output lands in scrollback.
+        let hello = Hello {
+            session: "live".into(),
+            cwd: None,
+            program: Some("sh".into()),
+            args: vec!["-c".into(), "echo READBACK_MARKER".into()],
+            login_command: None,
+            env: Default::default(),
+            cols: 80,
+            rows: 24,
+        };
+        let (terminal, _) = open_or_attach(&sessions, &hello, size).unwrap();
+
+        // Let the child produce its line.
+        for _ in 0..50 {
+            if String::from_utf8_lossy(&terminal.replay()).contains("READBACK_MARKER") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        async fn read_once(sessions: &Arc<Mutex<Sessions>>, session: &str) -> Vec<u8> {
+            let (client, server) = tokio::io::duplex(1 << 20);
+            let (mut client_read, mut client_write) = tokio::io::split(client);
+            client_write
+                .write_all(&Frame::Read { session: session.into() }.encode())
+                .await
+                .unwrap();
+
+            handle(server, Arc::clone(sessions)).await.unwrap();
+
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                if let Some((Frame::Scrollback(bytes), _)) = Frame::decode(&buf).unwrap() {
+                    return bytes;
+                }
+                let n = client_read.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "daemon closed without answering the read");
+                buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+
+        let scrollback = read_once(&sessions, "live").await;
+        assert!(
+            String::from_utf8_lossy(&scrollback).contains("READBACK_MARKER"),
+            "scrollback did not contain the shell's output: {:?}",
+            String::from_utf8_lossy(&scrollback),
+        );
+
+        // A name nobody holds is an empty buffer, and it must not create.
+        let ghost = read_once(&sessions, "ghost").await;
+        assert!(ghost.is_empty(), "a read invented output for a missing session");
+        assert!(
+            !sessions.lock().by_name.contains_key("ghost"),
+            "a read created a session"
+        );
     }
 
     /// Age ordering, and the exclusion of the dead.
