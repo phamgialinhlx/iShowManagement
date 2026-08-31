@@ -13,7 +13,7 @@ import { attachClipboard } from "../lib/terminal-clipboard";
 import { gpuRendering, terminalTheme } from "../lib/terminal-theme";
 import { FOCUS_EVENT } from "../lib/shortcuts";
 import { readMonoStack } from "../lib/fonts";
-import { scaledFontSize } from "../lib/terminal-font";
+import { scaledFontSize, remeasureOnFontLoad } from "../lib/terminal-font";
 
 /** The size at 100%. Scaled by TEXT SIZE through xterm's own option. */
 const TERM_FONT_BASE = 13;
@@ -128,6 +128,12 @@ export function TerminalView({
     const fit = new FitAddon();
     xterm.loadAddon(fit);
     xterm.open(host);
+
+    // Re-measure once the mono font loads — see `remeasureOnFontLoad`. The cell
+    // grid is measured at construction, and during `font-display: block` that is
+    // the fallback's metrics, so glyphs overlap their cells until the real face
+    // is measured.
+    remeasureOnFontLoad(xterm, fit, readMonoStack, () => !disposed);
 
     // The WebGL renderer is what makes a fast remote session feel local. It is
     // not available everywhere, so failure falls back rather than blanking.

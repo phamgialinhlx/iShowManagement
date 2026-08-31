@@ -62,6 +62,13 @@ const BACKSTOP_UNWATCHED: Duration = Duration::from_secs(2);
 struct Update {
     /// Claude's own conversation id — the exact key the client maps to a session.
     session_id: String,
+    /// Which agent this status describes — `claude` for the native session files,
+    /// or whatever a `~/.rmux/status` writer stamped (`pi`, `codex`, …). Absent on
+    /// the Claude stream so an older client that ignores the field sees no change;
+    /// present for every agent-agnostic file, which is the whole point of the
+    /// second source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,6 +88,10 @@ struct Update {
 struct Known {
     session_id: String,
     status: String,
+    /// Carried so the closing `gone` line can still name the agent whose session
+    /// ended — the file is already gone by then, so there is nothing left to read
+    /// it from.
+    agent: Option<String>,
 }
 
 /// The fields we read out of one session file.
@@ -90,6 +101,10 @@ struct Parsed {
     cwd: Option<String>,
     pid: Option<u32>,
     updated_at: Option<u64>,
+    /// `Some` only for the agent-agnostic `~/.rmux/status` files, which name the
+    /// agent that wrote them. The Claude native files are always Claude, so this
+    /// is left `None` there and filled in by the snapshot.
+    agent: Option<String>,
 }
 
 /// Read `statusUpdatedAt` (or a legacy `updatedAt`), tolerating both a JSON number
@@ -112,7 +127,153 @@ fn parse_file(path: &Path) -> Option<Parsed> {
     let cwd = v.get("cwd").and_then(|s| s.as_str()).map(str::to_owned);
     let pid = v.get("pid").and_then(serde_json::Value::as_u64).map(|p| p as u32);
     let updated_at = read_updated_at(&v);
-    Some(Parsed { session_id, status, cwd, pid, updated_at })
+    Some(Parsed { session_id, status, cwd, pid, updated_at, agent: None })
+}
+
+/// `~/.rmux/status` — the agent-agnostic status directory.
+///
+/// Claude writes an authoritative `~/.claude/sessions/<pid>.json`, and nothing
+/// else does. Every other coding agent rmux runs — pi today, Codex tomorrow —
+/// has no such file, so the rail and the bridge reported them as `Unknown`
+/// forever, which is the one thing the rail exists not to do. This directory is
+/// where a per-agent hook (pi's `session_start`/`agent_settled` extension, a
+/// Codex `Stop` hook) drops the same fact Claude publishes for itself, written
+/// through one Rust definition — [`write_status`] — so the schema has a single
+/// owner rather than one copy per language.
+fn rmux_status_dir() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".rmux").join("status"))
+}
+
+/// Read one agent-agnostic status file.
+///
+/// The same tolerant, field-at-a-time reading as [`parse_file`], for the same
+/// reason: a hook that gains a field must not blank the whole directory. The
+/// filename stem backs the id when the body omits `sessionId`, so a half-written
+/// file still keys onto something rather than vanishing.
+fn parse_rmux_file(path: &Path) -> Option<Parsed> {
+    let bytes = std::fs::read(path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let session_id = v
+        .get("sessionId")
+        .and_then(|s| s.as_str())
+        .map(str::to_owned)
+        .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))?;
+    let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("idle").to_owned();
+    let cwd = v.get("cwd").and_then(|s| s.as_str()).map(str::to_owned);
+    let pid = v.get("pid").and_then(serde_json::Value::as_u64).map(|p| p as u32);
+    let updated_at = read_updated_at(&v);
+    let agent = v.get("agent").and_then(|s| s.as_str()).map(str::to_owned);
+    Some(Parsed { session_id, status, cwd, pid, updated_at, agent })
+}
+
+/// One status fact, on its way into `~/.rmux/status`.
+///
+/// This is the type the `rmux-agent hook` subcommand fills from a hook's
+/// arguments and hands here. Keeping the whole write behind one function is the
+/// point: a pi extension in TypeScript, a Codex hook in bash and a future
+/// in-process caller must not each invent the directory mode, the filename
+/// scheme or the field names — they shell out to `rmux-agent hook`, which is
+/// this.
+pub struct StatusWrite {
+    /// The agent reporting — `pi`, `codex`, …. Stamped into the file so a reader
+    /// can prefer the agent's own word for what it is.
+    pub agent: String,
+    /// The session id the client keys on. For pi this is its `<id>.jsonl` id, the
+    /// same string [`crate::bridge`] lists a conversation under, so a status file
+    /// and a transcript line join without a pid.
+    pub session_id: String,
+    pub cwd: Option<String>,
+    pub pid: Option<u32>,
+    /// `busy | idle | waiting | shell`, or `gone` — which **removes** the file
+    /// rather than leaving a marker, so the stream's own vanish path reports the
+    /// end exactly once and a crash that skips this leaves nothing stale to age
+    /// out.
+    pub status: String,
+}
+
+/// Milliseconds since the epoch, or 0 if the clock is before it (it is not).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A filename-safe rendering of a session id.
+///
+/// Session ids are agent-chosen and usually already `[A-Za-z0-9_-]`, but a `/`
+/// or a `..` in one would escape the status directory — so anything that is not
+/// plainly safe becomes `-`. Collisions between two ids that differ only in a
+/// sanitised character are accepted: they would be two files for what is almost
+/// certainly one malformed id, which is strictly better than a path traversal.
+fn status_key(session_id: &str) -> String {
+    let mut key: String = session_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    if key.is_empty() {
+        key.push('-');
+    }
+    key
+}
+
+/// Write (or, for `gone`, remove) one agent-agnostic status file.
+///
+/// `0700` directory, `0600` file, temp-then-rename so a reader never sees a
+/// half-written line — the same handling every credential-adjacent path in rmux
+/// uses, applied here because a status file names a working directory and a pid,
+/// which is more than a stranger on a shared host should be handed.
+pub fn write_status(w: &StatusWrite) -> anyhow::Result<()> {
+    let dir = rmux_status_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    let path = dir.join(format!("{}.json", status_key(&w.session_id)));
+
+    // `gone` is an erasure, not a value: drop the file and let the watcher's
+    // vanish path announce the end. Removing a file that is not there is success.
+    if w.status == "gone" {
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e.into());
+        }
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let mut body = serde_json::Map::new();
+    body.insert("agent".into(), w.agent.clone().into());
+    body.insert("sessionId".into(), w.session_id.clone().into());
+    if let Some(cwd) = &w.cwd {
+        body.insert("cwd".into(), cwd.clone().into());
+    }
+    if let Some(pid) = w.pid {
+        body.insert("pid".into(), pid.into());
+    }
+    body.insert("status".into(), w.status.clone().into());
+    body.insert("statusUpdatedAt".into(), now_ms().into());
+    let bytes = serde_json::to_vec(&serde_json::Value::Object(body))?;
+
+    // Temp beside the target (same directory → same filesystem → atomic rename),
+    // named by pid so two concurrent writers do not clobber one temp.
+    let tmp = dir.join(format!(".{}.{}.tmp", status_key(&w.session_id), std::process::id()));
+    std::fs::write(&tmp, &bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e.into())
+        }
+    }
 }
 
 /// Is a pid still alive?
@@ -120,10 +281,11 @@ fn parse_file(path: &Path) -> Option<Parsed> {
 /// `kill(pid, 0)` sends no signal: `0` means alive and ours, `EPERM` means alive
 /// but owned by someone else, `ESRCH` means dead.
 ///
-/// Compiled only off Linux (where it backs the `pid_is_claude` fallback) and in
-/// tests. On Linux the `/proc`-based `pid_is_claude` is the whole check, so this
-/// would be dead code there.
-#[cfg(all(unix, any(not(target_os = "linux"), test)))]
+/// Backs both the off-Linux `pid_is_claude` fallback and the liveness check for
+/// the agent-agnostic `~/.rmux/status` files — those name any agent, not just
+/// `claude`, so a `/proc/<pid>/comm == "claude"` test is the wrong question for
+/// them. Compiled on every target now that it has a production caller on Linux.
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -132,7 +294,7 @@ fn pid_alive(pid: u32) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(all(not(unix), any(not(target_os = "linux"), test)))]
+#[cfg(not(unix))]
 fn pid_alive(_pid: u32) -> bool {
     true
 }
@@ -178,7 +340,7 @@ fn effective_status(parsed: &Parsed, is_claude: &dyn Fn(u32) -> bool) -> String 
     }
 }
 
-/// One Claude session's live status, as the bridge needs to report it.
+/// One coding-agent session's live status, as the bridge needs to report it.
 ///
 /// The same fields the NDJSON stream carries, handed back in memory instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,35 +351,36 @@ pub struct Snapshot {
     /// `busy | shell | idle | waiting`, or `gone`.
     pub status: String,
     pub updated_at: Option<u64>,
+    /// The agent this describes — `claude` for the native session files, or the
+    /// name a `~/.rmux/status` writer stamped (`pi`, …). The bridge already
+    /// derives a session's *kind* from its name prefix, so this is advisory; it
+    /// lets a caller that has only a status prefer the agent's own word.
+    pub agent: Option<String>,
 }
 
-/// Every Claude session on this host, right now.
+/// Read one status directory into snapshots, dropping dead sessions.
 ///
-/// A one-shot read of the directory [`watch_status`] streams, for the callers
-/// that want an answer rather than a subscription — the bridge builds its
-/// session list from this on every `listSessions`.
-///
-/// **The same parser and the same liveness check as the stream.** A second
-/// reader of Claude's session files would be a second opinion about what "busy"
-/// means, and the two would disagree within a release; that is exactly the
-/// duplication the whole `rmux-claude-core` split exists to avoid.
-///
-/// A missing directory is an empty list, not an error: Claude may simply never
-/// have run here, which is a fact about the host rather than a failure.
-pub fn snapshot() -> Vec<Snapshot> {
-    let Some(home) = dirs::home_dir() else { return Vec::new() };
-    let dir = home.join(".claude").join("sessions");
-
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-    let mut out = Vec::new();
+/// Shared by the two sources so "what does a live session look like" has one
+/// definition. `parse` reads the directory's schema, `is_live` is its liveness
+/// question — `pid_is_claude` for Claude's files (a reused pid is a *different*
+/// program), plain `pid_alive` for the agent-agnostic ones (any agent, so the
+/// identity of the pid is not ours to assert).
+fn snapshot_dir(
+    dir: &Path,
+    parse: fn(&Path) -> Option<Parsed>,
+    is_live: &dyn Fn(u32) -> bool,
+    default_agent: Option<&str>,
+    out: &mut Vec<Snapshot>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
         // A partial write parses as nothing and is skipped, exactly as in `scan`.
-        let Some(parsed) = parse_file(&path) else { continue };
-        let status = effective_status(&parsed, &pid_is_claude);
+        let Some(parsed) = parse(&path) else { continue };
+        let status = effective_status(&parsed, is_live);
         // A dead session is left out rather than reported as `gone`. Its pid may
         // already have been reused, and a caller shown one would be pointed at
         // some other process entirely — the same reasoning as the daemon's own
@@ -231,7 +394,49 @@ pub fn snapshot() -> Vec<Snapshot> {
             pid: parsed.pid,
             status,
             updated_at: parsed.updated_at,
+            agent: parsed.agent.or_else(|| default_agent.map(str::to_owned)),
         });
+    }
+}
+
+/// Every coding-agent session on this host, right now.
+///
+/// A one-shot read of the directories [`watch_status`] streams, for the callers
+/// that want an answer rather than a subscription — the bridge builds its
+/// session list from this on every `listSessions`.
+///
+/// **Two sources, one merge.** Claude publishes its own
+/// `~/.claude/sessions/<pid>.json`; every other agent's hook drops a file in
+/// `~/.rmux/status`. A session that somehow appears in both (a future Claude
+/// hook beside the native file) is de-duplicated by `sessionId` with the native
+/// file winning, because it carries the finer `busy | shell | idle | waiting`
+/// vocabulary the hook only approximates.
+///
+/// **The same parser and the same liveness check as the stream.** A second
+/// reader of these files would be a second opinion about what "busy" means, and
+/// the two would disagree within a release; that is exactly the duplication the
+/// whole `rmux-claude-core` split exists to avoid.
+///
+/// A missing directory is an empty list, not an error: an agent may simply never
+/// have run here, which is a fact about the host rather than a failure.
+pub fn snapshot() -> Vec<Snapshot> {
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let claude_dir = home.join(".claude").join("sessions");
+
+    let mut out = Vec::new();
+    // Claude first, so it wins the de-dup below.
+    snapshot_dir(&claude_dir, parse_file, &pid_is_claude, Some("claude"), &mut out);
+    let claude_count = out.len();
+
+    if let Some(rmux_dir) = rmux_status_dir() {
+        let mut extra = Vec::new();
+        snapshot_dir(&rmux_dir, parse_rmux_file, &pid_alive, None, &mut extra);
+        // Drop any agent-agnostic file that names a session Claude already
+        // reported for itself — the native reading is authoritative. Owned keys,
+        // so the set does not borrow `out` across the `extend` that follows.
+        let seen: std::collections::HashSet<String> =
+            out[..claude_count].iter().map(|s| s.session_id.clone()).collect();
+        out.extend(extra.into_iter().filter(|s| !seen.contains(&s.session_id)));
     }
     out
 }
@@ -243,14 +448,23 @@ fn emit<W: Write>(out: &mut W, update: &Update) -> std::io::Result<()> {
     writeln!(out, "{line}")
 }
 
-/// One pass over the directory: emit a line for every session whose status has
+/// One pass over one directory: emit a line for every session whose status has
 /// changed since the last pass, and a `gone` line for every file that has since
 /// disappeared.
+///
+/// Generalised over its source so the Claude native files and the agent-agnostic
+/// `~/.rmux/status` files run the identical diff/vanish machinery — `parse`
+/// reads the schema, `is_live` asks the right liveness question, `default_agent`
+/// labels a file that did not name itself. Each source keeps its **own** `known`
+/// map: sharing one would make every rmux file look "vanished" from the Claude
+/// directory on every pass and stream a spurious `gone`.
 fn scan<W: Write>(
     dir: &Path,
     known: &mut HashMap<PathBuf, Known>,
     out: &mut W,
-    is_claude: &dyn Fn(u32) -> bool,
+    parse: fn(&Path) -> Option<Parsed>,
+    is_live: &dyn Fn(u32) -> bool,
+    default_agent: Option<&str>,
 ) -> std::io::Result<()> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
@@ -264,8 +478,9 @@ fn scan<W: Write>(
 
             // A partial write parses as nothing; the next pass (woken by the
             // watcher's close event, or the backstop) picks up the final state.
-            let Some(parsed) = parse_file(&path) else { continue };
-            let status = effective_status(&parsed, is_claude);
+            let Some(parsed) = parse(&path) else { continue };
+            let status = effective_status(&parsed, is_live);
+            let agent = parsed.agent.clone().or_else(|| default_agent.map(str::to_owned));
 
             let changed = known.get(&path).map(|k| k.status != status).unwrap_or(true);
             if changed {
@@ -273,13 +488,14 @@ fn scan<W: Write>(
                     out,
                     &Update {
                         session_id: parsed.session_id.clone(),
+                        agent: agent.clone(),
                         cwd: parsed.cwd.clone(),
                         pid: parsed.pid,
                         status: status.clone(),
                         updated_at: parsed.updated_at,
                     },
                 )?;
-                known.insert(path, Known { session_id: parsed.session_id, status });
+                known.insert(path, Known { session_id: parsed.session_id, status, agent });
             }
         }
     }
@@ -296,6 +512,7 @@ fn scan<W: Write>(
                 out,
                 &Update {
                     session_id: k.session_id,
+                    agent: k.agent,
                     cwd: None,
                     pid: None,
                     status: "gone".to_owned(),
@@ -327,10 +544,18 @@ fn spawn_watcher(
     Some(watcher)
 }
 
-/// Stream Claude session status changes as NDJSON on stdout until the pipe closes.
+/// Stream coding-agent status changes as NDJSON on stdout until the pipe closes.
+///
+/// Two directories, one stream: Claude's own `~/.claude/sessions` and the
+/// agent-agnostic `~/.rmux/status`. Each has its own watcher, backstop and
+/// `known` map — they are independent sources that happen to share a wire
+/// format, and one shared `known` would cross-report the other's files as
+/// vanished. A single wake channel is enough: any event on either directory just
+/// means "scan both again".
 pub async fn watch_status() -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
-    let dir = home.join(".claude").join("sessions");
+    let claude_dir = home.join(".claude").join("sessions");
+    let rmux_dir = rmux_status_dir();
 
     // The client waits for this to know the subcommand exists and the stream is
     // live — distinct from an older agent, which exits with an "unknown option"
@@ -342,22 +567,36 @@ pub async fn watch_status() -> anyhow::Result<()> {
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-    let mut watcher = spawn_watcher(&dir, tx.clone());
-    let mut known: HashMap<PathBuf, Known> = HashMap::new();
+    let mut claude_watcher = spawn_watcher(&claude_dir, tx.clone());
+    let mut rmux_watcher = rmux_dir.as_ref().and_then(|d| spawn_watcher(d, tx.clone()));
+    let mut claude_known: HashMap<PathBuf, Known> = HashMap::new();
+    let mut rmux_known: HashMap<PathBuf, Known> = HashMap::new();
 
     loop {
         {
             let mut out = std::io::stdout();
-            scan(&dir, &mut known, &mut out, &pid_is_claude)?;
+            scan(&claude_dir, &mut claude_known, &mut out, parse_file, &pid_is_claude, Some("claude"))?;
+            if let Some(dir) = &rmux_dir {
+                scan(dir, &mut rmux_known, &mut out, parse_rmux_file, &pid_alive, None)?;
+            }
         }
 
-        // The directory may have only just been created (a host where Claude had
-        // never run when the stream opened). Re-arm the watcher when it appears.
-        if watcher.is_none() && dir.exists() {
-            watcher = spawn_watcher(&dir, tx.clone());
+        // Either directory may have only just been created (a host where the
+        // agent had never run when the stream opened). Re-arm as each appears.
+        if claude_watcher.is_none() && claude_dir.exists() {
+            claude_watcher = spawn_watcher(&claude_dir, tx.clone());
+        }
+        if let Some(dir) = &rmux_dir
+            && rmux_watcher.is_none()
+            && dir.exists()
+        {
+            rmux_watcher = spawn_watcher(dir, tx.clone());
         }
 
-        let backstop = if watcher.is_some() { BACKSTOP_WATCHED } else { BACKSTOP_UNWATCHED };
+        // Shorter backstop until *both* live directories are watched — an
+        // unwatched one is being carried by the re-scan alone.
+        let all_watched = claude_watcher.is_some() && (rmux_dir.is_none() || rmux_watcher.is_some());
+        let backstop = if all_watched { BACKSTOP_WATCHED } else { BACKSTOP_UNWATCHED };
         tokio::select! {
             _ = rx.recv() => {}
             _ = tokio::time::sleep(backstop) => {}
@@ -403,7 +642,7 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out, &all_claude).unwrap();
+        scan(&dir, &mut known, &mut out, parse_file, &all_claude, Some("claude")).unwrap();
         let first = lines(&out);
         assert_eq!(first.len(), 1, "one update for the new file: {first:?}");
         assert_eq!(first[0]["sessionId"], "sess-1");
@@ -414,7 +653,7 @@ mod tests {
         // A second pass with nothing changed must be silent, or the "push" is a
         // poll wearing a different hat.
         let mut out2 = Vec::new();
-        scan(&dir, &mut known, &mut out2, &all_claude).unwrap();
+        scan(&dir, &mut known, &mut out2, parse_file, &all_claude, Some("claude")).unwrap();
         assert!(lines(&out2).is_empty(), "unchanged status must not re-emit");
     }
 
@@ -426,11 +665,11 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut sink = Vec::new();
-        scan(&dir, &mut known, &mut sink, &all_claude).unwrap();
+        scan(&dir, &mut known, &mut sink, parse_file, &all_claude, Some("claude")).unwrap();
 
         write_session(&dir, "1.json", "sess-1", pid, "idle");
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out, &all_claude).unwrap();
+        scan(&dir, &mut known, &mut out, parse_file, &all_claude, Some("claude")).unwrap();
         let got = lines(&out);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["status"], "idle");
@@ -443,11 +682,11 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut sink = Vec::new();
-        scan(&dir, &mut known, &mut sink, &all_claude).unwrap();
+        scan(&dir, &mut known, &mut sink, parse_file, &all_claude, Some("claude")).unwrap();
 
         std::fs::remove_file(dir.join("1.json")).unwrap();
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out, &all_claude).unwrap();
+        scan(&dir, &mut known, &mut out, parse_file, &all_claude, Some("claude")).unwrap();
         let got = lines(&out);
         assert_eq!(got.len(), 1, "the session ending is one event: {got:?}");
         assert_eq!(got[0]["sessionId"], "sess-1");
@@ -464,7 +703,7 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out, &pid_is_claude).unwrap();
+        scan(&dir, &mut known, &mut out, parse_file, &pid_is_claude, Some("claude")).unwrap();
         let got = lines(&out);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["status"], "gone", "a stale busy file must not read as working");
@@ -482,7 +721,7 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out, &|_| false).unwrap();
+        scan(&dir, &mut known, &mut out, parse_file, &|_| false, Some("claude")).unwrap();
         let got = lines(&out);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["status"], "gone", "a pid reused by a non-claude process is not working");
@@ -497,7 +736,7 @@ mod tests {
 
         let mut known = HashMap::new();
         let mut out = Vec::new();
-        scan(&dir, &mut known, &mut out, &all_claude).unwrap();
+        scan(&dir, &mut known, &mut out, parse_file, &all_claude, Some("claude")).unwrap();
         assert!(lines(&out).is_empty(), "unusable files produce no updates");
     }
 
@@ -521,6 +760,169 @@ mod tests {
         assert!(!pid_alive(0));
         // Portable on any host: pid 0 is never a live claude.
         assert!(!pid_is_claude(0));
+    }
+
+    // --- the agent-agnostic `~/.rmux/status` source ---------------------------
+
+    fn write_rmux(dir: &Path, file: &str, agent: &str, session_id: &str, pid: u32, status: &str) {
+        let body = serde_json::json!({
+            "agent": agent,
+            "sessionId": session_id,
+            "cwd": "/srv/pi-app",
+            "pid": pid,
+            "status": status,
+            "statusUpdatedAt": 1_785_474_593_641u64,
+        });
+        std::fs::write(dir.join(file), serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_rmux_status_file_is_parsed_and_scanned_like_a_claude_one() {
+        // The whole point: an agent that is not Claude gets a real status instead
+        // of `Unknown`. Same diff machinery, a different schema and liveness.
+        let dir = tempdir();
+        write_rmux(&dir, "pi-1.json", "pi", "sess-pi", std::process::id(), "busy");
+
+        let mut known = HashMap::new();
+        let mut out = Vec::new();
+        scan(&dir, &mut known, &mut out, parse_rmux_file, &all_claude, None).unwrap();
+        let got = lines(&out);
+        assert_eq!(got.len(), 1, "one update for the pi file: {got:?}");
+        assert_eq!(got[0]["sessionId"], "sess-pi");
+        assert_eq!(got[0]["status"], "busy");
+        // The agent names itself — `default_agent` was None, so the file's own
+        // `agent` is what surfaces. This is what lets the rail label a pi dot.
+        assert_eq!(got[0]["agent"], "pi");
+
+        // Unchanged → silent, exactly like the Claude source.
+        let mut out2 = Vec::new();
+        scan(&dir, &mut known, &mut out2, parse_rmux_file, &all_claude, None).unwrap();
+        assert!(lines(&out2).is_empty(), "unchanged pi status must not re-emit");
+    }
+
+    #[test]
+    fn an_rmux_file_without_a_session_id_falls_back_to_the_filename() {
+        // A half-written file with no body id still keys onto its filename rather
+        // than vanishing — the client at least has a stable handle.
+        let dir = tempdir();
+        std::fs::write(dir.join("codex-7.json"), br#"{"agent":"codex","status":"idle"}"#).unwrap();
+        let parsed = parse_rmux_file(&dir.join("codex-7.json")).unwrap();
+        assert_eq!(parsed.session_id, "codex-7");
+        assert_eq!(parsed.agent.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn a_dead_pid_in_an_rmux_file_reads_gone() {
+        // Liveness for these files is plain `pid_alive` — any agent, so "is it
+        // still claude?" is the wrong question. A dead pid is still gone.
+        let dir = tempdir();
+        write_rmux(&dir, "pi-1.json", "pi", "sess-pi", 0x7FFF_FFF0, "busy");
+        let parsed = parse_rmux_file(&dir.join("pi-1.json")).unwrap();
+        assert_eq!(effective_status(&parsed, &pid_alive), "gone");
+    }
+
+    #[test]
+    fn write_status_round_trips_through_parse_rmux_file() {
+        // The write side and the read side share one schema; prove they agree by
+        // writing with `write_status` and reading with `parse_rmux_file`, against
+        // a real (isolated) HOME.
+        let _serial = SERIAL.lock().unwrap();
+        let home = tempdir();
+        let _guard = EnvGuard::set("HOME", home.to_str().unwrap());
+
+        write_status(&StatusWrite {
+            agent: "pi".into(),
+            session_id: "sess-abc".into(),
+            cwd: Some("/srv/app".into()),
+            pid: Some(std::process::id()),
+            status: "waiting".into(),
+        })
+        .unwrap();
+
+        let path = home.join(".rmux").join("status").join("sess-abc.json");
+        let parsed = parse_rmux_file(&path).unwrap();
+        assert_eq!(parsed.session_id, "sess-abc");
+        assert_eq!(parsed.agent.as_deref(), Some("pi"));
+        assert_eq!(parsed.status, "waiting");
+        assert_eq!(parsed.cwd.as_deref(), Some("/srv/app"));
+        assert!(parsed.updated_at.is_some(), "a real timestamp is stamped");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "a status file names a cwd and pid — 0600");
+        }
+    }
+
+    #[test]
+    fn write_status_gone_removes_the_file() {
+        // `gone` is an erasure so the stream's vanish path — not a stale value —
+        // announces the end exactly once.
+        let _serial = SERIAL.lock().unwrap();
+        let home = tempdir();
+        let _guard = EnvGuard::set("HOME", home.to_str().unwrap());
+
+        let base = StatusWrite {
+            agent: "pi".into(),
+            session_id: "sess-x".into(),
+            cwd: None,
+            pid: Some(std::process::id()),
+            status: "busy".into(),
+        };
+        write_status(&base).unwrap();
+        let path = home.join(".rmux").join("status").join("sess-x.json");
+        assert!(path.exists());
+
+        write_status(&StatusWrite { status: "gone".into(), ..clone_write(&base) }).unwrap();
+        assert!(!path.exists(), "gone must remove the file");
+        // Removing a file that is already gone is success, not an error.
+        write_status(&StatusWrite { status: "gone".into(), ..clone_write(&base) }).unwrap();
+    }
+
+    #[test]
+    fn status_key_cannot_escape_the_directory() {
+        // A `/` or `..` in an id must not write outside the status directory.
+        assert_eq!(status_key("../../etc/passwd"), "------etc-passwd");
+        assert_eq!(status_key("a/b"), "a-b");
+        assert_eq!(status_key("ok_id-1"), "ok_id-1");
+        assert_eq!(status_key(""), "-");
+    }
+
+    fn clone_write(w: &StatusWrite) -> StatusWrite {
+        StatusWrite {
+            agent: w.agent.clone(),
+            session_id: w.session_id.clone(),
+            cwd: w.cwd.clone(),
+            pid: w.pid,
+            status: w.status.clone(),
+        }
+    }
+
+    /// HOME is process-global; the tests that repoint it hold this so they do not
+    /// race each other (or any future test that reads the home directory).
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Set an env var for the duration of a test and restore it after — HOME is
+    /// process-global, so these tests hold the `SERIAL` guard above.
+    struct EnvGuard {
+        key: String,
+        previous: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            EnvGuard { key: key.to_owned(), previous }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
     }
 
     fn tempdir() -> PathBuf {

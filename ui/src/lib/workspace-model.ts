@@ -60,7 +60,7 @@ export type Project = {
   running?: boolean;
 };
 
-export type SessionKind = "terminal" | "claude";
+export type SessionKind = "terminal" | "claude" | "pi";
 
 /** Runtime attention state. Claude-only in v1 (a terminal is always `idle`). */
 export type SessionStatus = "waiting" | "working" | "idle";
@@ -91,6 +91,14 @@ export type SessionV3 = {
    * running detached where nothing points at it.
    */
   hostName?: string;
+
+  /**
+   * A resume-cwd override — **pi resume: run in the conversation's own
+   * directory.** pi stores and locates its sessions under a cwd-encoded dir, so
+   * a resumed conversation must be launched in the same cwd it recorded. Absent
+   * for a fresh session, which uses its project's folder instead.
+   */
+  cwd?: string;
 
   // ── claude-only ──────────────────────────────────────────────────────────
   resume?: string;
@@ -155,7 +163,7 @@ export function reattachName(s: Pick<SessionV3, "id" | "kind" | "hostName">): st
   // name nothing answers to *creates* it — a second shell beside the one being
   // adopted.
   if (s.hostName) return s.hostName;
-  return s.kind === "claude" ? `claude-${s.id}` : s.id;
+  return s.kind === "claude" ? `claude-${s.id}` : s.kind === "pi" ? `pi-${s.id}` : s.id;
 }
 
 /**

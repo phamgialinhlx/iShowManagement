@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isTauri } from "./api";
 import { bench } from "./debug-log";
 import { useWorkspace } from "./workspace";
-import type { SessionStatus } from "./workspace-model";
+import { reattachName, type SessionStatus } from "./workspace-model";
 
 /**
  * Keep every session's status current, not only the ones on screen.
@@ -56,6 +56,9 @@ const POLL_MS = 5000;
 type StatusUpdate = {
   targetId: string;
   sessionId: string;
+  /** The agent that wrote the status (`"pi"` for pi's agent-agnostic status
+   *  files; absent for Claude's native session files). */
+  agent?: string;
   cwd?: string;
   pid?: number;
   status: string;
@@ -110,6 +113,24 @@ export function startStatusWatch(): () => void {
 
   const applyUpdate = (ev: StatusUpdate) => {
     const state = useWorkspace.getState();
+
+    // pi publishes through the agent-agnostic status file, keyed by the pi
+    // session's daemon name (`pi-<id>` = `reattachName`). The match is exact and
+    // unique, so there is no folder+host fallback — and pi's `resume` is a real
+    // conversation id, never a status key, so it is left untouched.
+    if (ev.agent === "pi") {
+      const match = state.sessions.find(
+        (s) => s.kind === "pi" && reattachName(s) === ev.sessionId,
+      );
+      if (!match) return;
+      const status = mapStatus(ev.status);
+      if (status) {
+        state.setStatus(match.id, status, ev.updatedAt);
+        bench(`status session=${match.id} status=${status} source=push`);
+      }
+      return;
+    }
+
     const claude = state.sessions.filter((s) => s.kind === "claude");
 
     // Exact: the conversation id has already been learned for a session.

@@ -471,7 +471,18 @@ async fn dispatch(request: Request) -> Response {
             // treat the whole thing as one bracketed paste and swallow it, so the
             // message sits in the composer, typed but never sent — which reads
             // from Redstone as "it accepted my message and did nothing".
-            let chunks = keys::send_message(&message);
+            //
+            // The encoder is chosen by the session-name prefix, the same signal
+            // `live_sessions` and `Close` already trust — `Request::Send` carries
+            // no `agent` field, and the host derives the agent from the name it
+            // minted (`pi-…`/`claude-…`) rather than the wire re-stating it. Only
+            // multi-line differs: Claude's `\\\r` line break is Claude's alone, so
+            // pi gets a bracketed paste instead (see `keys::send_message_pi`).
+            let chunks = if session.starts_with("pi-") {
+                keys::send_message_pi(&message)
+            } else {
+                keys::send_message(&message)
+            };
             for (i, chunk) in chunks.iter().enumerate() {
                 if i > 0 {
                     tokio::time::sleep(keys::SUBMIT_SETTLE).await;
@@ -875,7 +886,10 @@ fn pi_conversations(limit: Option<u32>, folder: Option<&str>) -> anyhow::Result<
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
     let root = std::path::PathBuf::from(pi::sessions_root(&home.to_string_lossy()));
 
-    let running = status::snapshot(); // pi has no status file; this stays empty of pi ids
+    // The status snapshot now includes pi, keyed by its conversation id, because
+    // the rmux status extension publishes one file per running pi session — so a
+    // conversation that is live is flagged `running` exactly as Claude's is.
+    let running = status::snapshot();
     let wanted_folder = folder.map(|f| f.trim_end_matches('/').to_owned());
 
     let mut all: Vec<Conversation> = Vec::new();
@@ -1083,7 +1097,26 @@ async fn spawn(
         }
         // pi runs inline (`--tui-mode regular`) for the same reasons Claude opts
         // out of the alternate screen — see `pi::launch_line`.
-        Agent::Pi => (pi::launch_line(prompt, name, None), "pi"),
+        Agent::Pi => {
+            // Give pi the status signal Claude has for free. Install the
+            // extension (idempotent, best-effort — a host that cannot take it
+            // still runs pi, just without the dot) and tell it where the writer
+            // is via `RMUX_AGENT_BIN`. The env goes on the **shell line**, like
+            // Claude's `CLAUDE_CODE_*` prefix: an assignment prefix does not stop
+            // the login shell exec-ing the single command, so pi keeps the
+            // session's own pid and `live_sessions` still correlates on it.
+            if let Some(home) = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned))
+                && let Err(e) = pi::install_status_extension(&home)
+            {
+                tracing::warn!(error = %e, "could not install pi status extension");
+            }
+            let line = pi::launch_line(prompt, name, None);
+            let line = match std::env::current_exe().ok().and_then(|p| p.to_str().map(str::to_owned)) {
+                Some(bin) => format!("RMUX_AGENT_BIN={} {line}", rmux_transport::shell_quote(&bin)),
+                None => line,
+            };
+            (line, "pi")
+        }
     };
 
     // Named for its agent so rmux's rail adopts it as the right kind rather than

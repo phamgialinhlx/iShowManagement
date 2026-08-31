@@ -63,7 +63,15 @@ const SPEAKER: Record<TranscriptEntry["speaker"], { label: string; color: string
   system: { label: "system", color: "var(--text-faint)" },
 };
 
-function Turn({ entry }: { entry: TranscriptEntry }) {
+/** The assistant is whichever agent produced the transcript — labelling a pi
+ *  conversation "claude" is a claim about who is talking, and it is wrong. Every
+ *  other speaker is agent-neutral, so only `assistant` moves. */
+function speakerLabel(speaker: TranscriptEntry["speaker"], provider: "claude" | "pi"): string {
+  if (speaker === "assistant") return provider === "pi" ? "pi" : "claude";
+  return SPEAKER[speaker].label;
+}
+
+function Turn({ entry, provider }: { entry: TranscriptEntry; provider: "claude" | "pi" }) {
   const meta = SPEAKER[entry.speaker];
   const isProse = entry.speaker === "user" || entry.speaker === "assistant";
 
@@ -77,7 +85,7 @@ function Turn({ entry }: { entry: TranscriptEntry }) {
     >
       <header className="mb-1 flex items-baseline gap-2">
         <span className="micro" style={{ color: meta.color }}>
-          {meta.label}
+          {speakerLabel(entry.speaker, provider)}
           {entry.tool ? ` · ${entry.tool}` : ""}
         </span>
         <span className="micro">{clock(entry.timestamp)}</span>
@@ -143,11 +151,16 @@ export function TranscriptView({
   target,
   folder,
   resume,
+  provider = "claude",
 }: {
   sessionId: string;
   target: TargetRef;
   folder: string;
   resume?: string;
+  /** Whose transcript this is. pi reads through `pi_transcript` (its `cwd` is
+   *  `folder`); Claude keeps its existing `claude_transcript` path unchanged.
+   *  The returned `Transcript` shape is identical, so only the fetch forks. */
+  provider?: "claude" | "pi";
 }) {
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -181,7 +194,10 @@ export function TranscriptView({
     }
     setLoading(true);
     try {
-      const next = await api.claudeTranscript(target, folder, resume, tail);
+      const next =
+        provider === "pi"
+          ? await api.piTranscript(target, folder, resume, tail)
+          : await api.claudeTranscript(target, folder, resume, tail);
       // Only swap state when something actually changed. A poll that returns
       // the same bytes used to replace the array anyway, re-rendering every
       // turn — which is invisible when nothing is selected and destroys the
@@ -193,7 +209,7 @@ export function TranscriptView({
     } finally {
       setLoading(false);
     }
-  }, [target, folder, resume, tail]);
+  }, [target, folder, resume, tail, provider]);
 
   // A refresh that respects the reader's hands.
   //
@@ -264,7 +280,7 @@ export function TranscriptView({
 
   const copyAll = async () => {
     const text = entries
-      .map((e) => `## ${SPEAKER[e.speaker].label}${e.tool ? ` · ${e.tool}` : ""}\n\n${e.text}`)
+      .map((e) => `## ${speakerLabel(e.speaker, provider)}${e.tool ? ` · ${e.tool}` : ""}\n\n${e.text}`)
       .join("\n\n");
     try {
       await navigator.clipboard.writeText(text);
@@ -347,7 +363,7 @@ export function TranscriptView({
       >
         <div className="mx-auto flex max-w-[1100px] flex-col gap-4">
           {entries.map((entry, i) => (
-            <Turn key={`${entry.timestamp ?? ""}-${i}`} entry={entry} />
+            <Turn key={`${entry.timestamp ?? ""}-${i}`} entry={entry} provider={provider} />
           ))}
 
           {/*

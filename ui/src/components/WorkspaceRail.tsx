@@ -6,6 +6,7 @@ import { isSessionUnseen, useWorkspace } from "../lib/workspace";
 import { MenuDivider, MenuItem, MenuSurface, type MenuAt } from "./Menu";
 import { api } from "../lib/api";
 import { RunningSessions } from "./RunningSessions";
+import { PiSessionPicker } from "./PiSessionPicker";
 import { RailGrip } from "./RailGrip";
 import type { Project, Server, SessionStatus, SessionV3 } from "../lib/workspace-model";
 import { QuickAdd } from "./QuickAdd";
@@ -236,6 +237,33 @@ function ClaudeMark({ color = "var(--text-soft)" }: { color?: string }) {
   );
 }
 
+/**
+ * The pi mark — pi is an agent like Claude, so it earns an agent glyph. There is
+ * no official brand icon, so this is the Greek letter itself, drawn as text
+ * rather than an SVG path: `π` reads cleanly at 12px and needs no glyph font
+ * (it is a base-plane Unicode letter every bundled face carries). Rule 3 — no
+ * emoji, and the colour comes from the tokens so it follows the theme.
+ */
+function PiMark({ color = "var(--text-soft)" }: { color?: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="shrink-0"
+      style={{
+        display: "inline-block",
+        width: 12,
+        fontSize: 13,
+        fontWeight: 700,
+        lineHeight: "12px",
+        textAlign: "center",
+        color,
+      }}
+    >
+      π
+    </span>
+  );
+}
+
 export function rowSurface(active: boolean, onScreen: boolean) {
   return {
     background: active
@@ -394,7 +422,11 @@ function SessionRow({
       )}
       {editing ? (
         <div className="flex items-center gap-2 px-3 py-[6px] pl-3">
-          {session.kind === "claude" ? (
+          {session.kind === "claude" || session.kind === "pi" ? (
+            // pi is an agent, so it carries the agent StatusDot like Claude.
+            // Its rail status is not wired this phase (no watch-status yet), so
+            // `statusOf` returns the IDLE default and `unseen` is false — a
+            // static idle dot, the accepted phase-1 state (phase 3 wires it).
             <StatusDot status={status.status} finished={unseen} />
           ) : (
             <TerminalMark />
@@ -427,7 +459,11 @@ function SessionRow({
           title={`${session.name}\nDouble-click to rename`}
           className="flex w-full items-center gap-2 px-3 py-[6px] pl-3 text-left"
         >
-          {session.kind === "claude" ? (
+          {session.kind === "claude" || session.kind === "pi" ? (
+            // pi is an agent, so it carries the agent StatusDot like Claude.
+            // Its rail status is not wired this phase (no watch-status yet), so
+            // `statusOf` returns the IDLE default and `unseen` is false — a
+            // static idle dot, the accepted phase-1 state (phase 3 wires it).
             <StatusDot status={status.status} finished={unseen} />
           ) : (
             <TerminalMark />
@@ -510,6 +546,9 @@ function ProjectNode({
   const mine = sessions.filter((s) => s.projectId === project.id);
   const [confirming, setConfirming] = useState(false);
   const [adding, setAdding] = useState(false);
+  // Parallel to `adding` (the Claude ✦ picker), so the two never collide — pi
+  // resume is host-wide and carries its own cwd, so it is a separate flow.
+  const [addingPi, setAddingPi] = useState(false);
   const onScreen = new Set(
     panes.flatMap((p) => (p && p.kind === "session" ? [p.id] : [])),
   );
@@ -659,6 +698,24 @@ function ProjectNode({
         >
           <ClaudeMark />
         </button>
+        {/* A **pi** session — an agent like Claude, so its own agent glyph (π)
+            sits beside the Claude mark. Like ✦ it now **asks** before creating:
+            the picker offers a fresh session *and* the host's resumable pi
+            conversations, because a continuation of yesterday's work is almost
+            always worth more than a clean slate. It opens the same way the
+            Claude and terminal flows do — `openSession(id)` on the choice — so
+            the new pane takes the focused tile immediately. Gated by the same
+            header verbs (this row only renders under a connected server), so it
+            appears exactly where the ✦ control does. */}
+        <button
+          type="button"
+          onClick={() => setAddingPi(true)}
+          aria-label={`New pi session in ${project.label}`}
+          title="New or resume a pi session"
+          className="shrink-0 px-1 opacity-70 hover:opacity-100"
+        >
+          <PiMark color="currentColor" />
+        </button>
         <button
           type="button"
           onClick={() => setConfirming(true)}
@@ -716,6 +773,29 @@ function ProjectNode({
             />
           </motion.div>
         </motion.div>
+      )}
+
+      {/* The pi picker is its own modal — a fresh session, or one of the host's
+          resumable conversations. A resumed one carries the `cwd` it recorded,
+          because pi locates its sessions under a cwd-encoded dir; a fresh one
+          uses the project folder. It opens on the focused tile like every other
+          create. */}
+      {addingPi && (
+        <PiSessionPicker
+          target={target}
+          onCancel={() => setAddingPi(false)}
+          onChoose={(choice) => {
+            const id = addSession(project.id, "pi", {
+              resume: choice.resume,
+              cwd: choice.cwd,
+              // A resumed conversation is named for what it was about; every pi
+              // session in a folder would otherwise share the folder's name.
+              name: choice.name?.trim() || undefined,
+            });
+            openSession(id);
+            setAddingPi(false);
+          }}
+        />
       )}
 
       {/* Same reasoning as the server's: `removeProject` ends every session in

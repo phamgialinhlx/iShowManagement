@@ -140,11 +140,12 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
           session rather than adjusted while working, which is what this tab is
           for.
 
-          Inline is the default and should stay it: fullscreen moves Claude to
-          the alternate screen and takes the mouse, so selection, Cmd-C and
-          native scrolling all stop working — the three symptoms that made this
-          pane close to unusable before. The label says what is lost rather than
-          naming the mode, because "fullscreen" does not tell anyone that.
+          Fullscreen is the default for desktop-launched sessions: Claude's own
+          TUI, with its pinned composer, is what most people expect. Inline is
+          the deliberate alternative — it keeps xterm selection, Cmd-C and native
+          mouse-scroll working, at the cost of the in-TUI scrolling and /focus.
+          Both trade-offs are honest and named in the copy below. The explicit
+          per-session choice persists and always wins over the default.
         */}
         <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
           <span className="micro">CLAUDE RENDERING</span>
@@ -167,9 +168,11 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
             ))}
           </div>
           <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
-            Inline keeps selection, Cmd-C and native scrolling. Claude's fullscreen TUI takes the
-            mouse, so all three stop working — choose it only for its in-TUI scrolling or /focus.
-            Takes effect the next time this session's Claude starts.
+            Fullscreen TUI is the default: Claude's native full-screen interface with its pinned
+            composer. It captures the mouse, so selecting text and Cmd-C need Select mode and
+            mouse-scroll goes to the TUI rather than xterm's scrollback. Inline gives selection,
+            Cmd-C and native scrolling back, trading away the in-TUI scrolling and /focus. Takes
+            effect the next time this session's Claude starts.
           </span>
         </div>
 

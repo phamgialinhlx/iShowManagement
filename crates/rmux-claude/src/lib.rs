@@ -29,7 +29,7 @@ pub mod usage;
 /// `reqwest` and `alacritty_terminal` onto every host rmux touches. Re-exported
 /// under the paths every existing caller already knows — `rmux_claude::keys`,
 /// `rmux_claude::transcript` — because renaming them buys nothing.
-pub use rmux_claude_core::{keys, launch, sessions, transcript};
+pub use rmux_claude_core::{keys, launch, pi, sessions, transcript};
 pub use rmux_claude_core::{launch_line, Rendering};
 
 pub use screen::{Choice, ClaudeState, Prompt, Screen};
@@ -178,6 +178,30 @@ impl ClaudeSession {
         Ok(sessions::parse_all_sessions(out.stdout.as_bytes()))
     }
 
+    /// Every pi conversation on the host, newest first.
+    ///
+    /// The pi twin of [`Self::list_all`]. It runs the pure
+    /// [`pi::list_all_conversations_script`] over the target and parses its
+    /// NUL-separated output with [`pi::parse_all_conversations`], so the pi
+    /// *format* lives once in `rmux-claude-core` and this side carries only the
+    /// `Target` hop — the same split as Claude's host-wide listing.
+    pub async fn pi_list_all<T: Target + ?Sized>(
+        target: &T,
+    ) -> anyhow::Result<Vec<pi::Conversation>> {
+        let spec = CommandSpec::new("sh")
+            .arg("-c")
+            .arg(pi::list_all_conversations_script())
+            .tty(Tty::None);
+
+        let out = target.exec(&spec).await?;
+        // A host pi has never run on exits non-zero from the `[ -d ]` guard on
+        // some shells; that is "no conversations", not a failure.
+        if out.status != 0 {
+            return Ok(Vec::new());
+        }
+        Ok(pi::parse_all_conversations(out.stdout.as_bytes()))
+    }
+
     pub async fn list<T: Target + ?Sized>(
         target: &T,
         folder: &str,
@@ -253,6 +277,44 @@ mod launch_tests {
 mod tests {
     use super::*;
     use rmux_transport::LocalTarget;
+
+    #[test]
+    fn pi_list_all_parses_the_scripts_nul_output_newest_first() {
+        // A sample of exactly what `pi::list_all_conversations_script` emits:
+        // four NUL-separated fields per record (stem, mtime-seconds, size,
+        // header line), a trailing NUL after each. One cwd contains a space —
+        // the reason the records are NUL-framed rather than whitespace-split.
+        let older = concat!(
+            "2026-08-18T09-59-47-711Z_rmuxlive01\0",
+            "1000\0",
+            "42\0",
+            r#"{"type":"session","version":3,"id":"rmuxlive01","timestamp":"2026-08-18T09:59:47.711Z","cwd":"/root/pi live"}"#,
+            "\0",
+        );
+        let newer = concat!(
+            "2026-08-20T00-00-00-000Z_convb\0",
+            "2000\0",
+            "99\0",
+            r#"{"kind":"header","version":4,"id":"convb","createdAt":5,"cwd":"/srv/api"}"#,
+            "\0",
+        );
+        let raw = format!("{older}{newer}");
+        let convos = pi::parse_all_conversations(raw.as_bytes());
+
+        assert_eq!(convos.len(), 2);
+        // Newest (largest mtime) first, matching the bridge and the Claude lister.
+        assert_eq!(convos[0].id, "convb");
+        assert_eq!(convos[0].cwd.as_deref(), Some("/srv/api"));
+        assert_eq!(convos[0].modified, Some(2_000_000)); // seconds → milliseconds
+        assert_eq!(convos[0].size, Some(99));
+
+        // The header's own id wins over the filename stem, and a cwd with a
+        // space survives NUL framing intact.
+        assert_eq!(convos[1].id, "rmuxlive01");
+        assert_eq!(convos[1].cwd.as_deref(), Some("/root/pi live"));
+        assert_eq!(convos[1].modified, Some(1_000_000));
+        assert_eq!(convos[1].summary, None);
+    }
 
     /// Wait for a condition, or give up.
     async fn eventually(mut check: impl FnMut() -> bool, timeout: std::time::Duration) -> bool {

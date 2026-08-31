@@ -29,3 +29,44 @@ export function scaledFontSize(base: number): number {
   // columns and leaves a ragged right edge.
   return Math.max(6, Math.round(base * fontScale()));
 }
+
+/**
+ * Re-measure a freshly-opened terminal once its font has finished loading.
+ *
+ * xterm measures its cell grid at construction. The bundled mono faces load
+ * asynchronously and `font-display: block` means xterm measures against the
+ * *fallback's* metrics during the block period — so when the real face swaps in,
+ * its glyphs no longer fit the cells and text overlaps or eats its own spaces
+ * (the "TUI looks garbled" report). `document.fonts.ready` resolves once the
+ * document's font loads settle; re-setting `fontFamily` invalidates xterm's
+ * char-size cache — the same re-measure `scaledFontSize` documents — and
+ * `fit()` re-lays the grid to match, after which the pty is told the new size by
+ * the caller's normal resize path.
+ *
+ * Cheap when the font was already loaded: the promise resolves at once and the
+ * remeasure is a single pass. `isAlive` guards a terminal disposed before the
+ * font settled.
+ */
+export function remeasureOnFontLoad(
+  xterm: { options: { fontFamily?: string } },
+  fit: { fit: () => void },
+  fontFamily: () => string,
+  isAlive: () => boolean,
+): void {
+  const fonts = typeof document !== "undefined" ? document.fonts : undefined;
+  if (!fonts?.ready) return;
+  void fonts.ready
+    .then(() => {
+      if (!isAlive()) return;
+      // Setting fontFamily (even to the same value) forces xterm to re-measure.
+      xterm.options.fontFamily = fontFamily();
+      try {
+        fit.fit();
+      } catch {
+        // A pane still laying out measures 0x0; its next resize refits.
+      }
+    })
+    .catch(() => {
+      // `document.fonts.ready` does not reject in practice; swallow to be safe.
+    });
+}

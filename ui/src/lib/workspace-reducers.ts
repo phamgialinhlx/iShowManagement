@@ -65,6 +65,7 @@ export type NewSession = {
   Pick<
     SessionV3,
     | "resume"
+    | "cwd"
     | "fullscreen"
     | "skipPermissions"
     | "modelProfile"

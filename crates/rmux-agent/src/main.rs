@@ -12,6 +12,7 @@
 use std::process::ExitCode;
 
 use rmux_agent::{Hello, alias, attach, daemon, status};
+use rmux_agent::status::StatusWrite;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -200,13 +201,28 @@ async fn main() -> ExitCode {
             }
         }
 
+        // Publish one agent-agnostic status fact into `~/.rmux/status`. This is
+        // the writer every non-Claude agent's hook calls — pi's status extension
+        // shells out to it on each lifecycle event, a Codex `Stop` hook could
+        // too. Claude needs none of this: it publishes its own session files,
+        // which `watch-status` already reads. Keeping the write in one Rust
+        // place means the file's mode, name and schema have a single owner
+        // rather than a copy per hook language.
+        "hook" => match run_hook(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("rmux-agent: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
         "version" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
 
         _ => {
-            eprintln!("usage: rmux-agent <attach|alias|daemon|kill|list|setenv|watch-status|version> [--session NAME] [--cwd DIR]");
+            eprintln!("usage: rmux-agent <attach|alias|daemon|hook|kill|list|setenv|watch-status|version> [--session NAME] [--cwd DIR]");
             ExitCode::FAILURE
         }
     }
@@ -248,6 +264,52 @@ fn parse_attach(args: &[String]) -> anyhow::Result<Hello> {
     Ok(hello)
 }
 
+
+/// Parse a `hook` invocation and publish it into `~/.rmux/status`.
+///
+/// ```text
+/// rmux-agent hook --agent pi --session <id> --status busy [--cwd DIR] [--pid N]
+/// ```
+///
+/// `--session`, `--agent` and `--cwd` fall back to the `RMUX_STATUS_KEY`,
+/// `RMUX_STATUS_AGENT` and `RMUX_STATUS_CWD` environment variables, so a hook can
+/// be wired with a fixed command line and let the spawn environment carry the
+/// per-session identity — which is exactly how the pi extension is installed.
+/// Only `--status` is ever truly required.
+fn run_hook(args: &[String]) -> anyhow::Result<()> {
+    let mut agent = std::env::var("RMUX_STATUS_AGENT").ok();
+    let mut session = std::env::var("RMUX_STATUS_KEY").ok();
+    let mut cwd = std::env::var("RMUX_STATUS_CWD").ok();
+    let mut status: Option<String> = None;
+    let mut pid: Option<u32> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        let mut value = || -> anyhow::Result<String> {
+            i += 1;
+            args.get(i).cloned().ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))
+        };
+        match flag {
+            "--agent" => agent = Some(value()?),
+            "--session" => session = Some(value()?),
+            "--cwd" => cwd = Some(value()?),
+            "--status" => status = Some(value()?),
+            "--pid" => pid = Some(value()?.parse()?),
+            other => anyhow::bail!("unknown option {other}"),
+        }
+        i += 1;
+    }
+
+    let status = status.ok_or_else(|| anyhow::anyhow!("hook needs --status"))?;
+    let session = session.filter(|s| !s.is_empty()).ok_or_else(|| {
+        anyhow::anyhow!("hook needs --session or RMUX_STATUS_KEY")
+    })?;
+    let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| "agent".to_owned());
+    let cwd = cwd.filter(|c| !c.is_empty());
+
+    status::write_status(&StatusWrite { agent, session_id: session, cwd, pid, status })
+}
 
 /// Name the panic on the way down.
 ///

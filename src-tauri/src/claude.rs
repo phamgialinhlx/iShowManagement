@@ -99,6 +99,20 @@ pub async fn claude_list_all_sessions(
     ClaudeSession::list_all(resolved.as_ref()).await.map_err(err)
 }
 
+/// Every pi conversation on a host, newest first.
+///
+/// The pi twin of [`claude_list_all_sessions`]: the folder each one belongs to
+/// comes back on `cwd`, read from the transcript's own header, so a resume
+/// picker does not require the operator to have found the directory first.
+#[tauri::command]
+pub async fn pi_list_all_sessions(
+    store: State<'_, ClaudeStore>,
+    target: TargetRef,
+) -> Result<Vec<rmux_claude::pi::Conversation>, String> {
+    let resolved = resolve(store.inner(), &target).await?;
+    ClaudeSession::pi_list_all(resolved.as_ref()).await.map_err(err)
+}
+
 /// Read a conversation back as text.
 ///
 /// Separate from the live session on purpose: this reads the transcript on disk,
@@ -123,6 +137,52 @@ pub async fn claude_transcript(
 
     let out = resolved.exec(&spec).await.map_err(err)?;
     Ok(rmux_claude::transcript::parse(out.stdout.as_bytes(), true))
+}
+
+/// Read a pi conversation back as text.
+///
+/// The pi twin of [`claude_transcript`]: same shape, same "read the tail on the
+/// machine that owns the disk" path, but the script and parser are pi's, because
+/// pi keeps its transcripts in a cwd-encoded directory and names each file
+/// `<ISO-timestamp>_<id>.jsonl`. With no `session`, the newest conversation in
+/// `cwd` is read — "the latest", which is what you want having just talked to it.
+#[tauri::command]
+pub async fn pi_transcript(
+    store: State<'_, ClaudeStore>,
+    target: TargetRef,
+    cwd: String,
+    session: Option<String>,
+    tail_bytes: Option<u64>,
+) -> Result<rmux_claude::transcript::Transcript, String> {
+    let resolved = resolve(store.inner(), &target).await?;
+    let tail = tail_bytes.unwrap_or(rmux_claude::transcript::DEFAULT_TAIL_BYTES);
+
+    let script = rmux_claude::pi::transcript_script(&cwd, session.as_deref(), tail);
+    let spec = rmux_transport::CommandSpec::new("sh")
+        .arg("-c")
+        .arg(script)
+        .tty(rmux_transport::Tty::None);
+
+    let out = resolved.exec(&spec).await.map_err(err)?;
+    let bytes = out.stdout.as_bytes();
+
+    // Split the NUL-framed `id\0size\0` header off the front — the same framing
+    // `pi::transcript_script` emits, mirroring `transcript::parse` — then hand the
+    // body to pi's lenient parser. `pi::parse` leaves `total_bytes`/`read_bytes`
+    // zero, so they are filled here from the header size and the tail read, or the
+    // transcript view's byte counts and "load more" break.
+    let mut parts = bytes.splitn(3, |b| *b == 0);
+    let (_id, size, body) = (parts.next(), parts.next(), parts.next());
+    let (Some(size), Some(body)) = (size, body) else {
+        // No file / empty output: an empty transcript, not an error.
+        return Ok(rmux_claude::transcript::Transcript::default());
+    };
+    let total_bytes = String::from_utf8_lossy(size).trim().parse::<u64>().unwrap_or(0);
+
+    let mut transcript = rmux_claude::pi::parse(body, true);
+    transcript.total_bytes = total_bytes;
+    transcript.read_bytes = body.len() as u64;
+    Ok(transcript)
 }
 
 /// End the agent-hosted Claude session with this name.
@@ -187,7 +247,12 @@ pub async fn claude_start<R: tauri::Runtime>(
 ) -> Result<StartedSession, String> {
     let resolved = resolve(store.inner(), &target).await?;
     let size = TermSize { cols, rows };
-    let rendering = if fullscreen.unwrap_or(false) {
+    // Desktop-launched Claude renders fullscreen by default. `None`/unset means
+    // the operator never configured this session, so it gets the default; only an
+    // explicit `Some(false)` — the INLINE toggle in Session Settings — stays
+    // inline. The bridge is unaffected: it builds its own line from
+    // `Rendering::default()` (still Inline) and never reaches here.
+    let rendering = if fullscreen.unwrap_or(true) {
         rmux_claude::Rendering::Fullscreen
     } else {
         rmux_claude::Rendering::Inline
@@ -266,6 +331,145 @@ pub async fn claude_start<R: tauri::Runtime>(
         )
         .map_err(err)?,
     });
+
+    let id = session.terminal().id().to_owned();
+    store.inner().sessions.lock().insert(id.clone(), Arc::clone(&session));
+
+    stream_claude(Arc::clone(&session), output);
+    Ok(StartedSession { id })
+}
+
+/// Launch `pi` under the agent and stream its screen to the UI.
+///
+/// The pi twin of [`claude_start`]. It reuses the very same [`ClaudeStore`], so
+/// the id-keyed, provider-blind commands — `claude_attach`, `claude_write`,
+/// `claude_send`, `claude_resize`, `claude_stop`, `claude_end_session` — all
+/// operate on the pi session unchanged. What differs is only what pi supplies:
+/// no `Rendering`/`CLAUDE_CODE_*` env (pi has one inline mode), no
+/// `--dangerously-skip-permissions`, no model profile and no Claude account.
+/// pi has no `~/.claude/sessions` status file, so its rail dot is driven by a
+/// hook extension instead: `pi_start` installs it on the host (best-effort),
+/// sets `RMUX_AGENT_BIN`/`RMUX_STATUS_KEY` on the launch line so pi publishes
+/// `~/.rmux/status/<name>.json`, and starts the same `ensure_watch` stream that
+/// carries it up to the rail.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn pi_start<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: State<'_, ClaudeStore>,
+    status_store: State<'_, crate::claude_status::ClaudeStatusStore>,
+    target: TargetRef,
+    cwd: Option<String>,
+    // Carries the id of a pi conversation to continue (`--session-id`); `None`
+    // starts fresh. Accepted now so Phase 2 needs no signature change.
+    resume: Option<String>,
+    // The daemon session name on the target, e.g. `pi-<id>`. The daemon already
+    // classifies `pi-`-prefixed sessions, and `claude_end_session` kills by this
+    // name — so closing the pane kills the work with no pi-specific kill needed.
+    session_name: Option<String>,
+    cols: u16,
+    rows: u16,
+    output: Channel<Response>,
+) -> Result<StartedSession, String> {
+    let resolved = resolve(store.inner(), &target).await?;
+    let size = TermSize { cols, rows };
+
+    // pi runs under the agent so the conversation outlives rmux and reattaches
+    // by name. Without the agent there is no persistent-shell host for it — pi
+    // has no non-agent launch path — so this fails loudly with a reason rather
+    // than silently starting something that cannot survive a disconnect. The
+    // agent is unavailable on Windows (it is a linux-musl binary).
+    let agent_available = resolved.platform() != Some(rmux_transport::Platform::Windows);
+    let Some(name) = session_name.as_ref().filter(|_| agent_available) else {
+        return Err(
+            "pi runs under the rmux agent, which is not available on this host yet — start pi \
+             on a Linux host, or open a plain terminal there instead"
+                .to_owned(),
+        );
+    };
+
+    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+
+    // Push status for this host from now on. pi has no `~/.claude/sessions`
+    // file, but its hook writes `~/.rmux/status/<key>.json`, which the agent's
+    // `watch-status` stream already carries — so a pi-only host has nothing
+    // streaming that directory until this runs. Idempotent per target.
+    crate::claude_status::ensure_watch(
+        &app,
+        status_store.inner(),
+        Arc::clone(&resolved),
+        installed.program.clone(),
+    );
+
+    // Give this pi session the status signal Claude gets for free. Install the
+    // hook extension on the host (idempotent, **best-effort**) so pi publishes
+    // `working | idle`; a host that cannot take it still runs pi, only the rail
+    // dot stays dark — so a failure warns and never blocks the launch, mirroring
+    // the bridge's own install. The extension source is base64'd and `base64 -d`
+    // decoded into the file: it is TS text with newlines, and base64's alphabet
+    // carries nothing the shell reacts to. `$HOME` is resolved to an absolute
+    // path first — never shell-quoted as a literal — then the destination is
+    // quoted.
+    let install: Result<(), String> = async {
+        use base64::Engine as _;
+
+        let home_spec = rmux_transport::CommandSpec::new("sh")
+            .arg("-c")
+            .arg(rmux_agent::provision::home_script())
+            .tty(rmux_transport::Tty::None);
+        let home = resolved.exec(&home_spec).await.map_err(err)?.stdout.trim().to_owned();
+        if home.is_empty() {
+            return Err("the host did not report a home directory".to_owned());
+        }
+
+        let dir = format!("{}/.pi/agent/extensions", home.trim_end_matches('/'));
+        let path = rmux_claude::pi::status_extension_path(&home);
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(rmux_claude::pi::status_extension_source());
+        let script = format!(
+            "set -e\nmkdir -p {}\nprintf %s '{}' | base64 -d > {}",
+            rmux_transport::shell_quote(&dir),
+            b64,
+            rmux_transport::shell_quote(&path),
+        );
+        let spec = rmux_transport::CommandSpec::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .tty(rmux_transport::Tty::None);
+        resolved.exec(&spec).await.map_err(err)?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = install {
+        tracing::warn!(error = %e, "could not install pi status extension");
+    }
+
+    // Fresh session: no initial prompt. `session_name` labels a new conversation
+    // and `resume` continues an existing one — argument order per `pi::launch_line`.
+    // Prefix two env assignments onto the **shell line** (never `CommandSpec::env`):
+    // under the agent the daemon spawns the shell with its own environment, so env
+    // on the attach command never arrives. `RMUX_AGENT_BIN` points the hook at the
+    // host agent's `rmux-agent hook`; `RMUX_STATUS_KEY` is the daemon session name,
+    // so the status file is `~/.rmux/status/<name>.json`, streamed with
+    // `sessionId == name` — exactly what the rail matches on. Neither is a secret
+    // (a path and a session name), so the shell line is the right place for them.
+    let line = rmux_claude::pi::launch_line(None, session_name.as_deref(), resume.as_deref());
+    let line = format!(
+        "RMUX_AGENT_BIN={} RMUX_STATUS_KEY={} {}",
+        rmux_transport::shell_quote(&installed.program),
+        rmux_transport::shell_quote(name),
+        line,
+    );
+
+    // The pi line stands alone as the `--login-command` value; the agent spawns
+    // it through `CommandSpec::login_shell()` (`-l -i`), so no shell is
+    // hand-built and no env travels on argv.
+    let mut spec = installed.attach_spec(name, cwd.as_deref(), cols, rows);
+    spec = spec.arg("--login-command").arg(line);
+
+    let session =
+        Arc::new(ClaudeSession::start_with_spec(resolved.as_ref(), spec, cwd.as_deref(), size)
+            .map_err(err)?);
 
     let id = session.terminal().id().to_owned();
     store.inner().sessions.lock().insert(id.clone(), Arc::clone(&session));

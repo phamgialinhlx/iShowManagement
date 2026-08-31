@@ -172,6 +172,7 @@ type State = Core & {
         SessionV3,
         | "name"
         | "resume"
+        | "cwd"
         | "fullscreen"
         | "skipPermissions"
         | "modelProfile"
@@ -302,10 +303,14 @@ let seq = 0;
 /**
  * Mint a session id. **The prefix is load-bearing** (see `reattachName`): a
  * Claude id must be *bare* (the `claude-` prefix is added at reattach), while a
- * terminal id must carry its `term-` prefix, because it is used verbatim.
+ * terminal id must carry its `term-` prefix, because it is used verbatim. A pi
+ * id is bare like Claude's — `reattachName` adds the `pi-` prefix — so the stem
+ * is `pisession` (recognizable in logs, but crucially **not** starting with
+ * `pi-`, or reattach would produce `pi-pi-…` and the daemon's prefix classifier
+ * would see a malformed name).
  */
 const mintSessionId = (kind: SessionKind): string =>
-  `${kind === "claude" ? "session" : "term"}-${Date.now().toString(36)}-${++seq}`;
+  `${kind === "claude" ? "session" : kind === "pi" ? "pisession" : "term"}-${Date.now().toString(36)}-${++seq}`;
 
 const restored = load();
 
@@ -385,10 +390,18 @@ export const useWorkspace = create<State>((set, get) => ({
   addSession: (projectId, kind, opts) => {
     const id = mintSessionId(kind);
     const project = get().projects.find((p) => p.id === projectId);
-    const name = opts?.name?.trim() || (kind === "claude" ? (project?.label ?? "claude") : "shell");
+    // A pi session is named after its project like Claude (not "shell"); only a
+    // plain terminal defaults to "shell".
+    const name = opts?.name?.trim() || (kind === "terminal" ? "shell" : (project?.label ?? kind));
+    // Claude renders fullscreen by default (the native TUI); the per-session
+    // INLINE toggle overrides it and persists with the session. Seeded here so a
+    // brand-new session carries an explicit value while existing persisted
+    // sessions keep whatever they already have. `...opts` still wins if a caller
+    // passes `fullscreen` explicitly.
+    const defaults = kind === "claude" ? { fullscreen: true } : {};
     // `opts` first, then the authoritative fields — so a computed `name` and the
     // real id/kind/projectId win over anything the caller passed loosely.
-    const ws = rAddSession(coreOf(get()), { ...opts, id, projectId, kind, name });
+    const ws = rAddSession(coreOf(get()), { ...defaults, ...opts, id, projectId, kind, name });
     set({ ...ws, runtime: { ...get().runtime, [id]: { ...IDLE } } });
     schedulePersist(get);
     return id;

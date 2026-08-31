@@ -4,6 +4,7 @@ import { useWorkspace } from "../lib/workspace";
 import { isFocusDeck, layoutPanes } from "../lib/grid";
 import { basename, reattachName, type PaneRef, type SessionV3 } from "../lib/workspace-model";
 import { ClaudeSessionPane } from "./ClaudeSessionPane";
+import { PiSessionPane } from "./PiSessionPane";
 import { TerminalView } from "./Terminal";
 import { HostPanel } from "./HostPanel";
 import { FilesPane } from "./FilesPane";
@@ -37,6 +38,10 @@ function SessionPane({ session }: { session: SessionV3 }) {
 
   if (session.kind === "claude") {
     return <ClaudeSessionPane session={session} />;
+  }
+
+  if (session.kind === "pi") {
+    return <PiSessionPane session={session} />;
   }
 
   // A shell says nothing about which session or machine it is — the prompt is

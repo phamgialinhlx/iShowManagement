@@ -221,6 +221,18 @@ textarea,
   background: #2e2e2e;
 }
 
+/* On the alternate screen (Claude fullscreen, or any full-screen TUI) there is
+ * no scrollback, so xterm's scrollbar is a dead track — the program scrolls its
+ * own content. Hide it there. Inline mode keeps the bar above, because there the
+ * scrollback is real. `ClaudePanel` toggles `.alt-buffer` from xterm's actual
+ * buffer type, so this follows the mode even when `/tui` switches it live. */
+.alt-buffer .xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
+.alt-buffer .xterm-viewport {
+  scrollbar-width: none;
+}
+
 /* ------------------------------------------------------------- typography */
 
 .display {

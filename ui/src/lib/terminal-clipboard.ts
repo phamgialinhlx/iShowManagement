@@ -74,6 +74,14 @@ async function write(text: string): Promise<void> {
   if (!copied) throw new Error("the clipboard rejected the write");
 }
 
+/** Decode an OSC 52 base64 payload as UTF-8 text. */
+function decodeBase64Utf8(b64: string): string {
+  const bin = atob(b64.trim());
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
 /** Read the terminal's buffer as lines of text. */
 function bufferText(xterm: Xterm, fromScrollback: boolean): string {
   const buffer = xterm.buffer.active;
@@ -219,7 +227,37 @@ export function attachClipboard(xterm: Xterm): Disposer {
     return true;
   });
 
-  return attachFocusFallback(xterm, isMac);
+  // **OSC 52: land a program's own copy in the clipboard.** In fullscreen Claude
+  // captures the mouse and does its *own* selection, then copies it by emitting
+  // `ESC ] 52 ; c ; <base64> BEL` — over ssh, because it cannot reach your
+  // clipboard directly. Without a handler that byte stream is dropped, so a
+  // drag-select in fullscreen highlighted inside Claude and copied *nothing*;
+  // Select mode was the only way, because it hands selection back to xterm.
+  // Registering the handler makes the ordinary fullscreen drag-copy work.
+  //
+  // **Write only.** A `?` payload is a *read* request — the remote asking to be
+  // handed your clipboard — and is refused (consumed, never answered), because a
+  // remote host reading the local clipboard is an exfiltration path, not a
+  // feature.
+  const osc52 = xterm.parser.registerOscHandler(52, (data) => {
+    const sep = data.indexOf(";");
+    const payload = sep >= 0 ? data.slice(sep + 1) : data;
+    if (payload === "" || payload === "?") return true; // read/empty: consume, do nothing
+    let text: string;
+    try {
+      text = decodeBase64Utf8(payload);
+    } catch {
+      return true; // malformed base64: consume so it does not print as garbage
+    }
+    void write(text).catch(() => {});
+    return true;
+  });
+
+  const disposeFocus = attachFocusFallback(xterm, isMac);
+  return () => {
+    osc52.dispose();
+    disposeFocus();
+  };
 }
 
 /** Detaches whatever `attachClipboard` installed outside xterm itself. */

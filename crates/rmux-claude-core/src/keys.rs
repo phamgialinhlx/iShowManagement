@@ -43,6 +43,45 @@ pub fn send_message(text: &str) -> Vec<Vec<u8>> {
     vec![body.into_bytes(), b"\r".to_vec()]
 }
 
+/// A message split into the writes needed to send it to **pi**.
+///
+/// Single-line is byte-identical to what already works over the bridge: the text,
+/// then Enter. Only multi-line differs, and it must — Claude's `\\\r` line-break
+/// escape (see `send_message`) is Claude's composer alone; pi renders the
+/// backslash literally and submits at the first `\r`, so a Claude-encoded
+/// multi-line message reaches pi mangled and cut off at line one.
+///
+/// The multi-line body is wrapped in a **bracketed paste** (`ESC[200~` … `ESC[201~`)
+/// with literal newlines, so pi's composer ingests every line verbatim as pasted
+/// content rather than acting on the embedded Enter. The trailing `\r` submits, as
+/// a separate write — the same two-write discipline (and `SUBMIT_SETTLE` gap) the
+/// caller already applies, so the paste is fully ingested before the return is read
+/// as "submit" instead of as more pasted content.
+///
+/// This does not depend on knowing pi's soft-newline chord, which is why it is the
+/// safe default — but it *does* assume pi honours bracketed paste, which nothing in
+/// this repo pins. It **must be live-verified** against a real `pi --tui-mode
+/// regular` session: if pi does not accept bracketed paste, the multi-line branch
+/// is where the real mechanism (a literal `\n`, or a pi-specific chord) belongs,
+/// and only observing real pi can decide it.
+pub fn send_message_pi(text: &str) -> Vec<Vec<u8>> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    // Single-line: exactly what pi already accepts today. Kept byte-identical so
+    // the common case cannot regress.
+    if !text.contains('\n') {
+        return vec![text.as_bytes().to_vec(), b"\r".to_vec()];
+    }
+
+    let mut paste = Vec::new();
+    paste.extend_from_slice(b"\x1b[200~");
+    paste.extend_from_slice(text.as_bytes()); // literal newlines, unescaped
+    paste.extend_from_slice(b"\x1b[201~");
+    vec![paste, b"\r".to_vec()]
+}
+
 /// How long to wait between the text and the Enter that submits it.
 ///
 /// The composer needs a moment to finish processing a paste before it will treat
@@ -110,5 +149,38 @@ mod tests {
     #[test]
     fn interrupt_is_escape() {
         assert_eq!(interrupt(), b"\x1b");
+    }
+
+    #[test]
+    fn a_single_line_pi_message_is_identical_to_the_claude_encoding() {
+        // The common case must not regress: single-line already works over the
+        // bridge, so pi's encoder has to produce exactly what it produces today.
+        let pi = send_message_pi("run the tests");
+        assert_eq!(pi, send_message("run the tests"));
+        assert_eq!(pi, vec![b"run the tests".to_vec(), b"\r".to_vec()]);
+    }
+
+    #[test]
+    fn an_empty_pi_message_sends_nothing() {
+        assert!(send_message_pi("").is_empty());
+    }
+
+    #[test]
+    fn a_multiline_pi_message_is_a_bracketed_paste_then_enter() {
+        let writes = send_message_pi("first line\nsecond line");
+
+        assert_eq!(writes.len(), 2, "the paste and the submit must be separate writes");
+        // The body is one bracketed-paste chunk with the newline preserved
+        // literally — never Claude's backslash-CR escape, which pi renders raw.
+        assert!(writes[0].starts_with(b"\x1b[200~"), "must open bracketed paste");
+        assert!(writes[0].ends_with(b"\x1b[201~"), "must close bracketed paste");
+        assert!(writes[0].contains(&b'\n'), "the newline must survive verbatim");
+        assert!(
+            !writes[0].windows(2).any(|w| w == b"\\\r"),
+            "pi must NOT get Claude's backslash-CR line break",
+        );
+        // The submit is its own write, so the paste is ingested first.
+        assert_eq!(writes[1], b"\r");
+        assert!(!writes[0].ends_with(b"\r"), "the paste chunk must not carry the submit");
     }
 }

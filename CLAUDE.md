@@ -1020,27 +1020,58 @@ stopped working. These are not aspirations; each one is a rule with a test.
 
 ## Claude rendering — the one that caused the most grief
 
-**Claude runs inline, never fullscreen** (`Rendering` in `crates/rmux-claude/src/lib.rs`).
-Fullscreen moves to the alternate screen and takes the mouse with SGR tracking, and that one
-fact produced three separate bug reports: text could not be selected (a drag goes *to Claude*,
-so there is never a selection to copy), scrolling lagged (the wheel is a mouse report, so it
-round-trips instead of moving xterm's scrollback), and every mouse move was another round trip.
+**The agent panes now default to fullscreen; inline is the opt-out** — `Rendering` in
+`crates/rmux-claude-core/src/launch.rs`, defaulted per-session (`workspace.ts` seeds
+`fullscreen: true` for a new Claude session, `claude.rs` maps an unset value to
+`Rendering::Fullscreen`). **This reverses the original decision, on purpose.** Inline lets the
+composer scroll away with the history — *"the chat bar doesn't follow me when I scroll up"* —
+and a pinned composer is what the operator asked for. Inline stays available per session
+(Session Settings › CLAUDE RENDERING) for a slow link, but it is no longer the default.
 
-Measured on a real host: forcing fullscreen emits `?1049h ?1000h ?1002h ?1003h ?1006h`; with
-`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 CLAUDE_CODE_DISABLE_MOUSE=1`, none of them. Those
-override an explicit fullscreen request *and* the saved `tui` preference — which matters,
-because `/tui fullscreen` persists, so anyone who ran it once carries the problem forever.
-
-- The prefix goes on the **shell line** (`launch_line`), not `CommandSpec::env`: under the
-  agent the shell is spawned by the *daemon*, which has its own environment, so env attached
+- **Fullscreen must be *forced*, not merely permitted — and this was the bug that made
+  "fullscreen" do nothing.** `Rendering::Fullscreen` first emitted an *empty* prefix, on the
+  theory that not-disabling the alternate screen was enough. It is not: with nothing set, Claude
+  Code falls back to its **own** saved `tui` setting, and on a host where none is saved the
+  default is the *classic* (inline) renderer. So on exactly the remote hosts rmux targets,
+  flipping the toggle changed nothing — measured, reported as "nothing changed, scrolling still
+  the same." The fix is `CLAUDE_CODE_NO_FLICKER=1` (the documented env equivalent of
+  `/tui fullscreen`, per `code.claude.com/docs/en/fullscreen.md`), which forces the
+  alternate-screen renderer regardless of the host's config. Inline forces the other direction
+  with `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 CLAUDE_CODE_DISABLE_MOUSE=1`. Neither mode leaves
+  the choice to the host.
+- **The mouse stays *on* in fullscreen (no `DISABLE_MOUSE`), because Claude Code handles the
+  costs in-app rather than losing them.** A drag selects text inside Claude and **auto-copies**
+  on release by emitting **OSC 52** over ssh — and rmux must *handle* that sequence or the copy
+  goes nowhere. `attachClipboard` (`ui/src/lib/terminal-clipboard.ts`) registers an OSC 52
+  handler that base64-decodes the payload into the clipboard. **Write only:** a `?` payload is a
+  *read* request — the remote asking to be handed the local clipboard — and is refused, because
+  a host reading your clipboard is exfiltration, not a feature. Without this handler a fullscreen
+  drag-copy highlighted inside Claude and copied *nothing*, and Select mode
+  (`ui/src/lib/mouse-modes.ts`) — which hands selection back to xterm — was the only way to copy;
+  it stays as a fallback for a one-off native selection. Wheel and
+  `PgUp`/`PgDn`/`Ctrl+Home`/`Ctrl+End` scroll the conversation *inside* Claude, so the composer
+  stays pinned; the wheel round-trips to the host, so scrolling a remote session lags — inherent
+  to alt-screen over ssh, and the price of the pinned composer. What is genuinely lost is the
+  terminal's own `Cmd-F` over the buffer (the conversation lives on the alternate screen, not
+  xterm's scrollback) — Claude's `Ctrl-O` transcript search replaces it, and `[` in transcript
+  mode writes the conversation back into native scrollback on demand.
+- **Reattach is the open gap.** The daemon replays its raw byte scrollback verbatim
+  (`rmux-term`), and a replay that contains a mid-stream `?1049h` does **not** reconstruct the
+  screen — so a reattached fullscreen pane can come back garbled. The fix is the orca approach:
+  daemon-side DECSET/`?1049` **mode-mirroring** (the Rust twin of `mouse-modes.ts`) plus a
+  coherent reattach that reissues the current mode set and screen instead of the raw toggles.
+  That is the next slice; until it lands, defaulting to fullscreen ships this known limitation.
+- **orca does not force the mode at all** — it runs whatever the agent defaults to and makes its
+  *terminal* handle a fullscreen TUI well (wheel→line-report translation, mode mirroring,
+  scrollback checkpointing). That works because its users are on a Claude new enough to default
+  fullscreen; rmux cannot assume the host's Claude is, so it forces the env instead.
+- The rendering env goes on the **shell line** (`launch_line`), not `CommandSpec::env`: under
+  the agent the shell is spawned by the *daemon*, which has its own environment, so env attached
   to the attach command never arrives.
-- Every xterm host must load `WebglAddon`. The Claude pane shipped without it, and that was
-  the rest of the lag.
-- Inline costs only fullscreen's in-TUI mouse scrolling, its flat memory, and `/focus`.
-  A native chat UI over `stream-json` was considered and **rejected**: ~50 slash commands are
+- A native chat UI over `stream-json` was considered and **rejected**: ~50 slash commands are
   interactive-terminal-only (`/compact`, `/context`, `/resume`, `/permissions`, `/plan`, …),
-  so it would trade real capability for scrolling. Keeping the real TUI is what guarantees
-  parity — it *is* the CLI.
+  so it would trade real capability for a rendering. Keeping the real TUI is what guarantees
+  parity — it *is* the CLI, and running it fullscreen is running it as it was built to run.
 
 ## The decision card is gone, and that is the right shape
 
@@ -1069,6 +1100,26 @@ anything else tempted to reimplement part of the TUI.
   writes `status ∈ busy|shell|idle|waiting` to `~/.claude/sessions/<pid>.json`,
   which `rmux-agent watch-status` streams — a fact reported by Claude rather than
   inferred from its pixels.
+- **Every *other* agent gets that same authoritative status through a hook, not a
+  scrape** (`status.rs`). Claude publishes its own session file; nothing else
+  does, so pi (and Codex tomorrow) reported `Unknown` in both the rail and the
+  bridge's `sessionStatus` — the one thing the rail exists not to do. The fix is
+  an agent-agnostic `~/.rmux/status/<id>.json`, and both `snapshot()` (the
+  bridge's `listSessions`) and `watch-status` (the rail) now merge it beside the
+  Claude native files — **each source with its own watcher and `known` map**, or
+  one would cross-report the other's files as vanished, and the Claude file
+  winning any `sessionId` collision because its `busy|shell|idle|waiting` is finer
+  than a hook's. The writer is one Rust function, `rmux-agent hook` — `0700` dir,
+  `0600` file, `gone` *erases* the file so the stream's own vanish path announces
+  the end once — because the schema must have a single owner, not a copy per hook
+  language. pi's hook is a bundled extension (`rmux-claude-core/assets/pi-status.ts`,
+  installed idempotently into `~/.pi/agent/extensions/` on spawn) that shells out
+  to `rmux-agent hook` on `session_start`/`agent_start`/`turn_start`/
+  `agent_settled`/`session_shutdown`; it keys the file by pi's **own** conversation
+  id, so `pi_conversations` flags it `running` and `live_sessions` correlates on
+  the pid — both verified against real pi 0.84.2 on a host. This is orca's
+  agent-hook idea, and the same rule stands: **observe, publish a fact, never
+  reimplement the TUI.**
 
 The rule this leaves behind: **rmux may observe the TUI, and must not
 reimplement it.** Reading the screen to say *something is happening over there*
@@ -1425,6 +1476,55 @@ workspace reuses the cache. Tauri's build script fails the same way, naming a
 `cargo clean -p <crate>` for the affected packages is the fix; nothing about the
 source is wrong, and reading those failures as real bugs costs an afternoon.
 
+## The mother session plans; sub-agents execute
+
+The main ("mother") session is where the expensive context lives — this whole
+document, the architecture, the plan in flight. Its budget is spent on **thinking**:
+decomposition, design calls that turn on the invariants above, reading a
+sub-agent's answer and deciding the next move. It must not spend that budget on
+the *raw material* of execution — thousand-line file dumps, build logs, a
+live-host `ssh` transcript — because every one of those pushes the reasoning it
+needs out of the window. Execution is **delegated**, its tool output stays in the
+sub-agent's context, and the mother receives a *conclusion*.
+
+- **The mother does** planning, decomposition into slices with acceptance
+  criteria, the architectural calls, reviewing results, integrating, and deciding.
+  It edits `CLAUDE.md` and the plan itself. It reaches for a tool directly only for
+  a single cheap fact it already knows the location of; anything that means reading
+  across files or running a build gets delegated.
+- **A sub-agent does** one well-scoped slice — write the code for X, run the build
+  and report pass/fail, read across N files and return the finding, verify on a
+  host — and reports a **summary, not its scrollback**.
+
+**A fresh sub-agent has this document but not the conversation**, and in an
+invariant-dense codebase that is the whole risk: it will break a rule it was never
+told applies to its slice. So every delegation is a **contract**:
+
+1. **The task**, scoped so "done" is unambiguous.
+2. **The invariants it must not break** — the *specific* ones its slice can
+   violate, quoted from here. Do not make it re-derive them from the whole file;
+   name them.
+3. **The verification gate** — the exact command(s) that prove the slice, and the
+   standing rule that it reports what it *observed*, never "should work." The
+   "verify the artefact" convention below binds the agent too, and the gate is how.
+
+- **Choose the executor by how much judgment the slice needs, and default to the
+  cheap one.** A mechanical, fully-specified change → a fresh `general-purpose`
+  agent on a cheaper model: it starts empty, so it is the token-efficient choice,
+  and the brief carries everything it needs. Reserve `fork` (which inherits the
+  mother's whole context, and re-sends it) for a slice whose correctness genuinely
+  turns on the conversation so far. When unsure, spell the context into the brief
+  rather than pay to clone it.
+- **Independent slices run in parallel; a dependent chain does not.** Fan out the
+  reads and the isolated edits in one batch; pipeline only the parts that build on
+  each other.
+- **A sub-agent executes directly — it does not re-delegate.** The plan-then-
+  delegate shape is the mother's alone. A delegated slice is finished by the agent
+  holding it, or the tree never bottoms out.
+- **Integration is the mother's, and so is the last word on "verified."** A
+  sub-agent reporting green is *evidence*, not proof; the mother re-runs the gate
+  after integrating, because two independently-green slices can still conflict.
+
 ## Conventions
 
 - **Never report something as ready before verifying the artefact itself.** Starting a build
@@ -1529,6 +1629,25 @@ source is wrong, and reading those failures as real bugs costs an afternoon.
 - **Every xterm host must load `WebglAddon`.** Without it xterm falls back to the DOM
   renderer, and scrolling or dragging over a constantly-redrawing TUI is visibly slow. The
   Claude pane shipped without it and that was the lag.
+- **A monospace terminal font must bundle its bold *and* italic faces, or a coding-agent
+  TUI renders garbled.** `fonts.css` imported only the *upright* mono weights (IBM Plex Mono
+  `300/400/500/600`, no `700`, no italic), so xterm's bold and italic — which a Claude/pi TUI
+  emits constantly for headings, emphasis and struck-through plan edits — were *synthesised*
+  by the browser. Faux-italic skews glyphs past their advance box and faux-bold thickens them,
+  both bleeding into neighbouring cells, so styled runs overlapped and ate their own spaces
+  while plain paragraphs stayed clean — the exact "TUI display is way too stupid" report. The
+  real faces have true monospace metrics; xterm asks for `400/700 × upright/italic`, so those
+  four (per mono font) are what must exist. `terminal-font-check.ts` proves it in a real xterm:
+  the four faces load, and bold/italic/bold-italic all measure the *same* advance as regular
+  (Fira Code is the exception — it ships no italic upstream, acceptable for a non-default).
+- **A terminal must re-measure once its web font loads.** xterm measures its cell grid at
+  construction, and with `font-display: block` that measurement runs against the *fallback's*
+  advance during the block period; when the real face swaps in wider than the fallback, every
+  glyph is drawn past its cell and the row compresses. `remeasureOnFontLoad` waits on
+  `document.fonts.ready`, then re-sets `fontFamily` (which invalidates xterm's char-size cache,
+  the same re-measure `scaledFontSize` documents) and refits. The gap is per-OS — on macOS
+  Menlo ≈ Plex Mono so it is mild, on Windows/Linux the fallback diverges more — so
+  `terminal-font-check.ts` reports it rather than asserting a machine-specific threshold.
 - **An IME is not simulable, and `ime-check.ts` is the proof.** It fires the composition
   events macOS was *assumed* to fire, passes 4/4 against a real xterm, and the app stayed
   broken for weeks underneath it. Marked text is produced by the input method **above the

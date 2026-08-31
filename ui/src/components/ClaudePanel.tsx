@@ -11,7 +11,7 @@ import { useWorkspace } from "../lib/workspace";
 import { basename } from "../lib/workspace-model";
 import { claudeTheme, gpuRendering } from "../lib/terminal-theme";
 import { readMonoStack } from "../lib/fonts";
-import { scaledFontSize } from "../lib/terminal-font";
+import { scaledFontSize, remeasureOnFontLoad } from "../lib/terminal-font";
 
 /** The size at 100%. Scaled by TEXT SIZE through xterm's own option. */
 const TERM_FONT_BASE = 12;
@@ -128,12 +128,26 @@ export function ClaudePanel({
   modelProfile,
   agentSession,
   headerActions,
+  provider = "claude",
 }: {
   sessionId: string;
   target: TargetRef;
   cwd?: string;
   /** Controls rendered at the right of the status line (e.g. open-transcript). */
   headerActions?: ReactNode;
+  /**
+   * Which agent this pane runs — `"claude"` (default) or `"pi"`.
+   *
+   * The terminal plumbing is provider-blind: input, resize, write, the OSC 52
+   * clipboard handler, the alt-screen scrollbar toggle and the font remeasure
+   * all go through the id-keyed `claude_*` invokes, which act on a pi session
+   * unchanged. Only two things fork on this: a fresh start invokes `pi_start`
+   * rather than `claude_start`, and the two Claude-only polls (`claude_state`
+   * for the rail dot, and the transcript/title read) are skipped — pi exposes
+   * neither, so calling them would error. A pi session's rail dot not updating
+   * is a known, deferred gap, not a reason to invent a pi status call.
+   */
+  provider?: "claude" | "pi";
   /** Conversation to continue instead of starting a new one. */
   resume?: string;
   /** Let Claude use its fullscreen TUI. Off by default — see `Rendering`. */
@@ -330,6 +344,22 @@ export function ClaudePanel({
     xterm.loadAddon(fit);
     xterm.open(host);
 
+    // Re-measure once the mono font actually loads. Constructed above against
+    // whatever face was ready, which during `font-display: block` is the
+    // fallback's metrics — so the agent's bold/italic TUI drew into cells sized
+    // for the wrong font and overlapped. See `remeasureOnFontLoad`.
+    remeasureOnFontLoad(xterm, fit, readMonoStack, () => !disposed);
+
+    // Hide xterm's scrollbar while Claude is on the **alternate screen**
+    // (fullscreen): there is no scrollback there, so the bar is a dead track and
+    // Claude scrolls the conversation itself. In inline mode the conversation
+    // lives in real scrollback, so the bar comes back. Driven by the *actual*
+    // buffer, not the session's config, so it is right during startup and if
+    // `/tui` switches renderer mid-session.
+    const applyBufferClass = (type: "normal" | "alternate") =>
+      host.classList.toggle("alt-buffer", type === "alternate");
+    applyBufferClass(xterm.buffer.active.type);
+    const bufferSub = xterm.buffer.onBufferChange((buf) => applyBufferClass(buf.type));
 
     // The GPU renderer, same as the terminal tab. Without it this pane falls back
     // to the DOM renderer, and scrolling or dragging a selection across Claude's
@@ -418,24 +448,37 @@ export function ClaudePanel({
       const existing = attachTo;
       const request = existing
         ? // Reattach within this run of the app: the view remounted, so re-stream
-          // the session object we already hold.
+          // the session object we already hold. The attach path is id-keyed and
+          // provider-blind — a pi session reattaches through the same call.
           invoke("claude_attach", { id: existing, output }).then(() => ({ id: existing }))
-        : // No live handle. Starting with a stable `sessionName` does not
-          // necessarily start anything: the agent reattaches to the Claude
-          // already running under that name, which is what brings a conversation
-          // back — still working — after rmux has been closed.
-          invoke<{ id: string }>("claude_start", {
-            target,
-            cwd,
-            resume,
-            sessionName: agentSession ?? `claude-${sessionId}`,
-            fullscreen,
-            skipPermissions,
-            modelProfile,
-            cols: xterm.cols,
-            rows: xterm.rows,
-            output,
-          });
+        : provider === "pi"
+          ? // pi has no fullscreen / skipPermissions / modelProfile — its start
+            // takes only the connection, folder, resume, name and initial size.
+            invoke<{ id: string }>("pi_start", {
+              target,
+              cwd,
+              resume,
+              sessionName: agentSession ?? `pi-${sessionId}`,
+              cols: xterm.cols,
+              rows: xterm.rows,
+              output,
+            })
+          : // No live handle. Starting with a stable `sessionName` does not
+            // necessarily start anything: the agent reattaches to the Claude
+            // already running under that name, which is what brings a conversation
+            // back — still working — after rmux has been closed.
+            invoke<{ id: string }>("claude_start", {
+              target,
+              cwd,
+              resume,
+              sessionName: agentSession ?? `claude-${sessionId}`,
+              fullscreen,
+              skipPermissions,
+              modelProfile,
+              cols: xterm.cols,
+              rows: xterm.rows,
+              output,
+            });
 
       void request
         .then((started) => {
@@ -564,6 +607,7 @@ export function ClaudePanel({
       clipboard();
       ime.dispose();
       settle.dispose();
+      bufferSub.dispose();
       window.removeEventListener("storage", onAppearance);
       window.removeEventListener("resize", refit);
       window.removeEventListener("rmux-theme", onTheme);
@@ -601,7 +645,13 @@ export function ClaudePanel({
   };
 
   // Poll the screen. Cheap — it reads an in-memory emulator, no network.
+  //
+  // **Claude only.** pi exposes no `claude_state` (there is no screen-scrape),
+  // so this whole effect stands down for it — calling it would error every
+  // 400ms. A pi session's rail dot therefore does not update in this phase;
+  // that is a known, deferred gap, not a reason to invent a pi status call.
   useEffect(() => {
+    if (provider === "pi") return;
     if (!claudeId) return;
     let cancelled = false;
     let timer: number | undefined;
@@ -666,7 +716,7 @@ export function ClaudePanel({
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [claudeId, sessionId, setStatus]);
+  }, [claudeId, sessionId, setStatus, provider]);
 
   /**
    * Adopt Claude's own title for this conversation.
@@ -679,6 +729,10 @@ export function ClaudePanel({
    * The store ignores this entirely once the session has been renamed by hand.
    */
   useEffect(() => {
+    // **Claude only.** `api.claudeSessions` / `api.claudeTranscript` read
+    // Claude's own `.jsonl`; pi has neither, so this cosmetic poll is skipped
+    // rather than left to error against a transcript that does not exist.
+    if (provider === "pi") return;
     if (!claudeId || !cwd) return;
     let cancelled = false;
 
@@ -704,7 +758,7 @@ export function ClaudePanel({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [claudeId, sessionId, cwd, target, adoptTitle]);
+  }, [claudeId, sessionId, cwd, target, adoptTitle, provider]);
 
   return (
     <div

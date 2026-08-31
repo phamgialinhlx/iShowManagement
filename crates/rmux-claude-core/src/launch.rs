@@ -53,8 +53,19 @@ impl Rendering {
             Rendering::Inline => {
                 "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 CLAUDE_CODE_DISABLE_MOUSE=1 "
             }
-            // Nothing: let Claude use whatever it is configured for.
-            Rendering::Fullscreen => "",
+            // **Force fullscreen, do not merely permit it.** An empty prefix was
+            // wrong: it let Claude fall back to *its own* saved `tui` setting,
+            // and on a host where that is unset the default is the classic
+            // (inline) renderer — so "fullscreen" changed nothing on exactly the
+            // remote hosts rmux targets. `CLAUDE_CODE_NO_FLICKER=1` is the
+            // documented env equivalent of `/tui fullscreen` and forces the
+            // alternate-screen renderer regardless of the host's config, which is
+            // the whole point: the composer pins, Claude scrolls in-app (wheel +
+            // PgUp/PgDn), and a drag-select auto-copies over ssh via OSC 52.
+            // Mouse stays *on* (no `DISABLE_MOUSE`) so wheel-scroll and in-app
+            // selection work; the cost is that native terminal Cmd-F no longer
+            // sees the conversation (Ctrl-O transcript mode replaces it).
+            Rendering::Fullscreen => "CLAUDE_CODE_NO_FLICKER=1 ",
         }
     }
 }
@@ -99,10 +110,17 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_sets_nothing_and_leaves_claude_alone() {
+    fn fullscreen_forces_the_alternate_screen_renderer() {
+        // An empty prefix used to just *permit* fullscreen and defer to Claude's
+        // own `tui` setting — which on a remote host with none defaults to the
+        // classic renderer, so nothing changed. Fullscreen must force it.
         let line = launch_line(None, &[], Rendering::Fullscreen);
-        assert!(!line.contains("CLAUDE_CODE"), "{line}");
-        assert!(line.starts_with("claude"), "{line}");
+        assert!(line.starts_with("CLAUDE_CODE_NO_FLICKER=1 "), "{line}");
+        assert!(line.contains("CLAUDE_CODE_NO_FLICKER=1"), "{line}");
+        // It must NOT disable the alternate screen or the mouse — that would be
+        // inline. Mouse stays on so wheel-scroll and in-app copy work.
+        assert!(!line.contains("DISABLE_ALTERNATE_SCREEN"), "{line}");
+        assert!(!line.contains("DISABLE_MOUSE"), "{line}");
     }
 
     #[test]

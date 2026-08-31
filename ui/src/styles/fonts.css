@@ -19,6 +19,20 @@
 @import "@fontsource/ibm-plex-mono/400.css";
 @import "@fontsource/ibm-plex-mono/500.css";
 @import "@fontsource/ibm-plex-mono/600.css";
+/*
+ * **Bold and italic, for the terminal.** A coding-agent TUI leans on bold and
+ * italic constantly (headings, emphasis, struck-through plan edits), and a
+ * monospace terminal renders every glyph into a fixed cell. With no 700 or
+ * italic face bundled the browser *synthesises* them — faux-bold thickens the
+ * stroke and faux-italic skews the glyph, both wider than the cell xterm
+ * measured from the regular face — so styled runs overlapped and ate their own
+ * spaces while plain paragraphs stayed clean. The real faces have true
+ * monospace metrics; xterm asks for 400/700 × upright/italic, so those four are
+ * exactly what must exist. (`600` above is for UI weight, not the terminal.)
+ */
+@import "@fontsource/ibm-plex-mono/700.css";
+@import "@fontsource/ibm-plex-mono/400-italic.css";
+@import "@fontsource/ibm-plex-mono/700-italic.css";
 
 /*
  * The optional typefaces the operator can pick (ADR-003). Bundled through
@@ -36,12 +50,18 @@
 @import "@fontsource/jetbrains-mono/400.css";
 @import "@fontsource/jetbrains-mono/500.css";
 @import "@fontsource/jetbrains-mono/700.css";
+@import "@fontsource/jetbrains-mono/400-italic.css";
+@import "@fontsource/jetbrains-mono/700-italic.css";
 @import "@fontsource/fira-code/400.css";
 @import "@fontsource/fira-code/500.css";
 @import "@fontsource/fira-code/700.css";
+/* Fira Code ships no italic upstream (it is a ligature face); its italic stays
+ * synthesised, which is acceptable for an optional font nobody defaults to. */
 @import "@fontsource/cascadia-code/400.css";
 @import "@fontsource/cascadia-code/500.css";
 @import "@fontsource/cascadia-code/700.css";
+@import "@fontsource/cascadia-code/400-italic.css";
+@import "@fontsource/cascadia-code/700-italic.css";
 
 @font-face {
   font-family: "SFU Futura";

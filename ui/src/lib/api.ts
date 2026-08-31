@@ -344,6 +344,24 @@ export type ClaudeSessionInfo = {
   folder?: string;
 };
 
+/**
+ * A pi conversation, resumable by id.
+ *
+ * `summary` is often null over SSH — only the transcript header crosses the wire,
+ * so when it is absent a conversation is identified by its `cwd` and `modified`.
+ * `modified` is **milliseconds** (unlike `ClaudeSessionInfo.modified`, which is
+ * unix seconds); `cwd` is load-bearing, because resuming pi requires running in
+ * the conversation's own directory.
+ */
+export type PiConversation = {
+  id: string;
+  cwd: string;
+  summary: string | null;
+  /** Unix milliseconds of last activity. */
+  modified: number;
+  size: number;
+};
+
 /** A non-text file encoded for the webview. */
 export type PreviewContent =
   | { kind: "base64"; bytes: number; base64: string }
@@ -748,8 +766,19 @@ export const api = {
   claudeListAllSessions: (target: TargetRef) =>
     call<ClaudeSessionInfo[]>("claude_list_all_sessions", { target }),
 
+  /** Every pi conversation on a host, newest-first — each carries its own `cwd`,
+   *  which a resume must run in. */
+  piListAllSessions: (target: TargetRef) =>
+    call<PiConversation[]>("pi_list_all_sessions", { target }),
+
   claudeTranscript: (target: TargetRef, folder: string, session?: string, tailBytes?: number) =>
     call<Transcript>("claude_transcript", { target, folder, session, tailBytes }),
+
+  /** A pi conversation as the shared `Transcript`. `cwd` is the conversation's
+   *  directory (pi locates its sessions under a cwd-encoded dir), `session` its
+   *  conversation id (omit for the newest). Same shape as `claude_transcript`. */
+  piTranscript: (target: TargetRef, cwd: string, session?: string, tailBytes?: number) =>
+    call<Transcript>("pi_transcript", { target, cwd, session, tailBytes }),
 
   claudeEndSession: (target: TargetRef, sessionName: string) =>
     call<void>("claude_end_session", { target, sessionName }),
