@@ -828,6 +828,105 @@ async fn conversations(
     Ok(all)
 }
 
+/// Read the tail of a `.jsonl` transcript, always including the *last complete
+/// record* even when it is larger than `tail`.
+///
+/// Returns `(bytes, size, truncated)` ready for `transcript::parse_body` /
+/// `pi::parse`. Both the Claude and pi read paths call this, so the walk-back
+/// lives in one place and the two cannot drift.
+///
+/// The bug this closes: a naive `seek(size - tail)` lands *inside* the last
+/// record when `tail` is smaller than that record. After `parse_body` drops the
+/// leading partial line, nothing complete is left — a non-empty file returns
+/// `{"messages":[],"truncated":true}`, byte-identical to a broken parser. That
+/// cost a day of debugging once already, so the guarantee here is absolute:
+/// **a non-empty file never yields zero records.** A small cap may *under*-deliver
+/// (fewer records than a larger cap), but never nothing.
+///
+/// The fix is a walk-back, not a clamp floor. A single record can exceed any
+/// fixed cap, so the read is allowed to exceed `tail` when — and only when —
+/// that is what it takes to include the last whole record. Still tail-bounded:
+/// the walk only ever extends the window to the nearest record boundary, never
+/// to the whole 228 MB file.
+fn read_tail_including_last_record(
+    path: &std::path::Path,
+    tail: u64,
+) -> std::io::Result<(Vec<u8>, u64, bool)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+
+    // Fits inside the cap: read it whole, nothing was dropped. `read_to_end`
+    // copes if the file shrank since the metadata call — it reads what is there.
+    if size <= tail {
+        let mut buf = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut buf)?;
+        return Ok((buf, size, false));
+    }
+
+    // The window the cap asks for, and the start of the last complete record.
+    let desired_start = size - tail;
+    let last_record_start = find_last_record_start(&mut file, size)?;
+
+    // Never begin *after* the last record starts — that is exactly the case where
+    // dropping the leading partial would leave nothing.
+    let mut start = desired_start.min(last_record_start);
+
+    // When the window begins on a clean record boundary above offset 0,
+    // `parse_body`'s leading-partial-line drop would eat that whole first record.
+    // Back up one byte to the newline that terminates the previous record, so the
+    // drop removes an empty prefix instead and the record survives.
+    if start == last_record_start && start > 0 {
+        start -= 1;
+    }
+
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let truncated = start > 0;
+    Ok((buf, size, truncated))
+}
+
+/// Byte offset of the start of the last complete record (the byte after the last
+/// interior `\n`, ignoring a single trailing newline), or `0` if the whole file
+/// is one record. Scans backward in chunks so a 228 MB transcript is not read
+/// whole to find its final line.
+fn find_last_record_start(file: &mut std::fs::File, size: u64) -> std::io::Result<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if size == 0 {
+        return Ok(0);
+    }
+
+    // Ignore a single trailing newline so the record it terminates is the "last".
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::Start(size - 1))?;
+    let end = if file.read(&mut last)? == 1 && last[0] == b'\n' {
+        size - 1
+    } else {
+        size
+    };
+    if end == 0 {
+        return Ok(0); // the file was a lone "\n"
+    }
+
+    const CHUNK: usize = 64 * 1024;
+    let mut buf = vec![0u8; CHUNK];
+    let mut hi = end; // search the half-open region [0, hi)
+    while hi > 0 {
+        let lo = hi.saturating_sub(CHUNK as u64);
+        let len = (hi - lo) as usize;
+        file.seek(SeekFrom::Start(lo))?;
+        file.read_exact(&mut buf[..len])?;
+        if let Some(idx) = buf[..len].iter().rposition(|b| *b == b'\n') {
+            return Ok(lo + idx as u64 + 1);
+        }
+        hi = lo;
+    }
+    Ok(0)
+}
+
 /// Read one conversation back, tail-bounded.
 fn read_conversation(id: &str, max_bytes: Option<u64>) -> anyhow::Result<(Vec<Message>, bool)> {
     let path = find_transcript(id)?;
@@ -845,19 +944,10 @@ fn read_transcript_at(
 ) -> anyhow::Result<(Vec<Message>, bool)> {
     let tail = max_bytes.unwrap_or(DEFAULT_TAIL_BYTES).clamp(1, MAX_TAIL_BYTES);
 
-    let size = std::fs::metadata(path)?.len();
-    let truncated = size > tail;
-
-    let bytes = if truncated {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::fs::File::open(path)?;
-        file.seek(SeekFrom::Start(size - tail))?;
-        let mut buf = Vec::with_capacity(tail as usize);
-        file.take(tail).read_to_end(&mut buf)?;
-        buf
-    } else {
-        std::fs::read(path)?
-    };
+    // Tail-bounded, but always including the last complete record — a cap smaller
+    // than the final record must still return it, not an empty list. The walk-back
+    // lives in `read_tail_including_last_record`, shared with the pi path.
+    let (bytes, size, truncated) = read_tail_including_last_record(path, tail)?;
 
     // A raw `.jsonl` has no `id\0size\0` header — that framing is emitted only by
     // the SSH tail-script `transcript::parse` expects. Feeding these bytes to
@@ -1025,19 +1115,10 @@ fn read_prefix(path: &std::path::Path, max: usize) -> std::io::Result<Vec<u8>> {
 fn pi_read_conversation(id: &str, max_bytes: Option<u64>) -> anyhow::Result<(Vec<Message>, bool)> {
     let tail = max_bytes.unwrap_or(DEFAULT_TAIL_BYTES).clamp(1, MAX_TAIL_BYTES);
     let path = find_pi_transcript(id)?;
-    let size = std::fs::metadata(&path)?.len();
-    let truncated = size > tail;
 
-    let bytes = if truncated {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::fs::File::open(&path)?;
-        file.seek(SeekFrom::Start(size - tail))?;
-        let mut buf = Vec::with_capacity(tail as usize);
-        file.take(tail).read_to_end(&mut buf)?;
-        buf
-    } else {
-        std::fs::read(&path)?
-    };
+    // Same walk-back as the Claude path — a cap smaller than the last record must
+    // still return that record. Shared helper so the two behaviours cannot drift.
+    let (bytes, _size, truncated) = read_tail_including_last_record(&path, tail)?;
 
     let parsed = pi::parse(&bytes, truncated);
     Ok((
@@ -1675,5 +1756,166 @@ mod tests {
         // allocate it, on a machine doing real work.
         assert_eq!(u64::MAX.clamp(1, MAX_TAIL_BYTES), MAX_TAIL_BYTES);
         assert_eq!(0u64.clamp(1, MAX_TAIL_BYTES), 1);
+    }
+
+    /// A unique temp path per test, cleaned by the caller.
+    fn scratch_transcript(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rmux-bridge-walkback-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("conv.jsonl")
+    }
+
+    #[test]
+    fn a_cap_below_the_last_record_still_returns_it() {
+        // THE REGRESSION. Redstone measured caps of 1024/2048/4096 returning zero
+        // messages on a real transcript whose last record was larger than the cap:
+        // `seek(size - tail)` landed inside that final record, and dropping the
+        // leading partial left nothing. A non-empty file must never return empty.
+        let path = scratch_transcript("last-record");
+        // Two short records, then one record far larger than any small cap.
+        let big = "x".repeat(20_000);
+        let last = format!(
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":"{big}"}}}}"#
+        );
+        let body = format!(
+            "{}\n{}\n{last}\n",
+            r#"{"type":"user","message":{"role":"user","content":"first"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"second"}}"#,
+        );
+        std::fs::write(&path, &body).unwrap();
+
+        // A cap far smaller than the last record.
+        for cap in [1024u64, 2048, 4096] {
+            let (messages, truncated) =
+                read_transcript_at("conv", &path, Some(cap)).unwrap();
+            assert!(
+                !messages.is_empty(),
+                "cap {cap}: a non-empty file returned zero messages — the regression",
+            );
+            assert!(truncated, "cap {cap}: a read below file size must report truncated");
+            // The last record is the big assistant message; it must be the one kept.
+            assert_eq!(
+                messages.last().unwrap().role,
+                Role::Assistant,
+                "cap {cap}: the last complete record was not the one returned",
+            );
+            assert_eq!(messages.last().unwrap().text.len(), big.len());
+        }
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_larger_cap_never_returns_fewer_records_than_a_smaller_one() {
+        // Monotonic-ish sanity. The point is not an exact count — it is that the
+        // small cap is non-empty and never exceeds the large cap.
+        let path = scratch_transcript("monotonic");
+        let mut body = String::new();
+        for i in 0..40 {
+            body.push_str(&format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"msg {i:02}"}}}}"#,
+            ));
+            body.push('\n');
+        }
+        std::fs::write(&path, &body).unwrap();
+        let full = body.len() as u64;
+
+        let (small, small_trunc) = read_transcript_at("conv", &path, Some(200)).unwrap();
+        let (mid, _) = read_transcript_at("conv", &path, Some(full / 2)).unwrap();
+        let (large, large_trunc) = read_transcript_at("conv", &path, Some(full * 4)).unwrap();
+
+        assert!(!small.is_empty(), "small cap must still return at least one record");
+        assert!(small_trunc, "a small cap must report truncated");
+        assert!(!large_trunc, "a cap over the file size must not truncate");
+        assert!(small.len() <= mid.len(), "small must not exceed mid");
+        assert!(mid.len() <= large.len(), "mid must not exceed large");
+        assert_eq!(large.len(), 40, "a cap over the file size returns everything");
+        // Newest record is always present regardless of cap.
+        assert_eq!(small.last().unwrap().text, "msg 39");
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_empty_file_returns_no_messages() {
+        // Empty in, empty out — the guarantee is only *non-empty ⇒ at least one*.
+        let path = scratch_transcript("empty");
+        std::fs::write(&path, b"").unwrap();
+        let (messages, truncated) = read_transcript_at("conv", &path, Some(1024)).unwrap();
+        assert!(messages.is_empty(), "an empty file must return no messages");
+        assert!(!truncated, "an empty file cannot be truncated");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_helper_walks_back_to_a_record_boundary_at_the_byte_level() {
+        // Unit-level proof of the shared helper both paths use: when the cap lands
+        // inside the last record, the returned bytes begin at (or one newline
+        // before) that record's start, and always contain the last record whole.
+        let path = scratch_transcript("bytes");
+        let big = "y".repeat(5_000);
+        let last = format!("{{\"k\":\"{big}\"}}");
+        let body = format!("{{\"k\":\"a\"}}\n{{\"k\":\"b\"}}\n{last}\n");
+        std::fs::write(&path, body.as_bytes()).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+
+        // tail smaller than the last record forces the walk-back.
+        let (bytes, reported_size, truncated) =
+            read_tail_including_last_record(&path, 1024).unwrap();
+        assert_eq!(reported_size, size, "size must be the true file length");
+        assert!(truncated, "a walked-back read below file size is truncated");
+        // The last complete record is present in full, in the raw bytes.
+        assert!(
+            std::str::from_utf8(&bytes).unwrap().contains(&last),
+            "the last complete record was not fully included",
+        );
+        // And a cap at/above file size reads the whole file, untruncated.
+        let (whole, _, whole_trunc) =
+            read_tail_including_last_record(&path, size + 1).unwrap();
+        assert!(!whole_trunc);
+        assert_eq!(whole.len() as u64, size);
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_pi_path_shares_the_walk_back() {
+        // The pi read path calls the same helper, so a small cap on a pi transcript
+        // returns the last record rather than an empty list. Exercised at the helper
+        // level against a pi-shaped `.jsonl` (a header line + record lines), which is
+        // what `pi::parse` consumes; the guarantee is the same: non-empty ⇒ non-empty.
+        let path = scratch_transcript("pi");
+        let big = "z".repeat(10_000);
+        // pi's own record shape (v3): `{"type":"message","message":{…}}`. A header
+        // line first, then two message records, the last one far larger than the cap.
+        let last = format!(
+            r#"{{"type":"message","message":{{"role":"user","content":"{big}"}}}}"#
+        );
+        let body = format!(
+            "{}\n{}\n{last}\n",
+            r#"{"type":"session","id":"pi-conv","cwd":"/tmp"}"#,
+            r#"{"type":"message","message":{"role":"user","content":"hi"}}"#,
+        );
+        std::fs::write(&path, &body).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+
+        let (bytes, reported, truncated) =
+            read_tail_including_last_record(&path, 1024).unwrap();
+        assert_eq!(reported, size);
+        assert!(truncated);
+        let parsed = pi::parse(&bytes, truncated);
+        assert!(
+            !parsed.entries.is_empty(),
+            "pi walk-back returned zero records from a non-empty file",
+        );
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }
