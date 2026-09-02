@@ -4,9 +4,20 @@
 need the rmux source to build against this document — every message, field and
 endpoint is specified below, with examples.
 
-**Status:** the rmux side is **built and verified** end-to-end against the dev
-deployment and a real host. The only thing between this and a working demo is
-[§2.4](#24-the-agent-tools) — the agent tools that call the bridge.
+**Status:** the **rmux side is built and unit-tested**, and validated against a
+real host using a stand-in WebSocket server (see [§5.2](#52-trying-it-without-redstone)) —
+the agent dials out, authenticates by header token, keeps the socket alive, and
+answers every method in [§3](#3-the-protocol) for both Claude and pi.
+
+**The Redstone side is not built yet.** Measured against the current deployment
+(`cowork.chatredstone.com`, 2026-08-31): `GET /api/v1/rmux/config`, `/hosts` and
+`/bridge` all return **404** — there is no endpoint for the agent to dial, and no
+Redstone repo references `rmux`. So **all of [§2](#2-what-redstone-must-build)
+remains to build**: the bridge WebSocket endpoint ([§2.1](#21-the-bridge-endpoint)),
+the host registry and config ([§2.2](#22-host-registry-and-tokens)), and the agent
+tools ([§2.4](#24-the-agent-tools)). [§2.3](#23-sign-in-your-web-login-not-a-token)
+(sign-in) reuses the existing web login and needs only the four confirmations
+listed there.
 
 ---
 
@@ -65,9 +76,11 @@ conversation. (The *live terminal* view in §3.2 is a separate, explicit feature
 
 ## 2. What Redstone must build
 
-§2.1 and §2.2 are the feature. §2.3 is sign-in — **nothing new to build, just
-confirm four things.** §2.4 is what makes it reachable by the agent, and is the
-only thing still outstanding.
+§2.1 and §2.2 are the feature — the bridge WebSocket endpoint and the host
+registry. §2.3 is sign-in — **nothing new to build, just confirm four things.**
+§2.4 is what makes it reachable by the agent. **None of §2 is deployed yet** (the
+current deployment 404s on all of it), so §2.1, §2.2 and §2.4 are all still to
+build.
 
 ### 2.1 The bridge endpoint
 
@@ -457,9 +470,11 @@ grant (optional, §2.3).
 
 ### 5.1 Verified against real hosts
 
-- **Bridge, against the dev deployment** through a public tunnel: `wss` dial,
-  token accepted, one connection with zero reconnects over two minutes (keepalive
-  works), unknown token → HTTP 403 with correct backoff.
+- **Bridge, against a dev deployment** that hosted the endpoint at the time,
+  through a public tunnel: `wss` dial, token accepted, one connection with zero
+  reconnects over two minutes (keepalive works), unknown token → HTTP 403 with
+  correct backoff. *(That endpoint is not on the current deployment — it 404s
+  today; see Status. This run proves the rmux client, not that Redstone hosts it.)*
 - **Terminals, on a real host:** listed, read history, sent a command and read the
   result, attached live, typed into the stream and saw the echo, detached.
 - **pi, on a real host:** pi v0.84.2, a real task run (via an `openai-codex`

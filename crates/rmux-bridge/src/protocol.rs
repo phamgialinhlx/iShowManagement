@@ -143,7 +143,7 @@ pub struct HostInfo {
 /// that host. Nothing here reaches past what the session model already allows —
 /// see the module note on why there is no `exec`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "method", rename_all = "camelCase")]
+#[serde(tag = "method", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Request {
     /// Everything the daemons on this host are running right now.
     ///
@@ -304,7 +304,7 @@ pub enum Request {
 
 /// What the bridge says back.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "result", rename_all = "camelCase")]
+#[serde(tag = "result", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Response {
     Sessions { sessions: Vec<Session> },
     Host { host: HostInfo },
@@ -358,7 +358,7 @@ pub enum ErrorCode {
 
 /// Pushed when the host's state changes, with no request behind it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "event", rename_all = "camelCase")]
+#[serde(tag = "event", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Event {
     /// A session changed status.
     ///
@@ -785,6 +785,72 @@ mod tests {
                 other => panic!("{line} parsed as {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_spec_form_read_maps_camelcase_max_bytes_to_the_field() {
+        // The shipped bug: `#[serde(rename_all = "camelCase")]` renames the
+        // variant *identifiers* but not struct-variant *fields* — that needs
+        // `rename_all_fields`. So `max_bytes` expected the wire key `max_bytes`
+        // while the spec (docs/redstone-bridge.md §3.1) and Redstone send
+        // `maxBytes`. The camelCase key fell through to `None`, and every read
+        // silently used DEFAULT_TAIL_BYTES regardless of the cap asked for.
+        //
+        // This is the test that would have caught it: a **spec-form** frame,
+        // exactly as Redstone puts it on the wire.
+        let frame =
+            r#"{"id":3,"method":"readConversation","conversation":"c","maxBytes":1024,"agent":"claude"}"#;
+        match serde_json::from_str::<Frame>(frame).unwrap() {
+            Frame::Request {
+                id,
+                request: Request::ReadConversation { conversation, max_bytes, agent },
+            } => {
+                assert_eq!(id, 3);
+                assert_eq!(conversation, "c");
+                assert_eq!(max_bytes, Some(1024), "maxBytes must map to max_bytes");
+                assert_eq!(agent, Agent::Claude);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+
+        // ReadTerminal carries the same field, and the same fix.
+        let term = r#"{"id":4,"method":"readTerminal","session":"s","maxBytes":2048}"#;
+        match serde_json::from_str::<Frame>(term).unwrap() {
+            Frame::Request { request: Request::ReadTerminal { session, max_bytes }, .. } => {
+                assert_eq!(session, "s");
+                assert_eq!(max_bytes, Some(2048));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_conversation_serialises_max_bytes_as_camelcase() {
+        // The other direction: what the bridge emits must carry `maxBytes`, never
+        // the snake-case form the spec does not know.
+        let line = serde_json::to_string(&Request::ReadConversation {
+            conversation: "c".into(),
+            max_bytes: Some(1),
+            agent: Agent::Claude,
+        })
+        .unwrap();
+        assert!(line.contains(r#""maxBytes":1"#), "{line}");
+        assert!(!line.contains("max_bytes"), "{line}");
+    }
+
+    #[test]
+    fn spawn_serialises_model_profile_as_camelcase() {
+        // The only other multi-word Request field, held to the same spec key.
+        let line = serde_json::to_string(&Request::Spawn {
+            folder: "/tmp".into(),
+            prompt: None,
+            name: None,
+            model_profile: Some("glm".into()),
+            agent: Agent::Claude,
+        })
+        .unwrap();
+        assert!(line.contains(r#""modelProfile":"glm""#), "{line}");
+        assert!(!line.contains("model_profile"), "{line}");
     }
 
     #[test]

@@ -153,11 +153,26 @@ fn split_output(bytes: &[u8]) -> Option<(String, u64, &[u8])> {
 }
 
 /// Parse the script's output into a transcript.
+///
+/// This is the SSH/desktop path: [`transcript_script`] frames its output as
+/// `id\0size\0body`, so the header is split off and the body handed to
+/// [`parse_body`]. A caller that already has the raw `.jsonl` bytes and the id
+/// and size out of band — the Redstone bridge reading a local file — calls
+/// `parse_body` directly rather than fabricating a header.
 pub fn parse(bytes: &[u8], tailed: bool) -> Transcript {
     let Some((session_id, total_bytes, body)) = split_output(bytes) else {
         return Transcript::default();
     };
+    parse_body(session_id, total_bytes, body, tailed)
+}
 
+/// Parse a transcript body — the raw `.jsonl` records — into a [`Transcript`].
+///
+/// `session_id` and `total_bytes` are supplied by the caller: the SSH path reads
+/// them from the framed header ([`parse`]), the bridge reads them from the file's
+/// name and `stat`. `tailed` says whether `body` is the *end* of a larger file,
+/// in which case the leading partial line is dropped.
+pub fn parse_body(session_id: String, total_bytes: u64, body: &[u8], tailed: bool) -> Transcript {
     // `tail -c` cuts at a byte, not a line, so the first line is very likely half
     // a JSON object. Dropping it costs one message; keeping it would mean the
     // parser's first act is to fail on garbage.
@@ -453,6 +468,38 @@ mod tests {
         assert_eq!(t.usage.input, 10);
         assert_eq!(t.usage.output, 5);
         assert_eq!(t.per_turn, vec![5]);
+    }
+
+    #[test]
+    fn parse_body_reads_raw_unframed_jsonl() {
+        // The Redstone bridge reads a `.jsonl` file straight off disk — no
+        // `id\0size\0` header, because that framing is emitted only by the SSH
+        // tail-script. Handing these bytes to `parse` (which begins with
+        // `split_output`) returns an empty transcript: that was the shipped bug.
+        // `parse_body` takes the id and size out of band, so the raw records
+        // parse as themselves.
+        let body = concat!(
+            r#"{"type":"user","timestamp":"t1","message":{"role":"user","content":"hello there"}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"t2","message":{"role":"assistant","content":[{"type":"text","text":"hi back"}],"usage":{"input_tokens":4,"output_tokens":2}}}"#,
+            "\n",
+        );
+        let t = parse_body("conv-xyz".to_owned(), body.len() as u64, body.as_bytes(), false);
+
+        assert_eq!(t.session_id, "conv-xyz");
+        assert_eq!(t.entries.len(), 2, "raw jsonl should not read back empty: {:?}", t.entries);
+        assert_eq!(t.entries[0].speaker, Speaker::User);
+        assert_eq!(t.entries[0].text, "hello there");
+        assert_eq!(t.entries[1].speaker, Speaker::Assistant);
+        assert_eq!(t.entries[1].text, "hi back");
+        assert_eq!(t.usage.output, 2);
+
+        // And feeding the *same* raw bytes to `parse` demonstrates the bug it
+        // exists to route around: no NUL framing means an empty transcript.
+        assert!(
+            parse(body.as_bytes(), false).entries.is_empty(),
+            "parse should find no framing in raw jsonl",
+        );
     }
 
     #[test]

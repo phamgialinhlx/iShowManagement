@@ -71,6 +71,19 @@ const REJECTED: u16 = 1008;
 /// How long a spawned session is given to appear before the caller is answered.
 const SPAWN_SETTLE: Duration = Duration::from_millis(500);
 
+/// How long a live connection may go without *any* inbound frame before it is
+/// treated as dead and redialled.
+///
+/// This is the receive side of the keepalive, and the mirror of Redstone's own:
+/// the server pings roughly every 20s, so a healthy connection always delivers a
+/// frame (a ping if nothing else) well within this window. On a silent socket
+/// death with no RST — a rotated IPv6 privacy address, a NAT box that forgot the
+/// mapping — the read would otherwise block forever on a dead connection and
+/// nothing would ever trigger the reconnect that only an OS-surfaced error does.
+/// 50s is ~2.5 server pings of margin, so a single dropped ping does not redial a
+/// live host.
+const RECV_IDLE: Duration = Duration::from_secs(50);
+
 /// Default tail for a transcript read. See `rmux-claude-core`: a real one has
 /// been measured at 228 MB.
 const DEFAULT_TAIL_BYTES: u64 = 256 * 1024;
@@ -216,7 +229,25 @@ async fn serve(enrolment: &Enrolment) -> anyhow::Result<Option<u16>> {
     let mut terminals: HashMap<String, tokio::sync::mpsc::Sender<TerminalCtrl>> = HashMap::new();
 
     let close_code = loop {
-        let Some(message) = stream.next().await else { break None };
+        // **Only the inbound read is watched** — the writer task owns the sink
+        // and flushes pongs on its own, so nothing here touches it. A fresh
+        // `timeout` per await means every frame received resets the window.
+        let next = match tokio::time::timeout(RECV_IDLE, stream.next()).await {
+            Ok(next) => next,
+            // No frame within the window. Redstone pings every ~20s, so this is a
+            // silently dead socket. Break out the same way a read error or a
+            // stream-end does, so the reconnect-with-backoff loop in `run`
+            // redials — `next_backoff` treats it like any other drop, resetting
+            // to the floor when the connection had lasted ≥ HEALTHY.
+            Err(_elapsed) => {
+                tracing::warn!(
+                    idle = ?RECV_IDLE,
+                    "no frame within the receive-idle window; treating the connection as dead",
+                );
+                break None;
+            }
+        };
+        let Some(message) = next else { break None };
         match message? {
             tungstenite::Message::Text(text) => {
                 let parsed = serde_json::from_str::<Frame>(&text);
@@ -799,27 +830,43 @@ async fn conversations(
 
 /// Read one conversation back, tail-bounded.
 fn read_conversation(id: &str, max_bytes: Option<u64>) -> anyhow::Result<(Vec<Message>, bool)> {
+    let path = find_transcript(id)?;
+    read_transcript_at(id, &path, max_bytes)
+}
+
+/// Read and parse a Claude transcript at a known path, tail-bounded.
+///
+/// Split out from [`read_conversation`] so the read-and-parse can be tested
+/// against a temp file without touching the operator's real `~/.claude`.
+fn read_transcript_at(
+    id: &str,
+    path: &std::path::Path,
+    max_bytes: Option<u64>,
+) -> anyhow::Result<(Vec<Message>, bool)> {
     let tail = max_bytes.unwrap_or(DEFAULT_TAIL_BYTES).clamp(1, MAX_TAIL_BYTES);
 
-    let path = find_transcript(id)?;
-    let size = std::fs::metadata(&path)?.len();
+    let size = std::fs::metadata(path)?.len();
     let truncated = size > tail;
 
     let bytes = if truncated {
         use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::fs::File::open(&path)?;
+        let mut file = std::fs::File::open(path)?;
         file.seek(SeekFrom::Start(size - tail))?;
         let mut buf = Vec::with_capacity(tail as usize);
         file.take(tail).read_to_end(&mut buf)?;
         buf
     } else {
-        std::fs::read(&path)?
+        std::fs::read(path)?
     };
 
-    // `truncated` is passed through so the parser drops the leading partial
-    // line. Getting this wrong in the other direction — claiming a complete read
-    // — silently discards the first message of a short conversation.
-    let parsed = transcript::parse(&bytes, truncated);
+    // A raw `.jsonl` has no `id\0size\0` header — that framing is emitted only by
+    // the SSH tail-script `transcript::parse` expects. Feeding these bytes to
+    // `parse` would make `split_output` return `None` and yield an empty
+    // transcript (the shipped bug). The id and size are already known here, so the
+    // body is parsed directly. `truncated` is passed through so the parser drops
+    // the leading partial line; getting it wrong the other way — claiming a
+    // complete read — silently discards the first message of a short conversation.
+    let parsed = transcript::parse_body(id.to_owned(), size, &bytes, truncated);
 
     Ok((
         parsed
@@ -1537,6 +1584,89 @@ mod tests {
             REDIAL_MAX,
             "1000 was treated as a rejection",
         );
+    }
+
+    #[test]
+    fn a_raw_jsonl_transcript_reads_back_non_empty() {
+        // The shipped bug: the bridge reads a raw `.jsonl` off disk (no
+        // `id\0size\0` framing) and used to hand it to `transcript::parse`, whose
+        // first act is `split_output` — which finds no NUL and returns an empty
+        // transcript. So a real conversation came back as `{messages:[]}`. This
+        // pins the read path against a real file.
+        let dir = std::env::temp_dir().join(format!(
+            "rmux-bridge-read-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("conv-read-test.jsonl");
+        // Twenty short records, so a tail read still spans several complete lines
+        // after the leading partial is dropped.
+        let mut body = String::new();
+        for i in 0..20 {
+            body.push_str(&format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"msg {i:02}"}}}}"#,
+            ));
+            body.push('\n');
+        }
+        std::fs::write(&path, &body).unwrap();
+        let full_len = body.len() as u64;
+
+        // Fits comfortably: not truncated, every message present.
+        let (messages, truncated) =
+            read_transcript_at("conv-read-test", &path, None).unwrap();
+        assert!(!truncated, "a small file must not report truncated");
+        assert_eq!(messages.len(), 20, "raw jsonl read back short — the shipped bug");
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[0].text, "msg 00");
+        assert_eq!(messages[19].text, "msg 19");
+
+        // A `max_bytes` well under the file size forces a tail read: `truncated`
+        // is true, the leading partial line is dropped, but messages are still
+        // returned — not an empty list, which was the bug in disguise.
+        let cap = full_len / 3;
+        let (tail_messages, tail_truncated) =
+            read_transcript_at("conv-read-test", &path, Some(cap)).unwrap();
+        assert!(tail_truncated, "a cap below the file size must report truncated");
+        assert!(
+            !tail_messages.is_empty(),
+            "a truncated read must still return messages, not an empty list",
+        );
+        // The tail holds the *newest* messages; the last one is always present.
+        assert_eq!(tail_messages.last().unwrap().text, "msg 19");
+
+        // The BOUNDARY, which the `maxBytes`-not-mapping bug defeated silently:
+        // the cap must actually change the answer. Redstone measured identical
+        // responses across `maxBytes` 1024 / 16384 / 8388608 because the field
+        // deserialised to `None` every time and the read fell back to
+        // DEFAULT_TAIL_BYTES. Asserting `truncated == true` alone did not catch
+        // that — it passes against a hardcoded `true`. So pin the ordering:
+        //
+        //  - a small cap returns strictly FEWER messages than a large cap, and
+        //  - a cap >= the file size returns `truncated == false` with ALL of them.
+        let (small_messages, small_truncated) =
+            read_transcript_at("conv-read-test", &path, Some(cap)).unwrap();
+        let (large_messages, large_truncated) =
+            read_transcript_at("conv-read-test", &path, Some(full_len * 4)).unwrap();
+        assert!(small_truncated, "a small cap must truncate");
+        assert!(!large_truncated, "a cap over the file size must not truncate");
+        assert!(
+            small_messages.len() < large_messages.len(),
+            "a small cap ({}) must return fewer messages than a large one ({}) — \
+             the maxBytes-ignored bug made these equal",
+            small_messages.len(),
+            large_messages.len(),
+        );
+        assert_eq!(
+            large_messages.len(),
+            20,
+            "a cap at or above the file size must return every message",
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
