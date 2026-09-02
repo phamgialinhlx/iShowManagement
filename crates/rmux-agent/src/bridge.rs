@@ -828,30 +828,45 @@ async fn conversations(
     Ok(all)
 }
 
-/// Read the tail of a `.jsonl` transcript, always including the *last complete
-/// record* even when it is larger than `tail`.
+/// Read the tail of a `.jsonl` transcript, always including the *last record that
+/// produces a displayable message* even when reaching it exceeds `tail`.
 ///
 /// Returns `(bytes, size, truncated)` ready for `transcript::parse_body` /
 /// `pi::parse`. Both the Claude and pi read paths call this, so the walk-back
-/// lives in one place and the two cannot drift.
+/// lives in one place and the two cannot drift. `has_message(bytes, size,
+/// truncated)` is the caller's parser, asked whether a candidate window yields at
+/// least one message — Claude and pi parse differently, so the *decision* is
+/// theirs and only the byte walk-back is shared.
 ///
-/// The bug this closes: a naive `seek(size - tail)` lands *inside* the last
-/// record when `tail` is smaller than that record. After `parse_body` drops the
-/// leading partial line, nothing complete is left — a non-empty file returns
-/// `{"messages":[],"truncated":true}`, byte-identical to a broken parser. That
-/// cost a day of debugging once already, so the guarantee here is absolute:
-/// **a non-empty file never yields zero records.** A small cap may *under*-deliver
-/// (fewer records than a larger cap), but never nothing.
+/// The bug this closes came in two layers, both measured on real transcripts:
 ///
-/// The fix is a walk-back, not a clamp floor. A single record can exceed any
-/// fixed cap, so the read is allowed to exceed `tail` when — and only when —
-/// that is what it takes to include the last whole record. Still tail-bounded:
-/// the walk only ever extends the window to the nearest record boundary, never
-/// to the whole 228 MB file.
-fn read_tail_including_last_record(
+/// 1. A naive `seek(size - tail)` lands *inside* a record when `tail` is smaller
+///    than it. After `parse_body` drops the leading partial line, that record is
+///    gone.
+/// 2. The first fix anchored the window on the last *raw* record. But real
+///    Claude transcripts end in non-message records — `attachment`, `system`,
+///    `bridge-session`, `file-history-snapshot`, `pr-link`, `last-prompt` — which
+///    parse to **zero** entries. Anchoring on the last raw line therefore still
+///    returned `{"messages":[],"truncated":true}` from a non-empty file: the cap
+///    window held only those trailing records, and the real last message, bisected
+///    by the cap, was dropped as the leading partial. `be79795a` (last record an
+///    `attachment`) returned 0 at cap 1024; `c8acb407` (five trailing non-message
+///    records) returned 0 at 4096 and 1 at 5120.
+///
+/// So the anchor is the last *message-bearing* record, not the last raw line: the
+/// window walks back a record at a time until `has_message` is satisfied. The
+/// guarantee is absolute — **a transcript that contains any message never returns
+/// zero.** Overshoot beyond `tail` is intended and bounded to the trailing
+/// non-message records plus that last message record; only a file with no message
+/// anywhere walks to offset 0.
+fn read_tail_including_last_record<F>(
     path: &std::path::Path,
     tail: u64,
-) -> std::io::Result<(Vec<u8>, u64, bool)> {
+    has_message: F,
+) -> std::io::Result<(Vec<u8>, u64, bool)>
+where
+    F: Fn(&[u8], u64, bool) -> bool,
+{
     use std::io::{Read, Seek, SeekFrom};
 
     let mut file = std::fs::File::open(path)?;
@@ -881,17 +896,39 @@ fn read_tail_including_last_record(
         start -= 1;
     }
 
-    file.seek(SeekFrom::Start(start))?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-    let truncated = start > 0;
+    let read_from = |file: &mut std::fs::File, start: u64| -> std::io::Result<Vec<u8>> {
+        file.seek(SeekFrom::Start(start))?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        Ok(buf)
+    };
+
+    let mut buf = read_from(&mut file, start)?;
+    let mut truncated = start > 0;
+
+    // The common case — the cap window already holds a message — returns here
+    // unchanged. Only when it holds nothing displayable (a tail of bookkeeping and
+    // attachment records) does the walk-back extend the window a record at a time.
+    if truncated && !has_message(&buf, size, truncated) {
+        // Round to a clean record boundary so each step lands exactly on the byte
+        // after the previous record's terminating newline.
+        let mut boundary = record_boundary_at_or_before(&mut file, start)?;
+        while boundary > 0 && !has_message(&buf, size, truncated) {
+            boundary = record_boundary_at_or_before(&mut file, boundary - 1)?;
+            // Back up onto the previous record's newline (offset 0 has none) so the
+            // leading-partial drop removes an empty prefix, never the first record.
+            let read_start = boundary.saturating_sub(1);
+            truncated = boundary > 0;
+            buf = read_from(&mut file, read_start)?;
+        }
+    }
+
     Ok((buf, size, truncated))
 }
 
 /// Byte offset of the start of the last complete record (the byte after the last
 /// interior `\n`, ignoring a single trailing newline), or `0` if the whole file
-/// is one record. Scans backward in chunks so a 228 MB transcript is not read
-/// whole to find its final line.
+/// is one record.
 fn find_last_record_start(file: &mut std::fs::File, size: u64) -> std::io::Result<u64> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -910,10 +947,23 @@ fn find_last_record_start(file: &mut std::fs::File, size: u64) -> std::io::Resul
     if end == 0 {
         return Ok(0); // the file was a lone "\n"
     }
+    record_boundary_at_or_before(file, end)
+}
+
+/// The largest record boundary `<= limit` — offset `0`, or the byte just after a
+/// `\n`. Scans backward in chunks so a 228 MB transcript is never read whole to
+/// find a boundary near its end. The walk-back steps through these to reach the
+/// last message-bearing record.
+fn record_boundary_at_or_before(file: &mut std::fs::File, limit: u64) -> std::io::Result<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if limit == 0 {
+        return Ok(0);
+    }
 
     const CHUNK: usize = 64 * 1024;
     let mut buf = vec![0u8; CHUNK];
-    let mut hi = end; // search the half-open region [0, hi)
+    let mut hi = limit; // search the half-open region [0, hi) for the last '\n'
     while hi > 0 {
         let lo = hi.saturating_sub(CHUNK as u64);
         let len = (hi - lo) as usize;
@@ -944,10 +994,15 @@ fn read_transcript_at(
 ) -> anyhow::Result<(Vec<Message>, bool)> {
     let tail = max_bytes.unwrap_or(DEFAULT_TAIL_BYTES).clamp(1, MAX_TAIL_BYTES);
 
-    // Tail-bounded, but always including the last complete record — a cap smaller
-    // than the final record must still return it, not an empty list. The walk-back
-    // lives in `read_tail_including_last_record`, shared with the pi path.
-    let (bytes, size, truncated) = read_tail_including_last_record(path, tail)?;
+    // Tail-bounded, but always including the last message-bearing record — a cap
+    // smaller than it, or a tail of non-message records (attachment, system,
+    // file-history-snapshot) in front of it, must still return that message rather
+    // than an empty list. The walk-back lives in `read_tail_including_last_record`,
+    // shared with the pi path; it is handed this path's own parser so it knows what
+    // counts as a message.
+    let (bytes, size, truncated) = read_tail_including_last_record(path, tail, |b, sz, t| {
+        !transcript::parse_body(id.to_owned(), sz, b, t).entries.is_empty()
+    })?;
 
     // A raw `.jsonl` has no `id\0size\0` header — that framing is emitted only by
     // the SSH tail-script `transcript::parse` expects. Feeding these bytes to
@@ -1116,9 +1171,12 @@ fn pi_read_conversation(id: &str, max_bytes: Option<u64>) -> anyhow::Result<(Vec
     let tail = max_bytes.unwrap_or(DEFAULT_TAIL_BYTES).clamp(1, MAX_TAIL_BYTES);
     let path = find_pi_transcript(id)?;
 
-    // Same walk-back as the Claude path — a cap smaller than the last record must
-    // still return that record. Shared helper so the two behaviours cannot drift.
-    let (bytes, _size, truncated) = read_tail_including_last_record(&path, tail)?;
+    // Same walk-back as the Claude path — a cap smaller than the last record, or a
+    // tail of non-message records in front of it, must still return that message.
+    // Shared helper so the two behaviours cannot drift; pi's own parser decides
+    // what counts as a message.
+    let (bytes, _size, truncated) =
+        read_tail_including_last_record(&path, tail, |b, _sz, t| !pi::parse(b, t).entries.is_empty())?;
 
     let parsed = pi::parse(&bytes, truncated);
     Ok((
@@ -1773,6 +1831,47 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "reads real ~/.claude transcripts on this developer machine; hardcoded absolute paths"]
+    fn repro_real_transcripts_against_current_source() {
+        // Step-1 reproduction. Reads the three transcripts the Redstone team named
+        // and prints message counts per cap on the CURRENT source, so bug-in-code
+        // can be told apart from a stale deployed binary.
+        let cases = [
+            (
+                "be79795a",
+                "/Users/macprom1/.claude/projects/-Volumes-Na-s-Mac-Data-Codes-redstone-desktop/be79795a-2d6a-44f1-9ba6-a760abab5ea5.jsonl",
+            ),
+            (
+                "dd2d5a0f",
+                "/Users/macprom1/.claude/projects/-Volumes-Na-s-Mac-Data-Codes-rmux/dd2d5a0f-4c08-48db-bd08-22e81248a497.jsonl",
+            ),
+            (
+                "c8acb407",
+                "/Users/macprom1/.claude/projects/-Volumes-Na-s-Mac-Data-Codes-morphie/c8acb407-c709-49c0-acf3-3a3dd14222a7.jsonl",
+            ),
+        ];
+        for (id, path) in cases {
+            let p = std::path::Path::new(path);
+            if !p.is_file() {
+                eprintln!("SKIP {id}: {path} not present");
+                continue;
+            }
+            for cap in [1024u64, 4096, 5120, 16384] {
+                let (messages, truncated) = read_transcript_at(id, p, Some(cap)).unwrap();
+                let non_system = messages
+                    .iter()
+                    .filter(|m| !matches!(m.role, Role::System))
+                    .count();
+                eprintln!(
+                    "{id} cap {cap:>6}: {} msgs ({non_system} non-system) truncated={truncated} last_role={:?}",
+                    messages.len(),
+                    messages.last().map(|m| m.role),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_cap_below_the_last_record_still_returns_it() {
         // THE REGRESSION. Redstone measured caps of 1024/2048/4096 returning zero
         // messages on a real transcript whose last record was larger than the cap:
@@ -1808,6 +1907,103 @@ mod tests {
             );
             assert_eq!(messages.last().unwrap().text.len(), big.len());
         }
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_cap_below_a_non_message_tail_still_returns_the_last_message() {
+        // THE REAL SHAPE the synthetic regression above missed. Measured on three
+        // live transcripts: the file does not end on a message. It ends on
+        // bookkeeping — `file-history-snapshot`, `system`, `attachment`,
+        // `bridge-session` — records `parse_body` maps to zero entries. Anchoring
+        // the walk-back on the last *raw* record therefore returned an empty list
+        // from a non-empty file (`be79795a` at cap 1024, `c8acb407` at 4096).
+        //
+        // Layout: a real user message, then a large non-message record, then two
+        // small non-message records — so the last message is separated from EOF by
+        // both a big record and a tail of small ones, exactly like the real files.
+        let path = scratch_transcript("nonmessage-tail");
+        let big = "s".repeat(20_000);
+        // Earlier history, so the walk-back stops at the last message rather than
+        // running off the front of the file — matching a real transcript, where
+        // the last message is never the first record and the read stays truncated.
+        let mut body = String::new();
+        for i in 0..40 {
+            body.push_str(&format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"history {i:02}"}}}}"#,
+            ));
+            body.push('\n');
+        }
+        let snapshot = format!(r#"{{"type":"file-history-snapshot","snapshot":"{big}"}}"#);
+        body.push_str(&format!(
+            "{msg}\n{snapshot}\n{system}\n{attachment}\n",
+            msg = r#"{"type":"user","message":{"role":"user","content":"the message that must come back"}}"#,
+            system = r#"{"type":"system","subtype":"note","content":"bookkeeping"}"#,
+            attachment = r#"{"type":"attachment","path":"/tmp/x.png"}"#,
+        ));
+        std::fs::write(&path, &body).unwrap();
+
+        // Every cap here lands the naive cap-window inside the big non-message
+        // record or the small tail after it — never on the message. The walk-back
+        // must reach back past all of them to the one real message.
+        for cap in [512u64, 1024, 4096, 16384] {
+            let (messages, truncated) = read_transcript_at("conv", &path, Some(cap)).unwrap();
+            assert!(
+                !messages.is_empty(),
+                "cap {cap}: a non-empty file ending in non-message records returned zero — the regression",
+            );
+            assert!(truncated, "cap {cap}: a read below file size must report truncated");
+            let last_real = messages
+                .iter()
+                .rev()
+                .find(|m| !matches!(m.role, Role::System))
+                .expect("a displayable message");
+            assert_eq!(
+                last_real.text, "the message that must come back",
+                "cap {cap}: the last message was not the one returned",
+            );
+        }
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_last_message_record_itself_may_exceed_the_cap_and_still_come_back() {
+        // The single-record overshoot Redstone confirmed is acceptable: when the
+        // last message-bearing record is *itself* larger than maxBytes — and a
+        // non-message record follows it at EOF — the read must overshoot the cap to
+        // return that message rather than an empty list.
+        let path = scratch_transcript("overshoot");
+        let big = "b".repeat(30_000);
+        // Earlier history so the huge record is not the first — the read overshoots
+        // the cap to include it but stays truncated (data precedes it).
+        let mut body = String::new();
+        for i in 0..10 {
+            body.push_str(&format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"history {i:02}"}}}}"#,
+            ));
+            body.push('\n');
+        }
+        let huge =
+            format!(r#"{{"type":"assistant","message":{{"role":"assistant","content":"{big}"}}}}"#);
+        body.push_str(&format!(
+            "{huge}\n{trailing}\n",
+            trailing = r#"{"type":"attachment","path":"/tmp/y.png"}"#,
+        ));
+        std::fs::write(&path, &body).unwrap();
+
+        // Cap far below the huge record.
+        let (messages, truncated) = read_transcript_at("conv", &path, Some(4096)).unwrap();
+        assert!(!messages.is_empty(), "the oversized last message must still be returned");
+        assert!(truncated, "an overshoot read is still a truncated read");
+        let last_real = messages
+            .iter()
+            .rev()
+            .find(|m| !matches!(m.role, Role::System))
+            .expect("a displayable message");
+        assert_eq!(last_real.role, Role::Assistant);
+        assert_eq!(last_real.text.len(), big.len(), "the oversized record came back whole");
 
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
@@ -1866,9 +2062,11 @@ mod tests {
         std::fs::write(&path, body.as_bytes()).unwrap();
         let size = std::fs::metadata(&path).unwrap().len();
 
-        // tail smaller than the last record forces the walk-back.
+        // tail smaller than the last record forces the walk-back. Every record
+        // here is a message, so the first (raw last-record) window already
+        // satisfies the closure and no further walk-back is needed.
         let (bytes, reported_size, truncated) =
-            read_tail_including_last_record(&path, 1024).unwrap();
+            read_tail_including_last_record(&path, 1024, |b, _, _| !b.is_empty()).unwrap();
         assert_eq!(reported_size, size, "size must be the true file length");
         assert!(truncated, "a walked-back read below file size is truncated");
         // The last complete record is present in full, in the raw bytes.
@@ -1878,7 +2076,7 @@ mod tests {
         );
         // And a cap at/above file size reads the whole file, untruncated.
         let (whole, _, whole_trunc) =
-            read_tail_including_last_record(&path, size + 1).unwrap();
+            read_tail_including_last_record(&path, size + 1, |b, _, _| !b.is_empty()).unwrap();
         assert!(!whole_trunc);
         assert_eq!(whole.len() as u64, size);
 
@@ -1907,7 +2105,8 @@ mod tests {
         let size = std::fs::metadata(&path).unwrap().len();
 
         let (bytes, reported, truncated) =
-            read_tail_including_last_record(&path, 1024).unwrap();
+            read_tail_including_last_record(&path, 1024, |b, _, t| !pi::parse(b, t).entries.is_empty())
+                .unwrap();
         assert_eq!(reported, size);
         assert!(truncated);
         let parsed = pi::parse(&bytes, truncated);
