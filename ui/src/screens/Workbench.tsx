@@ -17,6 +17,7 @@ import { useWorkspace } from "../lib/workspace";
 import { startAttentionWatch } from "../lib/attention";
 import { useShortcuts } from "../lib/use-shortcuts";
 import { startStatusWatch } from "../lib/status-watch";
+import { useAutoBridge } from "../lib/redstone-auto-bridge";
 import { api, isTauri, type LockStatus, type SignedIn } from "../lib/api";
 import { SignIn } from "../components/SignIn";
 import { Dashboard } from "./Dashboard";
@@ -45,6 +46,10 @@ export function Workbench({
   // One watcher for the whole app: attention is singular, so counting it per
   // pane would credit every mounted session at once. See `lib/attention.ts`.
   useEffect(() => startAttentionWatch(), []);
+  // Auto-bridge every server to Redstone when signed in — mounted here, above
+  // the panels, so it runs regardless of which panel is open. All guards live
+  // inside the engine. See `lib/redstone-auto-bridge.ts`.
+  useAutoBridge();
 
   useEffect(() => {
     if (!isTauri() || !session) return;

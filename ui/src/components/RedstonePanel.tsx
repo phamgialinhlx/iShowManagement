@@ -7,6 +7,16 @@ import {
   type RedstoneHost,
   type SessionView,
 } from "../lib/api";
+import { useWorkspace } from "../lib/workspace";
+import {
+  autoBridgeEnabled,
+  notifyAutoBridge,
+  runAutoBridge,
+  setAutoBridgeEnabled,
+  useAutoBridgeStore,
+  type AutoBridgeStatus,
+} from "../lib/redstone-auto-bridge";
+import { PanelLoader } from "./PanelLoader";
 
 /**
  * Letting Redstone drive a host's Claude sessions.
@@ -53,6 +63,21 @@ export function RedstonePanel() {
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+
+  // The auto-bridge preference (default on) and the per-server outcome list the
+  // engine publishes.
+  const [auto, setAuto] = useState(autoBridgeEnabled);
+  const servers = useWorkspace((s) => s.servers);
+  const autoStatuses = useAutoBridgeStore((s) => s.statuses);
+
+  const toggleAuto = (on: boolean) => {
+    setAuto(on);
+    setAutoBridgeEnabled(on);
+    // Flipping it on runs a sweep now; off just stops future runs — nothing is
+    // un-bridged, because a token already written to a host is not ours to pull
+    // as a side effect of a preference.
+    if (on) void runAutoBridge();
+  };
 
   // The fallback, folded away. Open only if someone goes looking for it.
   const [manual, setManual] = useState(false);
@@ -134,6 +159,8 @@ export function RedstonePanel() {
       const s = await api.redstoneSignIn(address.trim());
       localStorage.setItem(ADDRESS_KEY, address.trim());
       setSession(s);
+      // Wake the top-level hook so the auto-bridge sweep starts on this sign-in.
+      notifyAutoBridge();
       return `SIGNED IN${s.user ? ` AS ${s.user.toUpperCase()}` : ""}`;
     });
 
@@ -141,6 +168,8 @@ export function RedstonePanel() {
     run("signing", async () => {
       await api.redstoneSignOut();
       setSession(null);
+      // Lets the hook observe the sign-out and reset the sweep state.
+      notifyAutoBridge();
       return "SIGNED OUT";
     });
 
@@ -224,6 +253,59 @@ export function RedstonePanel() {
         <span className="data text-[10px]" style={{ color: "var(--text-faint)" }}>
           A window has opened on Redstone&rsquo;s own login page. rmux never sees your password.
         </span>
+      )}
+
+      {/*
+        Auto-bridge — absent, not disabled, when there is no bridge to enrol
+        against (the "never show a control that cannot work" rule). Each server
+        is bridged on its own token; the rows below report what happened.
+      */}
+      {session && caps?.bridge && (
+        <div className="flex flex-col gap-3 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+          <label className="flex items-start gap-3">
+            <input
+              type="checkbox"
+              className="mt-[2px]"
+              checked={auto}
+              onChange={(e) => toggleAuto(e.target.checked)}
+            />
+            <span className="flex flex-col gap-1">
+              <span className="micro">AUTO-BRIDGE MY SERVERS</span>
+              <span
+                className="data text-[10px] leading-relaxed"
+                style={{ color: "var(--text-faint)" }}
+              >
+                Enrol every server in the workspace as it connects &mdash; one token per host,
+                skipping the ones already bridged. Turning it off stops new servers being enrolled;
+                nothing already bridged is removed.
+              </span>
+            </span>
+          </label>
+
+          {servers.length > 0 && (
+            <div
+              className="flex flex-col gap-1 overflow-y-auto"
+              style={{ maxHeight: "220px" }}
+            >
+              {servers.map((server) => {
+                const entry = autoStatuses[server.id];
+                const name = server.id === "local" ? "this machine" : server.target.host ?? server.id;
+                return (
+                  <div
+                    key={server.id}
+                    className="flex items-center justify-between gap-3 border px-2 py-1"
+                    style={{ borderColor: "var(--border)" }}
+                  >
+                    <span className="data text-[11px]" style={{ color: "var(--text)" }}>
+                      {name}
+                    </span>
+                    <AutoStatus status={entry?.status} detail={entry?.detail} />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
 
       {/* 3 — which machine */}
@@ -349,5 +431,41 @@ export function RedstonePanel() {
         own.
       </p>
     </section>
+  );
+}
+
+/**
+ * One server's auto-bridge outcome, coloured by the SIGNAL ROOM rules: red only
+ * for a genuine failure, chalk for the quiet states.
+ */
+function AutoStatus({ status, detail }: { status?: AutoBridgeStatus; detail?: string }) {
+  if (!status || status === "pending") {
+    return (
+      <span className="data text-[10px]" style={{ color: "var(--text-faint)" }}>
+        waiting
+      </span>
+    );
+  }
+  if (status === "bridging") {
+    return <PanelLoader variant="inline" phase="bridging" />;
+  }
+  if (status === "bridged") {
+    return (
+      <span className="data text-[10px]" style={{ color: "var(--text)" }}>
+        bridged
+      </span>
+    );
+  }
+  if (status === "skipped") {
+    return (
+      <span className="data text-[10px]" style={{ color: "var(--text-faint)" }}>
+        skipped{detail ? ` · ${detail}` : ""}
+      </span>
+    );
+  }
+  return (
+    <span className="data text-[10px]" style={{ color: "rgb(var(--primary))" }}>
+      failed{detail ? ` · ${detail}` : ""}
+    </span>
   );
 }
