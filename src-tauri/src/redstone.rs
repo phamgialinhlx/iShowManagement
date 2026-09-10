@@ -133,6 +133,31 @@ pub fn read_enrolment_script(home: &str) -> String {
     format!("cat {path} 2>/dev/null || true")
 }
 
+/// A `pgrep -f` / `pkill -f` pattern that cannot match the very shell running
+/// the check.
+///
+/// `pgrep -f` matches against a process's **whole command line**, and the check
+/// runs as `sh -c '… pgrep -f <pattern> …'` — whose own argv therefore contains
+/// `<pattern>` verbatim. A naive pattern matches that wrapper, so the guard
+/// reports the bridge "running" when nothing is, and the bridge is **never
+/// started on any host**. `pkill -f` has the same flaw from the other side: it
+/// SIGTERMs its own parent shell before `rm -f` runs, so unenrol can leave the
+/// token behind.
+///
+/// Bracketing the first character is the standard idiom: the regex `[c]` matches
+/// the real process's leading `c`, while the checking shell's literal text
+/// `[c]…` does not (it begins with `[`). Verified on a real host — a pattern
+/// built this way matched a running bridge and did *not* self-match a shell
+/// checking for a bridge that did not exist. Agent paths are absolute, so the
+/// first character is `/`, which needs no escaping inside an ERE bracket class.
+fn self_proof_pattern(agent: &str) -> String {
+    let mut chars = agent.chars();
+    match chars.next() {
+        Some(first) => format!("[{first}]{}", chars.as_str()),
+        None => agent.to_owned(),
+    }
+}
+
 /// Remove the enrolment and stop the bridge.
 ///
 /// **The file is deleted, not merely ignored.** A host that has been revoked in
@@ -140,9 +165,11 @@ pub fn read_enrolment_script(home: &str) -> String {
 /// enrolled again, and nothing in either UI would say so.
 pub fn unenrol_script(home: &str, agent: &str) -> String {
     let path = shell_quote(&format!("{home}/{ENROLMENT_PATH}"));
-    let agent = shell_quote(agent);
+    // Self-proof, or `pkill -f` kills the wrapper shell mid-script and the token
+    // is never removed. See `self_proof_pattern`.
+    let pattern = shell_quote(&self_proof_pattern(agent));
     format!(
-        "pkill -f {agent}' bridge' 2>/dev/null || true; \
+        "pkill -f {pattern}' bridge' 2>/dev/null || true; \
          rm -f {path}; echo unenrolled"
     )
 }
@@ -162,11 +189,18 @@ pub fn unenrol_script(home: &str, agent: &str) -> String {
 /// `nohup` and a full detach, because this outlives the ssh command that starts
 /// it. Without the redirections the connection will not close: ssh waits for the
 /// pipes, and rmux would hang on every host it enrolled.
+///
+/// The guard's pattern is **self-proof** (`self_proof_pattern`): a naive
+/// `pgrep -f '<agent> bridge'` matches the checking shell itself, so it always
+/// reported "running" and the `nohup` branch never ran on any host. That was the
+/// bug that made enrolment write the token and never start the bridge. The spawn
+/// uses the bare `agent` path — only the *match* must be self-proof.
 pub fn start_bridge_script(home: &str, agent: &str) -> String {
+    let pattern = shell_quote(&self_proof_pattern(agent));
     let agent_q = shell_quote(agent);
     let log = shell_quote(&format!("{home}/.rmux/bridge.log"));
     format!(
-        "if pgrep -f {agent_q}' bridge' >/dev/null 2>&1; then echo running; else \
+        "if pgrep -f {pattern}' bridge' >/dev/null 2>&1; then echo running; else \
          nohup {agent_q} bridge >> {log} 2>&1 < /dev/null & \
          echo started; fi"
     )
@@ -174,8 +208,11 @@ pub fn start_bridge_script(home: &str, agent: &str) -> String {
 
 /// Is a bridge running for this build?
 pub fn bridge_status_script(agent: &str) -> String {
-    let agent = shell_quote(agent);
-    format!("pgrep -f {agent}' bridge' >/dev/null 2>&1 && echo running || echo stopped")
+    // Self-proof, or this reports `running` for a host that only has the check
+    // running — the false positive that hid the start bug. See
+    // `self_proof_pattern`.
+    let pattern = shell_quote(&self_proof_pattern(agent));
+    format!("pgrep -f {pattern}' bridge' >/dev/null 2>&1 && echo running || echo stopped")
 }
 
 // ---------------------------------------------------------------------------
@@ -861,6 +898,43 @@ mod tests {
         assert!(script.contains("< /dev/null"), "{script}");
         assert!(script.contains("2>&1"), "{script}");
         assert!(script.contains(" &"), "not backgrounded: {script}");
+    }
+
+    #[test]
+    fn the_pgrep_pattern_cannot_match_the_checking_shell() {
+        // The bug this guards: `pgrep -f '<agent> bridge'` matches the very
+        // `sh -c '… pgrep -f <agent> bridge …'` process running it, because that
+        // wrapper's argv carries the pattern verbatim — so the guard always said
+        // "running" and the bridge was never started on any host. Verified on a
+        // real host: the naive pattern self-matched, the bracketed one did not.
+        //
+        // The fix is to bracket the first character. The *match* patterns must be
+        // bracketed; the *spawn* uses the bare path.
+        let agent = "/home/dev.user/.rmux/bin/rmux-agent-0.2.24-abcd";
+        // `self_proof_pattern` brackets the leading char; `[` `]` are glob-special
+        // so `shell_quote` wraps the whole thing, but the self-proof substring is
+        // present inside the quotes.
+        let bracketed = "[/]home/dev.user/.rmux/bin/rmux-agent-0.2.24-abcd";
+
+        for script in [start_bridge_script("/home/dev.user", agent), bridge_status_script(agent)] {
+            // The pattern fed to pgrep is the bracketed form, so the literal text
+            // in the checking shell (`[/]home…`) does not match the regex `[/]home…`.
+            assert!(script.contains(bracketed), "pgrep pattern is not self-proof: {script}");
+            // And the bare, self-matching form must not be what pgrep is given.
+            assert!(
+                !script.contains("pgrep -f '/home/dev.user"),
+                "pgrep still uses the bare self-matching pattern: {script}"
+            );
+        }
+        // unenrol's pkill has the same hazard — it would SIGTERM its own wrapper
+        // before `rm -f` runs.
+        let unenrol = unenrol_script("/home/dev.user", agent);
+        assert!(unenrol.contains(bracketed), "pkill pattern is not self-proof: {unenrol}");
+
+        // The spawn still uses the real path, unbracketed (and `shell_quote`
+        // leaves a path with no special chars alone, so it is not quoted).
+        let start = start_bridge_script("/home/dev.user", agent);
+        assert!(start.contains(&format!("nohup {agent} bridge")), "{start}");
     }
 
     #[test]

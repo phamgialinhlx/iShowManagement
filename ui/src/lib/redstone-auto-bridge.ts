@@ -162,8 +162,13 @@ export async function runAutoBridge(): Promise<void> {
       }
       if (!session) return;
 
-      // Guard 2 — this deployment offers the bridge.
-      const address = baseAddress();
+      // Guard 2 — this deployment offers the bridge. The base URL comes from the
+      // *session* rmux just fetched, not a separate localStorage key. A session
+      // restored from the keychain (already signed in, never re-signed-in in this
+      // build) leaves `rmux.redstone.address` empty, and reading that instead
+      // stranded every server on "waiting" — the engine bailed here before the
+      // per-server loop ever ran. The stored address is only a fallback.
+      const address = (session.baseUrl ?? "").trim().replace(/\/+$/, "") || baseAddress();
       if (!address) return;
       let caps;
       try {
