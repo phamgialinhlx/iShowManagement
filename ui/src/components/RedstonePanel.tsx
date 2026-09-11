@@ -69,6 +69,7 @@ export function RedstonePanel() {
   const [auto, setAuto] = useState(autoBridgeEnabled);
   const servers = useWorkspace((s) => s.servers);
   const autoStatuses = useAutoBridgeStore((s) => s.statuses);
+  const autoDiag = useAutoBridgeStore((s) => s.diag);
 
   const toggleAuto = (on: boolean) => {
     setAuto(on);
@@ -281,6 +282,12 @@ export function RedstonePanel() {
               </span>
             </span>
           </label>
+
+          {autoDiag && (
+            <span className="data text-[10px]" style={{ color: "var(--text-soft)" }}>
+              {autoDiag}
+            </span>
+          )}
 
           {servers.length > 0 && (
             <div

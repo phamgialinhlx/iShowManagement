@@ -55,7 +55,13 @@ export type AutoBridgeEntry = {
 type AutoBridgeState = {
   /** Per-`serverId` outcome, read by the panel. */
   statuses: Record<ServerId, AutoBridgeEntry>;
+  /** One line on what the engine last did — shown in the panel so a sweep that
+   *  never reaches the per-server loop is not an invisible "everything waiting".
+   *  This is the "never leave a blank screen / report the outcome" rule applied
+   *  to an unattended action: when it does nothing, it must say why. */
+  diag?: string;
   set: (id: ServerId, entry: AutoBridgeEntry) => void;
+  setDiag: (diag: string) => void;
   clear: () => void;
 };
 
@@ -68,7 +74,8 @@ type AutoBridgeState = {
 export const useAutoBridgeStore = create<AutoBridgeState>((set) => ({
   statuses: {},
   set: (id, entry) => set((s) => ({ statuses: { ...s.statuses, [id]: entry } })),
-  clear: () => set({ statuses: {} }),
+  setDiag: (diag) => set({ diag }),
+  clear: () => set({ statuses: {}, diag: undefined }),
 }));
 
 /**
@@ -84,13 +91,6 @@ const processed = new Set<ServerId>();
 
 /** Coalesces overlapping invocations into one serial pass. */
 let running: Promise<void> | null = null;
-
-/** Circuit breaker: never start passes back-to-back. The engine is already
- *  idempotent (the `processed` set) and serial, but a pathological burst of
- *  `servers`-list changes should not fire a session+capabilities IPC on each —
- *  cap it to one pass per `MIN_GAP_MS`. */
-let lastRunAt = 0;
-const MIN_GAP_MS = 2000;
 
 /** The auto-bridge preference. **Default off — opt-in.** Auto-enrolling every
  *  server the operator has ever connected to would push a Redstone credential
@@ -141,93 +141,137 @@ function looksIncapable(message: string): boolean {
  * lives *here* rather than in the caller, so the hook can fire it freely on any
  * of its triggers without duplicating the conditions.
  */
-export async function runAutoBridge(): Promise<void> {
+export function runAutoBridge(): Promise<void> {
   // Coalesce: if a pass is already in flight, let it finish rather than start a
-  // second one racing the same host list.
-  if (running) return running;
-  // Circuit breaker: refuse a pass that follows the last one too closely, so a
-  // burst of triggers cannot fire back-to-back session/capabilities probes.
-  const now = Date.now();
-  if (now - lastRunAt < MIN_GAP_MS) return;
-  lastRunAt = now;
+  // second one racing the same host list — but *record* that a fresh trigger
+  // arrived, so the in-flight pass runs once more when it ends. This is the only
+  // throttle; there is no time-based circuit breaker. A back-to-back trigger is
+  // exactly what happens when the servers list hydrates a moment after app start:
+  // the first pass may read an empty list, and the second, on the loaded list, is
+  // the one that does the work. A cooldown that dropped it — or a plain coalesce
+  // that swallowed it while the first pass was still awaiting session/caps —
+  // stranded every server on "waiting" for good, because nothing re-triggers once
+  // the list is stable. Idempotence is carried by the `processed` set, not a clock.
+  if (running) {
+    rerunRequested = true;
+    return running;
+  }
   running = (async () => {
     try {
-      // Guard 1 — signed in and enabled.
-      if (!autoBridgeEnabled()) return;
-      let session;
-      try {
-        session = await api.redstoneSession();
-      } catch {
-        return;
-      }
-      if (!session) return;
-
-      // Guard 2 — this deployment offers the bridge. The base URL comes from the
-      // *session* rmux just fetched, not a separate localStorage key. A session
-      // restored from the keychain (already signed in, never re-signed-in in this
-      // build) leaves `rmux.redstone.address` empty, and reading that instead
-      // stranded every server on "waiting" — the engine bailed here before the
-      // per-server loop ever ran. The stored address is only a fallback.
-      const address = (session.baseUrl ?? "").trim().replace(/\/+$/, "") || baseAddress();
-      if (!address) return;
-      let caps;
-      try {
-        caps = await api.redstoneCapabilities(address);
-      } catch {
-        return;
-      }
-      if (!caps?.bridge) return;
-
-      const { statuses, set } = useAutoBridgeStore.getState();
-      const servers = useWorkspace.getState().servers;
-
-      for (const server of servers) {
-        // Already reached a terminal outcome this session — leave it be.
-        if (processed.has(server.id)) continue;
-        // Do not re-mark one mid-flight (a second overlapping pass, or a status
-        // already set to bridging).
-        if (statuses[server.id]?.status === "bridging") continue;
-
-        set(server.id, { status: "bridging" });
-
-        try {
-          const st = await api.redstoneHostStatus(server.target);
-          if (st.enrolled) {
-            // The orphaned-token guard: a host already carrying a token must not
-            // be re-minted.
-            set(server.id, { status: "skipped", detail: "already bridged" });
-            processed.add(server.id);
-            continue;
-          }
-        } catch (e) {
-          // Status unreadable (host down, ssh refused). Record and move on;
-          // aborting the whole pass would strand every server behind this one.
-          set(server.id, {
-            status: "failed",
-            detail: e instanceof Error ? e.message : String(e),
-          });
-          processed.add(server.id);
-          continue;
-        }
-
-        try {
-          await api.redstoneEnrol(server.target);
-          set(server.id, { status: "bridged" });
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          if (looksIncapable(message)) {
-            set(server.id, { status: "skipped", detail: "can't bridge (Windows)" });
-          } else {
-            set(server.id, { status: "failed", detail: message });
-          }
-        }
-        processed.add(server.id);
-      }
+      do {
+        rerunRequested = false;
+        await onePass();
+      } while (rerunRequested);
     } finally {
       running = null;
     }
   })();
   return running;
+}
+
+/** Set while a pass is in flight to mean "the inputs changed — go again". */
+let rerunRequested = false;
+
+/** One sweep over the current servers list. Re-reads `servers` each call, so a
+ *  re-run after hydration sees the loaded list. Never throws. */
+async function onePass(): Promise<void> {
+  const { setDiag } = useAutoBridgeStore.getState();
+
+  // Guard 1 — signed in and enabled.
+  if (!autoBridgeEnabled()) return setDiag("auto-bridge is off");
+  let session;
+  try {
+    session = await api.redstoneSession();
+  } catch (e) {
+    return setDiag(`can't read the Redstone session: ${e instanceof Error ? e.message : e}`);
+  }
+  if (!session) return setDiag("not signed in to Redstone");
+
+  // Guard 2 — this deployment offers the bridge. The base URL comes from the
+  // *session* rmux just fetched, not a separate localStorage key. A session
+  // restored from the keychain (already signed in, never re-signed-in in this
+  // build) leaves `rmux.redstone.address` empty, and reading that instead
+  // stranded every server on "waiting" — the engine bailed here before the
+  // per-server loop ever ran. The stored address is only a fallback.
+  const address = (session.baseUrl ?? "").trim().replace(/\/+$/, "") || baseAddress();
+  if (!address) return setDiag("no Redstone address");
+  let caps;
+  try {
+    caps = await api.redstoneCapabilities(address);
+  } catch (e) {
+    return setDiag(`can't reach ${address}: ${e instanceof Error ? e.message : e}`);
+  }
+  if (!caps?.bridge) return setDiag(`${address} does not offer the bridge`);
+
+  const { statuses, set } = useAutoBridgeStore.getState();
+  const servers = useWorkspace.getState().servers;
+  if (servers.length === 0) return setDiag("no servers in the workspace yet");
+  setDiag(`bridging ${servers.length} server${servers.length === 1 ? "" : "s"}…`);
+
+  for (const server of servers) {
+    // Already reached a terminal outcome this session — leave it be.
+    if (processed.has(server.id)) continue;
+    // Do not re-mark one mid-flight (a second overlapping pass, or a status
+    // already set to bridging).
+    if (statuses[server.id]?.status === "bridging") continue;
+
+    set(server.id, { status: "bridging" });
+
+    try {
+      const st = await api.redstoneHostStatus(server.target);
+      if (st.enrolled) {
+        // The orphaned-token guard: a host already carrying a token must not
+        // be re-minted.
+        set(server.id, { status: "skipped", detail: "already bridged" });
+        processed.add(server.id);
+        continue;
+      }
+    } catch (e) {
+      // Status unreadable (host down, ssh refused). Record and move on;
+      // aborting the whole pass would strand every server behind this one.
+      set(server.id, {
+        status: "failed",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+      processed.add(server.id);
+      continue;
+    }
+
+    try {
+      await api.redstoneEnrol(server.target);
+      set(server.id, { status: "bridged" });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (looksIncapable(message)) {
+        set(server.id, { status: "skipped", detail: "can't bridge (Windows)" });
+      } else {
+        set(server.id, { status: "failed", detail: message });
+      }
+    }
+    processed.add(server.id);
+  }
+
+  // A short tally, so the panel says the sweep finished rather than leaving the
+  // in-flight "bridging N…" line up for good.
+  const outcomes = useAutoBridgeStore.getState().statuses;
+  const done = servers.filter((s) => processed.has(s.id)).length;
+  setDiag(`swept ${done}/${servers.length} — ${tally(servers, outcomes)}`);
+}
+
+/** "3 bridged, 1 skipped, 1 failed" from the current outcome map. */
+function tally(
+  servers: { id: ServerId }[],
+  outcomes: Record<ServerId, AutoBridgeEntry>,
+): string {
+  const count = (s: AutoBridgeStatus) =>
+    servers.filter((sv) => outcomes[sv.id]?.status === s).length;
+  const parts = [
+    [count("bridged"), "bridged"],
+    [count("skipped"), "skipped"],
+    [count("failed"), "failed"],
+  ] as const;
+  const shown = parts.filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`);
+  return shown.length ? shown.join(", ") : "nothing to do";
 }
 
 /**
