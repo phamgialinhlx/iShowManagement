@@ -204,12 +204,20 @@ pub fn start_bridge_script(home: &str, agent: &str) -> String {
     // — so replacing it loses nothing, and there must be exactly **one** bridge per
     // host or Redstone sees the machine connect twice under the same token. This
     // only runs when *this* build's bridge is not already up (the guard above), so
-    // a steady state never re-kills. `[r]mux-agent-…` is self-proof, like the
-    // guard: the bracket keeps the pattern from matching the shell running it.
-    let any_bridge = shell_quote("[r]mux-agent-.* bridge");
+    // a steady state never re-kills.
+    //
+    // **`-fx`, a full-line match, and it is load-bearing.** A bracketed substring
+    // pattern (`[r]mux-agent-… bridge`) is *not* enough here: the very shell
+    // running this carries the `nohup … rmux-agent-<path> bridge` line in its own
+    // argv, so a substring `pkill` matches the wrapper and kills it *before* the
+    // `nohup` runs — the old bridge dies and the new one never starts. Verified on
+    // a real host. `-x` requires the pattern to match the whole command line; a
+    // real bridge's is exactly `<path>rmux-agent-<fp> bridge`, while the wrapper's
+    // ends in `fi`, so only the bridge matches.
+    let any_bridge = shell_quote(".*rmux-agent-.* bridge");
     format!(
         "if pgrep -f {pattern}' bridge' >/dev/null 2>&1; then echo running; else \
-         pkill -f {any_bridge} 2>/dev/null || true; \
+         pkill -fx {any_bridge} 2>/dev/null || true; \
          nohup {agent_q} bridge >> {log} 2>&1 < /dev/null & \
          echo started; fi"
     )
@@ -952,10 +960,13 @@ mod tests {
         // Exactly one bridge per host: a bridge holds no session state, so an
         // upgrade must stop the previous build's bridge rather than run a second
         // one under the same token, which Redstone would see as the host
-        // connecting twice. The kill pattern must be self-proof (bracketed) or
-        // `pkill` takes down the shell running it before the new bridge starts.
+        // connecting twice. The kill must be a **full-line** match (`-fx`): the
+        // wrapper's own argv carries the `nohup … rmux-agent-<path> bridge` line,
+        // so a substring `pkill` matches and kills the wrapper before the new
+        // bridge starts. Verified on a real host that `-fx` matches a bridge
+        // (`<path> bridge`) but not the wrapper (ends in `fi`).
         let script = start_bridge_script("/home/dev.user", "/home/dev.user/.rmux/bin/rmux-agent-0.2.25-ab");
-        assert!(script.contains("pkill -f '[r]mux-agent-.* bridge'"), "{script}");
+        assert!(script.contains("pkill -fx '.*rmux-agent-.* bridge'"), "{script}");
         // The kill only runs in the else branch (this build's bridge not already
         // up), so a steady state never re-kills.
         let else_branch = script.split("else").nth(1).unwrap_or("");
