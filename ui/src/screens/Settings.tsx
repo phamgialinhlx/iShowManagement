@@ -14,7 +14,6 @@ import { EditorPanel } from "../components/EditorPanel";
 import { ShortcutSettings } from "../components/ShortcutSettings";
 import { api, isTauri, type SignedIn } from "../lib/api";
 import { SERVER_KEY } from "../components/SignIn";
-import { useAutoBridge } from "../lib/redstone-auto-bridge";
 
 /**
  * Settings, in its own window.
@@ -60,15 +59,14 @@ export function Settings() {
   const [section, setSection] = useState<Section>("claude");
   const [session, setSession] = useState<SignedIn | null>(null);
 
-  // Settings is its own webview with its own JS context and its own copy of the
-  // auto-bridge store — the sweep engine mounted in the workbench window cannot
-  // reach it. Without this hook here the REDSTONE panel showed a store nothing
-  // ever updated: every server sat on "waiting" for good, even while the
-  // workbench was bridging them. Mount the engine here too so opening this window
-  // runs (and shows) the sweep. Enrolment is idempotent for an already-enrolled
-  // host (it starts the bridge rather than re-minting), so a second engine is
-  // safe; the workbench's pass has almost always finished before this opens.
-  useAutoBridge();
+  // The auto-bridge engine deliberately does NOT run in this window. Settings is
+  // a transient webview; its sweep fires multi-second SSH-backed commands, and a
+  // window closed mid-command leaves the IPC response finishing on a WKURLScheme
+  // task WebKit has already stopped — which aborts the whole app (a real crash we
+  // hit). The engine runs only in the persistent workbench window; this window
+  // *displays* the status it publishes to `localStorage`, and toggling the switch
+  // here signals the workbench to sweep (see `redstone-auto-bridge.ts`). No long
+  // command is ever issued from here.
 
   // Settings is its own window with its own JS context, so it does not inherit
   // the workbench's session object and has to ask for itself.

@@ -11,7 +11,6 @@ import { useWorkspace } from "../lib/workspace";
 import {
   autoBridgeEnabled,
   notifyAutoBridge,
-  runAutoBridge,
   setAutoBridgeEnabled,
   useAutoBridgeStore,
   type AutoBridgeStatus,
@@ -73,11 +72,14 @@ export function RedstonePanel() {
 
   const toggleAuto = (on: boolean) => {
     setAuto(on);
-    setAutoBridgeEnabled(on);
-    // Flipping it on runs a sweep now; off just stops future runs — nothing is
+    // Only flip the preference — do NOT run the sweep here. This panel lives in
+    // the Settings window, whose long SSH-backed commands crash the app if the
+    // window closes mid-flight. Writing the preference fires a `storage` event in
+    // the workbench window, whose engine runs the sweep and mirrors the status
+    // back for this panel to display. Off just stops future runs — nothing is
     // un-bridged, because a token already written to a host is not ours to pull
     // as a side effect of a preference.
-    if (on) void runAutoBridge();
+    setAutoBridgeEnabled(on);
   };
 
   // The fallback, folded away. Open only if someone goes looking for it.

@@ -65,18 +65,77 @@ type AutoBridgeState = {
   clear: () => void;
 };
 
+/** Where the engine publishes its status so *other* windows can display it.
+ *  The engine runs only in the workbench window (see `useAutoBridge`); the
+ *  Settings window is a separate webview with its own store and must never run
+ *  the sweep itself (its long SSH-backed commands crash the app if the window
+ *  closes mid-flight). So the workbench writes here and Settings mirrors it. */
+const STATUS_KEY = "rmux.redstone.autoBridge.status";
+
+function loadStatus(): { statuses: Record<ServerId, AutoBridgeEntry>; diag?: string } {
+  try {
+    const raw = localStorage.getItem(STATUS_KEY);
+    if (raw) return JSON.parse(raw) as { statuses: Record<ServerId, AutoBridgeEntry>; diag?: string };
+  } catch {
+    // Unreadable/absent — start empty.
+  }
+  return { statuses: {} };
+}
+
+function saveStatus(statuses: Record<ServerId, AutoBridgeEntry>, diag?: string): void {
+  try {
+    localStorage.setItem(STATUS_KEY, JSON.stringify({ statuses, diag }));
+  } catch {
+    // A window that cannot persist still works locally; other windows just will
+    // not mirror it.
+  }
+}
+
 /**
  * The status map the panel subscribes to. A standalone store rather than a limb
  * of the workspace store, because it is a fact about Redstone enrolment, not
  * about the Server → Project → Session tree, and folding it in would re-render
  * every rail consumer on each `bridging` tick.
+ *
+ * Every mutation is mirrored to `localStorage` so the Settings window (a separate
+ * webview) can display what the workbench engine is doing without running the
+ * engine — and hydrated from it on creation, so a window opened mid-sweep shows
+ * the current state rather than a blank list.
  */
-export const useAutoBridgeStore = create<AutoBridgeState>((set) => ({
-  statuses: {},
-  set: (id, entry) => set((s) => ({ statuses: { ...s.statuses, [id]: entry } })),
-  setDiag: (diag) => set({ diag }),
-  clear: () => set({ statuses: {}, diag: undefined }),
-}));
+export const useAutoBridgeStore = create<AutoBridgeState>((set) => {
+  const initial = loadStatus();
+  return {
+    statuses: initial.statuses,
+    diag: initial.diag,
+    set: (id, entry) =>
+      set((s) => {
+        const statuses = { ...s.statuses, [id]: entry };
+        saveStatus(statuses, s.diag);
+        return { statuses };
+      }),
+    setDiag: (diag) =>
+      set((s) => {
+        saveStatus(s.statuses, diag);
+        return { diag };
+      }),
+    clear: () => {
+      saveStatus({}, undefined);
+      set({ statuses: {}, diag: undefined });
+    },
+  };
+});
+
+// Cross-window display mirror. A `storage` event fires only in *other* windows,
+// so the workbench's writes reach Settings here with no loop and no command. We
+// set state directly (not through the actions above) so mirroring does not write
+// back to `localStorage`.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== STATUS_KEY) return;
+    const next = loadStatus();
+    useAutoBridgeStore.setState({ statuses: next.statuses, diag: next.diag });
+  });
+}
 
 /**
  * Servers that have reached a terminal outcome this session, so re-invocation
@@ -354,11 +413,30 @@ export function useAutoBridge(): void {
     evaluate();
   }, [servers, evaluate]);
 
-  // Sign-in, sign-out and the toggle.
+  // Sign-in, sign-out and the toggle — within this window.
   useEffect(() => {
     if (!isTauri()) return;
     const onSignal = () => evaluate();
     window.addEventListener(AUTO_BRIDGE_EVENT, onSignal);
     return () => window.removeEventListener(AUTO_BRIDGE_EVENT, onSignal);
+  }, [evaluate]);
+
+  // The toggle lives in the Settings window, which does not run the engine, so
+  // flipping it there reaches the engine only through `localStorage`. When the
+  // preference turns on from another window, re-sweep here — clearing the
+  // processed set first so a re-enable genuinely retries rather than reporting
+  // the last run's outcomes. (A `storage` event never fires in the window that
+  // wrote it, so this is the cross-window half of the same signal.)
+  useEffect(() => {
+    if (!isTauri()) return;
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== PREF_KEY) return;
+      if (e.newValue === "true") {
+        processed.clear();
+        evaluate();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, [evaluate]);
 }
