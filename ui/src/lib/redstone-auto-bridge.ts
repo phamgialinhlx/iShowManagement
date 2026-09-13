@@ -231,6 +231,29 @@ export function runAutoBridge(): Promise<void> {
 /** Set while a pass is in flight to mean "the inputs changed — go again". */
 let rerunRequested = false;
 
+/** How long any one host gets before the sweep gives up on it and moves on.
+ *  Generous enough for a first enrol, which uploads the ~1 MB agent over ssh on a
+ *  slow link, but bounded so one unreachable host (a private-LAN alias off the
+ *  VPN, a box that is simply down) cannot strand every server queued behind it —
+ *  the serial sweep would otherwise sit on it for the OS TCP timeout, ~75s, each. */
+const HOST_TIMEOUT_MS = 45_000;
+
+/** Marker on the error a timeout throws, so the loop can tell "took too long" from
+ *  a real failure and phrase it as a skip rather than an alarm. */
+const TIMED_OUT = "__rmux_timed_out__";
+
+/** Resolve `p`, or reject after `ms` with a tagged timeout error. The underlying
+ *  IPC is not cancellable, so it runs to completion in the background — harmless:
+ *  a late enrol just bridges the host anyway, and the next sweep sees it enrolled.
+ *  What this buys is that the *sweep* stops waiting and moves to the next host. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(TIMED_OUT)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 /** One sweep over the current servers list. Re-reads `servers` each call, so a
  *  re-run after hydration sees the loaded list. Never throws. */
 async function onePass(): Promise<void> {
@@ -278,14 +301,18 @@ async function onePass(): Promise<void> {
 
     let st;
     try {
-      st = await api.redstoneHostStatus(server.target);
+      st = await withTimeout(api.redstoneHostStatus(server.target), HOST_TIMEOUT_MS);
     } catch (e) {
-      // Status unreadable (host down, ssh refused). Record and move on;
-      // aborting the whole pass would strand every server behind this one.
-      set(server.id, {
-        status: "failed",
-        detail: e instanceof Error ? e.message : String(e),
-      });
+      // Status unreadable (host down, ssh refused) or too slow to answer. Record
+      // and move on; aborting the whole pass would strand every server behind
+      // this one — which is exactly what an unreachable host used to do.
+      const message = e instanceof Error ? e.message : String(e);
+      set(
+        server.id,
+        message === TIMED_OUT
+          ? { status: "skipped", detail: "couldn't reach it — timed out" }
+          : { status: "failed", detail: message },
+      );
       processed.add(server.id);
       continue;
     }
@@ -303,14 +330,16 @@ async function onePass(): Promise<void> {
         // host is left in when it was enrolled by a build whose start step
         // never actually launched the bridge. Start the bridge on the existing
         // token; re-minting would orphan it.
-        await api.redstoneStartBridge(server.target);
+        await withTimeout(api.redstoneStartBridge(server.target), HOST_TIMEOUT_MS);
       } else {
-        await api.redstoneEnrol(server.target);
+        await withTimeout(api.redstoneEnrol(server.target), HOST_TIMEOUT_MS);
       }
       set(server.id, { status: "bridged" });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      if (looksIncapable(message)) {
+      if (message === TIMED_OUT) {
+        set(server.id, { status: "skipped", detail: "couldn't reach it — timed out" });
+      } else if (looksIncapable(message)) {
         set(server.id, { status: "skipped", detail: "can't bridge (Windows)" });
       } else {
         set(server.id, { status: "failed", detail: message });
