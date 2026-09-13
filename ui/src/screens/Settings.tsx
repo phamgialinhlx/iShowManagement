@@ -14,6 +14,7 @@ import { EditorPanel } from "../components/EditorPanel";
 import { ShortcutSettings } from "../components/ShortcutSettings";
 import { api, isTauri, type SignedIn } from "../lib/api";
 import { SERVER_KEY } from "../components/SignIn";
+import { useAutoBridge } from "../lib/redstone-auto-bridge";
 
 /**
  * Settings, in its own window.
@@ -58,6 +59,16 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
 export function Settings() {
   const [section, setSection] = useState<Section>("claude");
   const [session, setSession] = useState<SignedIn | null>(null);
+
+  // Settings is its own webview with its own JS context and its own copy of the
+  // auto-bridge store — the sweep engine mounted in the workbench window cannot
+  // reach it. Without this hook here the REDSTONE panel showed a store nothing
+  // ever updated: every server sat on "waiting" for good, even while the
+  // workbench was bridging them. Mount the engine here too so opening this window
+  // runs (and shows) the sweep. Enrolment is idempotent for an already-enrolled
+  // host (it starts the bridge rather than re-minting), so a second engine is
+  // safe; the workbench's pass has almost always finished before this opens.
+  useAutoBridge();
 
   // Settings is its own window with its own JS context, so it does not inherit
   // the workbench's session object and has to ask for itself.

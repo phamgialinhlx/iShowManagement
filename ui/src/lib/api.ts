@@ -839,6 +839,15 @@ export const api = {
     call<RedstoneHost>("redstone_host_status", { target }),
 
   /**
+   * Start the bridge on a host that is *already* enrolled, without minting a new
+   * token — for a host that holds a token but whose bridge is down (e.g. enrolled
+   * by a build that never actually started it). Re-enrolling would orphan the old
+   * token; this starts the bridge on the one already there.
+   */
+  redstoneStartBridge: (target: TargetRef) =>
+    call<RedstoneHost>("redstone_start_bridge", { target }),
+
+  /**
    * Enrol with a token the operator pasted out of Redstone's own UI.
    *
    * The path that works without signing in — see `redstone.rs`. Minting over

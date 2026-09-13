@@ -236,6 +236,7 @@ pub fn run() {
             redstone::redstone_enrol_with_token,
             redstone::redstone_unenrol,
             redstone::redstone_host_status,
+            redstone::redstone_start_bridge,
             claude::claude_start,
             claude::pi_start,
             claude::claude_list_sessions,

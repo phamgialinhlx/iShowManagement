@@ -217,15 +217,9 @@ async function onePass(): Promise<void> {
 
     set(server.id, { status: "bridging" });
 
+    let st;
     try {
-      const st = await api.redstoneHostStatus(server.target);
-      if (st.enrolled) {
-        // The orphaned-token guard: a host already carrying a token must not
-        // be re-minted.
-        set(server.id, { status: "skipped", detail: "already bridged" });
-        processed.add(server.id);
-        continue;
-      }
+      st = await api.redstoneHostStatus(server.target);
     } catch (e) {
       // Status unreadable (host down, ssh refused). Record and move on;
       // aborting the whole pass would strand every server behind this one.
@@ -237,8 +231,23 @@ async function onePass(): Promise<void> {
       continue;
     }
 
+    // Enrolled *and* the bridge is up — nothing to do.
+    if (st.enrolled && st.running) {
+      set(server.id, { status: "skipped", detail: "already bridged" });
+      processed.add(server.id);
+      continue;
+    }
+
     try {
-      await api.redstoneEnrol(server.target);
+      if (st.enrolled) {
+        // A token is already on the host but its bridge is down — the state a
+        // host is left in when it was enrolled by a build whose start step
+        // never actually launched the bridge. Start the bridge on the existing
+        // token; re-minting would orphan it.
+        await api.redstoneStartBridge(server.target);
+      } else {
+        await api.redstoneEnrol(server.target);
+      }
       set(server.id, { status: "bridged" });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

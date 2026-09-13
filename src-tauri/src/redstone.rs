@@ -484,6 +484,44 @@ pub async fn redstone_host_status(
     })
 }
 
+/// Start the bridge on a host that is **already enrolled**, without minting a new
+/// token.
+///
+/// This is the missing half of enrolment. A host enrolled by a build whose
+/// `start_bridge_script` never actually launched the bridge (the `pgrep`
+/// self-match bug) is left holding a token with no bridge — and the auto-bridge
+/// sweep, which gated only on *enrolled*, skipped it as "already bridged" for
+/// ever, so the fix never reached it. Re-enrolling would mint a second token and
+/// orphan the first (see the module note), so the sweep must be able to start the
+/// bridge on the token that is already there.
+///
+/// Reads the existing enrolment rather than taking one, so it cannot be used to
+/// bridge an un-enrolled host by accident: an absent file is an error, not a
+/// silent enrol.
+#[tauri::command]
+pub async fn redstone_start_bridge(
+    app: tauri::AppHandle,
+    target: crate::terminal::TargetRef,
+) -> Result<HostStatus, String> {
+    let claude_store = app.state::<crate::claude::ClaudeStore>();
+    let resolved = crate::claude::resolve(&claude_store, &target).await?;
+    let home = home_of(resolved.as_ref()).await?;
+
+    let raw = run(resolved.as_ref(), &read_enrolment_script(&home)).await?;
+    let enrolment: rmux_bridge::Enrolment = serde_json::from_str(raw.trim())
+        .map_err(|_| "this host is not enrolled — nothing to start".to_owned())?;
+
+    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+    let started = run(resolved.as_ref(), &start_bridge_script(&home, &installed.program)).await?;
+
+    Ok(HostStatus {
+        enrolled: true,
+        running: started.contains("running") || started.contains("started"),
+        host_id: enrolment.host_id,
+        endpoint: Some(enrolment.endpoint),
+    })
+}
+
 /// Stop the bridge and remove the token.
 #[tauri::command]
 pub async fn redstone_unenrol(
