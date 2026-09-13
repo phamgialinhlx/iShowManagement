@@ -520,7 +520,9 @@ async fn dispatch(request: Request) -> Response {
                 }
                 match attach::write(&session, chunk).await {
                     Ok(true) => {}
-                    Ok(false) => return drive_error(&session).await,
+                    // `write` drives old daemons too, so a `false` here means no
+                    // live daemon holds the name — it ended.
+                    Ok(false) => return not_found(&session),
                     Err(e) => return failed(e),
                 }
             }
@@ -529,7 +531,7 @@ async fn dispatch(request: Request) -> Response {
 
         Request::Interrupt { session } => match attach::write(&session, keys::interrupt()).await {
             Ok(true) => Response::Ok,
-            Ok(false) => drive_error(&session).await,
+            Ok(false) => not_found(&session),
             Err(e) => failed(e),
         },
 
@@ -581,7 +583,7 @@ async fn dispatch(request: Request) -> Response {
             }
             match attach::write(&session, &bytes).await {
                 Ok(true) => Response::Ok,
-                Ok(false) => drive_error(&session).await,
+                Ok(false) => not_found(&session),
                 Err(e) => failed(e),
             }
         }
@@ -740,13 +742,13 @@ fn hostname() -> String {
 /// know what shells exist, `~/.rmux/aliases.json` knows what the operator calls
 /// them, and Claude's own session files know what each one is *doing*.
 async fn live_sessions() -> anyhow::Result<Vec<Session>> {
-    let summaries = attach::list_with_drivable().await?;
+    let summaries = attach::list().await?;
     let aliases = alias::load();
     let statuses = status::snapshot();
 
     Ok(summaries
         .into_iter()
-        .map(|(s, drivable)| {
+        .map(|s| {
             let kind = if s.name.starts_with("claude-") {
                 Kind::Claude
             } else if s.name.starts_with("pi-") {
@@ -769,10 +771,12 @@ async fn live_sessions() -> anyhow::Result<Vec<Session>> {
                 pid: s.pid,
                 age_seconds: s.age_seconds,
                 attached: s.attached,
-                // False when the owning daemon predates the drive frames — the
-                // session is enumerated but a `send`/`readTerminal` will come back
-                // `UnsupportedByHost`. Redstone hides the composer for these.
-                drivable,
+                // Every live session is drivable: this build's daemon takes
+                // `Frame::Write`, and an older daemon is driven through the
+                // original `Hello`/`Data` attach (see `attach::write`). Kept as a
+                // field so a future genuinely-undrivable case has somewhere to say
+                // so, but today Redstone may show a composer for anything listed.
+                drivable: true,
                 name: s.name,
             }
         })

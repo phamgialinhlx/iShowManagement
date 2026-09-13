@@ -428,33 +428,6 @@ pub async fn drive_failure(session: &str) -> DriveFailure {
     }
 }
 
-/// Every session, paired with whether the daemon that owns it can be driven.
-///
-/// The union `list` builds, but tagged: this build's own daemon has the frames so
-/// its sessions are drivable, and a sibling's are drivable only if its version is
-/// at least [`MIN_DRIVABLE`]. An unparseable sibling name is treated as drivable
-/// rather than hiding a session we are unsure about.
-pub async fn list_with_drivable() -> anyhow::Result<Vec<(crate::protocol::SessionSummary, bool)>> {
-    let endpoint = daemon::endpoint()?;
-    let mut all: Vec<(crate::protocol::SessionSummary, bool)> =
-        sessions_of(&endpoint).await.into_iter().map(|s| (s, true)).collect();
-
-    for binary in sibling_binaries() {
-        let Some(name) = binary.file_name().and_then(|n| n.to_str()) else { continue };
-        let Ok(other) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name) else {
-            continue;
-        };
-        let drivable = match agent_version(name) {
-            Some(v) => v >= MIN_DRIVABLE,
-            None => true,
-        };
-        all.extend(sessions_of(&other).await.into_iter().map(|s| (s, drivable)));
-    }
-
-    all.sort_by_key(|(s, _)| std::cmp::Reverse(s.age_seconds));
-    Ok(all)
-}
-
 /// Ask the daemon what it is running.
 ///
 /// Returns an empty list when there is no daemon at all, which is the ordinary
@@ -817,35 +790,63 @@ pub async fn open_terminal_stream(
     Ok(Some(TerminalStream { to_daemon: in_tx, output: out_rx }))
 }
 
-pub async fn write(session: &str, data: &[u8]) -> anyhow::Result<bool> {
-    let mut endpoint = daemon::endpoint()?;
-    let ours = sessions_of(&endpoint).await;
-    if !ours.iter().any(|s| s.name == session)
-        && let Some(binary) = owner_of(session).await
-        && let Some(name) = binary.file_name().and_then(|n| n.to_str())
-        && let Ok(other) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name)
-    {
-        endpoint = other;
-    }
+/// The viewport a one-shot drive attaches an old daemon with. Wide enough that a
+/// TUI does not truncate; the operator's own attach resizes it back to their pane.
+const DRIVE_COLS: u16 = 120;
+const DRIVE_ROWS: u16 = 40;
 
-    // No daemon at all means no session, which is a clean `false` rather than an
-    // error. **And emphatically not a reason to start one**: a daemon spawned to
-    // service a write has nothing to write to, so it would leave a fresh, empty
-    // daemon behind on every send to a host whose sessions have all ended.
-    let Ok(mut stream) = ipc::connect(&endpoint).await else {
+/// Deliver keystrokes to a session that already exists, without holding an
+/// attachment.
+///
+/// **Drives every daemon, new or old.** This build's own daemon (and any
+/// ≥ 0.2.20) takes the one-shot `Frame::Write`. A daemon from *before* that frame
+/// existed is driven the way rmux's own terminals drive it — the original
+/// `Hello`/`Data` attach, which every daemon has always spoken — so a session
+/// started weeks ago under an earlier agent is still typeable. Without this, a
+/// busy host that keeps a daemon per rmux upgrade could *list* such a session but
+/// never accept input to it: exactly the "the agent connected to Redstone is not
+/// the one running it" report.
+///
+/// `false` means no live daemon holds the name — it ended. It never *creates* a
+/// session: the fallback attaches only to a name `owner_of` just confirmed live.
+pub async fn write(session: &str, data: &[u8]) -> anyhow::Result<bool> {
+    let own = daemon::endpoint()?;
+    // Our own daemon is this build, which has `Frame::Write`.
+    if sessions_of(&own).await.iter().any(|s| s.name == session) {
+        return write_via_frame(&own, session, data).await;
+    }
+    // Otherwise the session belongs to another installed build's daemon.
+    let Some(binary) = owner_of(session).await else { return Ok(false) };
+    let Some(name) = binary.file_name().and_then(|n| n.to_str()) else { return Ok(false) };
+    let Ok(endpoint) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name) else {
+        return Ok(false);
+    };
+    match agent_version(name) {
+        // Too old for `Frame::Write` — attach with the original protocol instead.
+        Some(v) if v < MIN_DRIVABLE => write_via_attach(session, data).await,
+        _ => write_via_frame(&endpoint, session, data).await,
+    }
+}
+
+/// The one-shot `Frame::Write` path, for a daemon new enough to answer it.
+///
+/// **Never starts a daemon** and **never sends a Hello**: a Hello would *create*
+/// the session when the name is unknown, so a stale name from a remote caller
+/// would spawn a shell instead of reporting that the conversation had ended.
+async fn write_via_frame(
+    endpoint: &ipc::Endpoint,
+    session: &str,
+    data: &[u8],
+) -> anyhow::Result<bool> {
+    let Ok(mut stream) = ipc::connect(endpoint).await else {
         return Ok(false);
     };
 
-    // `Write` alone, with no Hello — the same rule as `Kill`, for the same
-    // reason. A Hello would *create* the session when the name is unknown, so a
-    // stale name from a remote caller would silently spawn a shell instead of
-    // reporting that the conversation had ended.
     stream
         .write_all(&Frame::Write { session: session.to_owned(), data: data.to_vec() }.encode())
         .await?;
     stream.flush().await?;
 
-    // Unlike `kill`, this one has an answer worth waiting for.
     let mut buf = Vec::new();
     let mut chunk = [0u8; 64];
     loop {
@@ -856,15 +857,54 @@ pub async fn write(session: &str, data: &[u8]) -> anyhow::Result<bool> {
             };
         }
         let n = tokio::io::AsyncReadExt::read(&mut stream, &mut chunk).await?;
-        // The daemon closed without answering — an older build that does not
-        // know this frame. Treated as "did not land", because the one thing
-        // that must not happen is reporting a message as delivered when the
-        // far side dropped it on the floor.
+        // A daemon that predates this frame closes rather than acking; that is the
+        // one the caller routed *away* from, so reaching it here means the session
+        // ended between resolution and now — "did not land".
         if n == 0 {
             return Ok(false);
         }
         buf.extend_from_slice(&chunk[..n]);
     }
+}
+
+/// Drive a pre-`Frame::Write` daemon by attaching with the original protocol,
+/// delivering the keystrokes, and detaching — the machinery rmux's own live
+/// terminals use, so it is known to work against every daemon ever shipped.
+///
+/// Reuses [`open_terminal_stream`], which verifies the session exists before it
+/// attaches (so this cannot create one). **Draining the output is load-bearing:**
+/// the stream's pump multiplexes our input and the daemon's output on one task, so
+/// if we never read the scrollback replay the pump blocks on a full channel and
+/// our keystrokes never reach the daemon. Draining until the output goes idle both
+/// frees the pump to deliver the input and confirms the session processed it.
+///
+/// The attach carries a size, so the session briefly reflows to it — the keystrokes
+/// reach the agent's input regardless of width, and the operator's next real attach
+/// resizes it back. The one residual risk is the millisecond between the existence
+/// check and the attach: a session that ends in it would be recreated, the same
+/// narrow window every attach has.
+async fn write_via_attach(session: &str, data: &[u8]) -> anyhow::Result<bool> {
+    let Some(mut term) = open_terminal_stream(session, DRIVE_COLS, DRIVE_ROWS).await? else {
+        return Ok(false);
+    };
+    if !term.input(data.to_vec()).await {
+        return Ok(false);
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(600);
+    loop {
+        if deadline.saturating_duration_since(tokio::time::Instant::now()).is_zero() {
+            break;
+        }
+        match tokio::time::timeout(std::time::Duration::from_millis(120), term.next()).await {
+            Ok(Some(StreamEvent::Output(_))) => continue,
+            Ok(Some(StreamEvent::Exited(_))) | Ok(None) => break,
+            // Idle: the replay is drained and our input has been echoed. Done.
+            Err(_) => break,
+        }
+    }
+    // Dropping `term` detaches; the session keeps running.
+    Ok(true)
 }
 
 /// Hand the daemon environment for future sessions, read from **stdin**.
