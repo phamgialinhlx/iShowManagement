@@ -368,6 +368,93 @@ fn hand_off(binary: &std::path::Path) -> anyhow::Result<ExitCode> {
     }
 }
 
+/// The first agent build that understands the drive frames
+/// (`Frame::Write`/`Frame::Read`, added in 0.2.20). A session held by an older
+/// daemon is enumerated by `list` but cannot be driven — the caller is told
+/// [`rmux_bridge::ErrorCode::UnsupportedByHost`], not `NotFound`, because it is
+/// alive.
+pub const MIN_DRIVABLE: (u32, u32, u32) = (0, 2, 20);
+
+/// Parse `X.Y.Z` from an installed agent's file name
+/// (`rmux-agent-<version>-<fingerprint>`). The version has no dashes and the
+/// fingerprint follows one, so the segment after the `rmux-agent-` prefix and
+/// before the next `-` is the version. `None` for anything that does not match.
+///
+/// Dev builds are all `0.1.0`, which parses below `MIN_DRIVABLE` even though a
+/// dev binary built from current source *does* have the frames — so callers treat
+/// an *own*-daemon session as drivable unconditionally (this build has the
+/// frames) and apply the version test only to sibling builds, which on a real
+/// host carry real version numbers.
+pub fn agent_version(name: &str) -> Option<(u32, u32, u32)> {
+    let base = std::path::Path::new(name).file_name().and_then(|n| n.to_str()).unwrap_or(name);
+    let rest = base.strip_prefix("rmux-agent-")?;
+    let ver = rest.split('-').next()?;
+    let mut parts = ver.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// Why a drive attempt (`write`/`read`) came back empty: the session ended, or
+/// its owning daemon is a build too old to drive.
+pub enum DriveFailure {
+    /// No live daemon holds the name — it ended.
+    NotFound,
+    /// A daemon holds it, but that daemon predates the drive frames.
+    UnsupportedByHost,
+}
+
+/// Distinguish "gone" from "owned by an un-driveable daemon" — called only on the
+/// failure path, so its extra daemon queries stay off the hot path.
+///
+/// `owner_of` searches only *sibling* builds and requires a live pid, so a hit is
+/// a live session on an older daemon; the version test then decides. A miss means
+/// no older daemon holds it — either it ended, or it was the current build's own
+/// (which supports the frames, so a failed write there genuinely means gone).
+pub async fn drive_failure(session: &str) -> DriveFailure {
+    match owner_of(session).await {
+        Some(binary) => {
+            let name = binary.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            match agent_version(name) {
+                Some(v) if v < MIN_DRIVABLE => DriveFailure::UnsupportedByHost,
+                _ => DriveFailure::NotFound,
+            }
+        }
+        None => DriveFailure::NotFound,
+    }
+}
+
+/// Every session, paired with whether the daemon that owns it can be driven.
+///
+/// The union `list` builds, but tagged: this build's own daemon has the frames so
+/// its sessions are drivable, and a sibling's are drivable only if its version is
+/// at least [`MIN_DRIVABLE`]. An unparseable sibling name is treated as drivable
+/// rather than hiding a session we are unsure about.
+pub async fn list_with_drivable() -> anyhow::Result<Vec<(crate::protocol::SessionSummary, bool)>> {
+    let endpoint = daemon::endpoint()?;
+    let mut all: Vec<(crate::protocol::SessionSummary, bool)> =
+        sessions_of(&endpoint).await.into_iter().map(|s| (s, true)).collect();
+
+    for binary in sibling_binaries() {
+        let Some(name) = binary.file_name().and_then(|n| n.to_str()) else { continue };
+        let Ok(other) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name) else {
+            continue;
+        };
+        let drivable = match agent_version(name) {
+            Some(v) => v >= MIN_DRIVABLE,
+            None => true,
+        };
+        all.extend(sessions_of(&other).await.into_iter().map(|s| (s, drivable)));
+    }
+
+    all.sort_by_key(|(s, _)| std::cmp::Reverse(s.age_seconds));
+    Ok(all)
+}
+
 /// Ask the daemon what it is running.
 ///
 /// Returns an empty list when there is no daemon at all, which is the ordinary
@@ -801,4 +888,40 @@ pub async fn set_env(pairs: std::collections::BTreeMap<String, String>) -> anyho
     stream.write_all(&Frame::SetEnv(pairs).encode()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_version_parses_the_installed_name() {
+        // `rmux-agent-<version>-<fingerprint>`: the version has no dashes and the
+        // fingerprint follows one. Same class of parsing bug as the socket
+        // `file_stem` — a host with dots in the version made that one ship.
+        assert_eq!(agent_version("rmux-agent-0.2.17-854f82bdd55cb743"), Some((0, 2, 17)));
+        assert_eq!(agent_version("rmux-agent-0.2.20-abc"), Some((0, 2, 20)));
+        assert_eq!(agent_version("rmux-agent-0.1.0-deadbeef"), Some((0, 1, 0)));
+        // A full path is accepted — only the file name is parsed.
+        assert_eq!(
+            agent_version("/home/anh.nguyen/.rmux/bin/rmux-agent-0.2.19-5fb8eec"),
+            Some((0, 2, 19)),
+        );
+        // Not one of ours, or malformed → None (treated as drivable by callers).
+        assert_eq!(agent_version("rmux-agent-bridge"), None);
+        assert_eq!(agent_version("something-else"), None);
+        assert_eq!(agent_version("rmux-agent-0.2-abc"), None);
+    }
+
+    #[test]
+    fn the_drive_frames_arrived_in_0_2_20() {
+        // The whole point of the flag: sessions on daemons below this are
+        // enumerated but not driveable.
+        assert!(agent_version("rmux-agent-0.2.20-x").unwrap() >= MIN_DRIVABLE);
+        assert!(agent_version("rmux-agent-0.2.24-x").unwrap() >= MIN_DRIVABLE);
+        assert!(agent_version("rmux-agent-0.3.0-x").unwrap() >= MIN_DRIVABLE);
+        assert!(agent_version("rmux-agent-0.2.19-x").unwrap() < MIN_DRIVABLE);
+        assert!(agent_version("rmux-agent-0.2.13-x").unwrap() < MIN_DRIVABLE);
+        assert!(agent_version("rmux-agent-0.1.6-x").unwrap() < MIN_DRIVABLE);
+    }
 }

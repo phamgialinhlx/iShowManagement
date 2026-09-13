@@ -520,7 +520,7 @@ async fn dispatch(request: Request) -> Response {
                 }
                 match attach::write(&session, chunk).await {
                     Ok(true) => {}
-                    Ok(false) => return not_found(&session),
+                    Ok(false) => return drive_error(&session).await,
                     Err(e) => return failed(e),
                 }
             }
@@ -529,7 +529,7 @@ async fn dispatch(request: Request) -> Response {
 
         Request::Interrupt { session } => match attach::write(&session, keys::interrupt()).await {
             Ok(true) => Response::Ok,
-            Ok(false) => not_found(&session),
+            Ok(false) => drive_error(&session).await,
             Err(e) => failed(e),
         },
 
@@ -564,7 +564,7 @@ async fn dispatch(request: Request) -> Response {
                     let slice = if truncated { &bytes[bytes.len() - tail..] } else { &bytes[..] };
                     Response::Terminal { output: readable(slice), truncated }
                 }
-                Ok(None) => not_found(&session),
+                Ok(None) => drive_error(&session).await,
                 Err(e) => failed(e),
             }
         }
@@ -581,7 +581,7 @@ async fn dispatch(request: Request) -> Response {
             }
             match attach::write(&session, &bytes).await {
                 Ok(true) => Response::Ok,
-                Ok(false) => not_found(&session),
+                Ok(false) => drive_error(&session).await,
                 Err(e) => failed(e),
             }
         }
@@ -671,6 +671,27 @@ fn not_found(session: &str) -> Response {
     }
 }
 
+fn unsupported_by_host(session: &str) -> Response {
+    Response::Error {
+        code: ErrorCode::UnsupportedByHost,
+        message: format!(
+            "{session} is running but owned by a daemon too old to drive \
+             (agent < 0.2.20); read it with readConversation, or reattach from rmux"
+        ),
+    }
+}
+
+/// A drive verb (`send`, `readTerminal`, …) came back empty. Decide whether that
+/// is because the session ended (`NotFound`) or because its owning daemon is too
+/// old to drive (`UnsupportedByHost`) — the two must not read alike, because the
+/// second is a *live* session and a UI must not say it finished.
+async fn drive_error(session: &str) -> Response {
+    match attach::drive_failure(session).await {
+        attach::DriveFailure::UnsupportedByHost => unsupported_by_host(session),
+        attach::DriveFailure::NotFound => not_found(session),
+    }
+}
+
 /// This machine.
 fn host_info() -> HostInfo {
     HostInfo {
@@ -719,13 +740,13 @@ fn hostname() -> String {
 /// know what shells exist, `~/.rmux/aliases.json` knows what the operator calls
 /// them, and Claude's own session files know what each one is *doing*.
 async fn live_sessions() -> anyhow::Result<Vec<Session>> {
-    let summaries = attach::list().await?;
+    let summaries = attach::list_with_drivable().await?;
     let aliases = alias::load();
     let statuses = status::snapshot();
 
     Ok(summaries
         .into_iter()
-        .map(|s| {
+        .map(|(s, drivable)| {
             let kind = if s.name.starts_with("claude-") {
                 Kind::Claude
             } else if s.name.starts_with("pi-") {
@@ -748,6 +769,10 @@ async fn live_sessions() -> anyhow::Result<Vec<Session>> {
                 pid: s.pid,
                 age_seconds: s.age_seconds,
                 attached: s.attached,
+                // False when the owning daemon predates the drive frames — the
+                // session is enumerated but a `send`/`readTerminal` will come back
+                // `UnsupportedByHost`. Redstone hides the composer for these.
+                drivable,
                 name: s.name,
             }
         })

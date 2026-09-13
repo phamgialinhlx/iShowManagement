@@ -199,8 +199,17 @@ pub fn start_bridge_script(home: &str, agent: &str) -> String {
     let pattern = shell_quote(&self_proof_pattern(agent));
     let agent_q = shell_quote(agent);
     let log = shell_quote(&format!("{home}/.rmux/bridge.log"));
+    // Kills any *other* build's bridge before starting this one. Unlike a daemon,
+    // a bridge holds no session state — it re-queries the daemons on every request
+    // — so replacing it loses nothing, and there must be exactly **one** bridge per
+    // host or Redstone sees the machine connect twice under the same token. This
+    // only runs when *this* build's bridge is not already up (the guard above), so
+    // a steady state never re-kills. `[r]mux-agent-…` is self-proof, like the
+    // guard: the bracket keeps the pattern from matching the shell running it.
+    let any_bridge = shell_quote("[r]mux-agent-.* bridge");
     format!(
         "if pgrep -f {pattern}' bridge' >/dev/null 2>&1; then echo running; else \
+         pkill -f {any_bridge} 2>/dev/null || true; \
          nohup {agent_q} bridge >> {log} 2>&1 < /dev/null & \
          echo started; fi"
     )
@@ -936,6 +945,21 @@ mod tests {
         assert!(script.contains("< /dev/null"), "{script}");
         assert!(script.contains("2>&1"), "{script}");
         assert!(script.contains(" &"), "not backgrounded: {script}");
+    }
+
+    #[test]
+    fn starting_a_new_build_replaces_an_older_bridge() {
+        // Exactly one bridge per host: a bridge holds no session state, so an
+        // upgrade must stop the previous build's bridge rather than run a second
+        // one under the same token, which Redstone would see as the host
+        // connecting twice. The kill pattern must be self-proof (bracketed) or
+        // `pkill` takes down the shell running it before the new bridge starts.
+        let script = start_bridge_script("/home/dev.user", "/home/dev.user/.rmux/bin/rmux-agent-0.2.25-ab");
+        assert!(script.contains("pkill -f '[r]mux-agent-.* bridge'"), "{script}");
+        // The kill only runs in the else branch (this build's bridge not already
+        // up), so a steady state never re-kills.
+        let else_branch = script.split("else").nth(1).unwrap_or("");
+        assert!(else_branch.contains("pkill"), "kill must be in the else branch: {script}");
     }
 
     #[test]

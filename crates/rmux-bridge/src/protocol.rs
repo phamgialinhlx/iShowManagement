@@ -339,8 +339,22 @@ pub enum Response {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCode {
-    /// No session or conversation by that name. The usual cause is a stale list.
+    /// No session or conversation by that name. The usual cause is a stale list —
+    /// the session ended between the caller's `listSessions` and this request.
+    /// **This means "it is gone."** A UI may say "that session has finished."
     NotFound,
+    /// The session exists and is running, but the daemon that owns it is a build
+    /// too old to accept the drive frames (`Frame::Write`/`Frame::Read`, added in
+    /// agent 0.2.20). A busy host accumulates a daemon per rmux upgrade, each
+    /// still serving its own live sessions, and a session started before 0.2.20
+    /// is enumerated by `listSessions` but cannot be driven from here.
+    ///
+    /// **Distinct from `NotFound` on purpose:** the session is alive, so a UI must
+    /// not say it finished. Say it cannot be driven because the host is running an
+    /// old agent (and the `drivable` flag on the session says so up front). The
+    /// operator can still read it (`readConversation`) and interact by reattaching
+    /// from rmux itself.
+    UnsupportedByHost,
     /// The request was understood and refused — a folder outside the allowed
     /// roots, a model profile that does not exist.
     Refused,
@@ -462,6 +476,23 @@ pub struct Session {
     /// necessarily abandoned — rmux may simply be closed — but every abandoned
     /// one is unattached.
     pub attached: bool,
+    /// Whether this session can actually be driven from here (`send`,
+    /// `readTerminal`, the terminal stream). **False when the daemon that owns it
+    /// predates the drive frames** (agent < 0.2.20) — a session a busy host still
+    /// runs from an earlier build. Redstone should not offer a composer for a
+    /// session that is not `drivable`; a write to one comes back
+    /// [`ErrorCode::UnsupportedByHost`], not `NotFound`, because it is alive.
+    ///
+    /// Defaults to `true` so a session from an older bridge that never set the
+    /// field is treated as drivable rather than silently un-composable.
+    #[serde(default = "drivable_default")]
+    pub drivable: bool,
+}
+
+/// A session is drivable unless the bridge says otherwise — the safe default for
+/// a field an older bridge does not send.
+fn drivable_default() -> bool {
+    true
 }
 
 /// Which coding agent a session runs, or a plain shell.
@@ -610,7 +641,38 @@ mod tests {
             pid: Some(4021),
             age_seconds: 900,
             attached: false,
+            drivable: true,
         }
+    }
+
+    #[test]
+    fn drivable_defaults_true_for_an_older_bridge_that_omits_it() {
+        // An older bridge does not send `drivable`. Reading it as `false` would
+        // hide the composer for every session it lists — the opposite of the
+        // intent. The field defaults to `true`, and a bridge that *does* mean
+        // "not drivable" sends it explicitly.
+        let without = r#"{"name":"claude-x","kind":"claude","status":"idle","ageSeconds":10,"attached":false}"#;
+        let parsed: Session = serde_json::from_str(without).unwrap();
+        assert!(parsed.drivable, "a missing drivable must read as true");
+
+        let explicit = r#"{"name":"claude-x","kind":"claude","status":"idle","ageSeconds":10,"attached":false,"drivable":false}"#;
+        assert!(!serde_json::from_str::<Session>(explicit).unwrap().drivable);
+
+        // And it serialises camelCase like every other field.
+        let line = serde_json::to_string(&session()).unwrap();
+        assert!(line.contains(r#""drivable":true"#), "{line}");
+    }
+
+    #[test]
+    fn unsupported_by_host_is_its_own_code() {
+        // Distinct from NotFound on the wire, so a UI can tell "the session ended"
+        // from "it is alive but on a host running an old agent".
+        let line = serde_json::to_string(&ErrorCode::UnsupportedByHost).unwrap();
+        assert_eq!(line, r#""unsupportedByHost""#);
+        assert_ne!(
+            serde_json::to_string(&ErrorCode::NotFound).unwrap(),
+            line,
+        );
     }
 
     #[test]
