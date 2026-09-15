@@ -7,6 +7,7 @@ import { api, isTauri } from "../lib/api";
 import { BackgroundPicker } from "./BackgroundPicker";
 import { loadUserCss, saveUserCss } from "../lib/user-css";
 import { gpuRendering, setGpuRendering } from "../lib/terminal-theme";
+import { terminalFps, setTerminalFps } from "../lib/terminal-fps";
 import {
   type Theme,
   ANSI_KEYS,
@@ -1069,6 +1070,7 @@ function UserCss() {
  */
 function TerminalRendering() {
   const [gpu, setGpu] = useState(gpuRendering);
+  const [fps, setFps] = useState(terminalFps);
 
   return (
     <section
@@ -1111,6 +1113,59 @@ function TerminalRendering() {
       <span className="micro" style={{ color: "var(--text-faint)" }}>
         RELOADS THE WINDOW — SESSIONS REATTACH, NOTHING IS LOST
       </span>
+
+      {/*
+       * Frame-rate cap. Unlike the GPU toggle above, this needs no reload: it
+       * lives in the terminals' output path, not at xterm construction, and both
+       * hosts refresh it live off the `storage` event this write fires. See
+       * `lib/terminal-fps.ts` and ADR-001. Off by default; the leftmost segment
+       * carries the off state, so no separate enable switch.
+       */}
+      <div className="flex flex-col gap-2" style={{ marginTop: 4 }}>
+        <span className="data text-[11px]" style={{ color: "var(--text)" }}>
+          Frame-rate cap
+        </span>
+        <div className="flex" style={{ border: "1px solid var(--border-strong)", maxWidth: 280 }}>
+          {[
+            { label: "OFF", value: 0 },
+            { label: "15", value: 15 },
+            { label: "30", value: 30 },
+            { label: "60", value: 60 },
+          ].map((opt, i) => {
+            const selected = fps === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => {
+                  setFps(opt.value);
+                  setTerminalFps(opt.value);
+                }}
+                className="micro flex-1 px-3 py-[7px] text-center"
+                style={{
+                  color: selected ? "var(--text)" : "var(--text-soft)",
+                  background: selected ? "var(--app-elev)" : "transparent",
+                  borderLeft: i ? "1px solid var(--border-strong)" : undefined,
+                  // Selected state carried by an underline as well as tone — see
+                  // the BackgroundPicker `Mode` note: tone alone is unreadable at
+                  // this size.
+                  boxShadow: selected ? "inset 0 -2px 0 var(--text)" : undefined,
+                }}
+              >
+                {opt.label}
+                {opt.value ? <span style={{ color: "var(--text-faint)" }}> fps</span> : null}
+              </button>
+            );
+          })}
+        </div>
+        <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+          Caps how often terminals repaint. Lower cuts GPU and compositor load during heavy
+          output — worth it on an external or 4K display, where a busy session can drive the
+          macOS WindowServer up noticeably. Costs a little scroll smoothness; OFF is exactly
+          today. Applies live to open terminals.
+        </span>
+      </div>
     </section>
   );
 }

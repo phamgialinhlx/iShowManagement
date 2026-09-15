@@ -56,7 +56,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The theme config is a human-facing file, so TOML rather than JSON.
 toml = "0.8"
-# Watches theme.toml so an external hand-edit repaints the running app.
+# `settings.json` is hand-editable JSONC, and a GUI save must edit only the
+# changed keys into the existing file *text* — preserving the operator's
+# comments, key order and unknown keys. The `cst` feature is that
+# content-preserving editor (see `src-tauri/src/settings.rs`).
+jsonc-parser = { version = "0.33", features = ["cst", "serde"] }
+# Watches theme.toml / settings.json so an external hand-edit repaints the running app.
 notify = "6"
 prost = "0.14"
 prost-build = "0.14"
