@@ -345,7 +345,8 @@ pub async fn claude_start<R: tauri::Runtime>(
 /// the id-keyed, provider-blind commands — `claude_attach`, `claude_write`,
 /// `claude_send`, `claude_resize`, `claude_stop`, `claude_end_session` — all
 /// operate on the pi session unchanged. What differs is only what pi supplies:
-/// no `Rendering`/`CLAUDE_CODE_*` env (pi has one inline mode), no
+/// no `Rendering`/`CLAUDE_CODE_*` env (pi selects fullscreen with its own
+/// `--tui-mode fullscreen` flag on the launch line, not an env var), no
 /// `--dangerously-skip-permissions`, no model profile and no Claude account.
 /// pi has no `~/.claude/sessions` status file, so its rail dot is driven by a
 /// hook extension instead: `pi_start` installs it on the host (best-effort),
