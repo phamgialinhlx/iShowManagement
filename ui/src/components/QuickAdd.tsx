@@ -121,11 +121,20 @@ export function QuickAdd({
       */}
       {target && folder ? (
         <>
-          <div className="max-h-[220px] min-h-0">
+          {/*
+            A plain block wrapper — sizes to the picker's content and gives it a
+            non-flex parent, so its own `flex-1` stays inert here as before. The
+            old wrapper carried a `max-height` with no `overflow`, which let the
+            picker's list spill past it and land under the CANCEL button, putting
+            CANCEL in the middle of the list. The picker bounds its own list at a
+            modal-sized cap and scrolls within it instead.
+          */}
+          <div>
             <ClaudeSessionPicker
               target={target}
               folder={folder}
               busy={busy}
+              listMaxHeight="38vh"
               onChoose={(resume, name) =>
                 onCreate({ skipPermissions: skip, modelProfile: profile ?? undefined, resume, name })
               }

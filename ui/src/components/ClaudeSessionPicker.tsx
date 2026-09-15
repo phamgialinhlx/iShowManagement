@@ -31,10 +31,19 @@ export function ClaudeSessionPicker({
   folder,
   busy,
   onChoose,
+  listMaxHeight = "46vh",
 }: {
   target: TargetRef;
   folder: string;
   busy: boolean;
+  /**
+   * The cap on the scrolling list. `46vh` suits the rail; a modal that stacks
+   * this above its own buttons passes something smaller so the list stays a
+   * bounded, scrollable block instead of pushing the buttons off — a second,
+   * conflicting cap on a *wrapper* does not work, because a bare `max-height`
+   * with no `overflow` lets the list spill past it and land under the buttons.
+   */
+  listMaxHeight?: string;
   /**
    * `undefined` means start a new conversation.
    *
@@ -85,7 +94,7 @@ export function ClaudeSessionPicker({
         // A `max-height` here is true in both, and cannot be undone by a
         // parent that has not been laid out yet.
         className="inset min-h-0 flex-1 overflow-y-auto"
-        style={{ border: "1px solid var(--border)", maxHeight: "46vh" }}
+        style={{ border: "1px solid var(--border)", maxHeight: listMaxHeight }}
       >
         {sessions === null && (
           <PanelLoader variant="rows" phase="LOOKING FOR PREVIOUS SESSIONS" rows={4} />
