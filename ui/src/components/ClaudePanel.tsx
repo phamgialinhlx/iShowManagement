@@ -644,14 +644,17 @@ export function ClaudePanel({
     setTimeout(() => setGeneration((n) => n + 1), 1200);
   };
 
-  // Poll the screen. Cheap — it reads an in-memory emulator, no network.
+  // Poll for a dropped connection (and, for Claude, the screen state). Cheap —
+  // it reads an in-memory emulator plus the attach's exit status, no network.
   //
-  // **Claude only.** pi exposes no `claude_state` (there is no screen-scrape),
-  // so this whole effect stands down for it — calling it would error every
-  // 400ms. A pi session's rail dot therefore does not update in this phase;
-  // that is a known, deferred gap, not a reason to invent a pi status call.
+  // **Runs for pi too, which it used not to.** The old code stood down for pi on
+  // the belief that `claude_state` errors for it — but it does not: `state()` is a
+  // benign read of the screen emulator and pi sessions are in the same store, so
+  // the call returns a (Claude-shaped, ignored) screen state *and* a valid
+  // `exited`. Skipping it left a pi pane with **no drop detection and no
+  // reconnect** — so a dropped ssh connection froze it dead with no way back,
+  // which is exactly what was reported. Only the exit half is used for pi.
   useEffect(() => {
-    if (provider === "pi") return;
     if (!claudeId) return;
     let cancelled = false;
     let timer: number | undefined;
@@ -663,25 +666,34 @@ export function ClaudePanel({
         });
         if (cancelled) return;
 
-        // **The connection died.** After a laptop sleeps, ssh drops and the
-        // attach process exits — the pane then sits there fed by a stream that
-        // has simply stopped, looking like a Claude that went quiet. It is not:
-        // nothing will ever arrive again, and typing goes nowhere.
+        // **The connection died.** The ssh attach process exited, so its terminal
+        // now has an exit code — provider-independent, because the exit is the
+        // ssh, not the agent. After a laptop sleeps or a busy host drops the
+        // connection, the pane otherwise sits there fed by a stream that simply
+        // stopped, looking like the agent went quiet: nothing more arrives and
+        // typing goes nowhere.
         //
-        // The conversation itself is untouched. It runs under `rmux-agent` on
-        // the target precisely so it survives this, so reattaching by name
-        // brings it back whole — scrollback included.
+        // The conversation itself is untouched. It runs under `rmux-agent` on the
+        // target precisely so it survives this, so reattaching by name brings it
+        // back whole — scrollback included.
         if (next.exited != null) {
-          setState({ prompt: null, working: false });
-          setStatus(sessionId, "idle");
+          if (provider !== "pi") {
+            setState({ prompt: null, working: false });
+            setStatus(sessionId, "idle");
+          }
           reconnect();
           return;
         }
 
-        setState(next);
-        // Publish to the rail. This is what makes "which session needs me?"
-        // answerable at a glance without opening each one.
-        setStatus(sessionId, next.prompt ? "waiting" : next.working ? "working" : "idle");
+        // The screen state (prompt/working) is a scrape of *Claude's* TUI; pi
+        // publishes its own status through its hook (`status-watch`), so only
+        // Claude reads it here. The exit detection above is all pi needs.
+        if (provider !== "pi") {
+          setState(next);
+          // Publish to the rail. This is what makes "which session needs me?"
+          // answerable at a glance without opening each one.
+          setStatus(sessionId, next.prompt ? "waiting" : next.working ? "working" : "idle");
+        }
       } catch {
         // The handle is gone entirely — the same outcome, reached differently.
         if (!cancelled) reconnect();

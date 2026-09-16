@@ -122,11 +122,16 @@ impl ControlMaster {
             // Die with rmux instead of outliving it in the user's session.
             .arg("-o")
             .arg("ControlPersist=no")
-            // Notice a dead link in ~45s rather than hanging on a half-open socket.
+            // Notice a dead link in ~90s rather than hanging on a half-open socket
+            // — but not sooner: a *busy* host (heavy load, into swap) answers a
+            // keepalive slowly, and a 45s window dropped the master on such a host
+            // mid-session, detaching every pane through it. 90s tolerates the stall;
+            // a genuinely dead host still surfaces, and the pane auto-reconnects
+            // either way (`ClaudePanel`'s exit poll).
             .arg("-o")
             .arg("ServerAliveInterval=15")
             .arg("-o")
-            .arg("ServerAliveCountMax=3");
+            .arg("ServerAliveCountMax=6");
 
         // **The key rmux installed, offered to the connection that authenticates.**
         //
