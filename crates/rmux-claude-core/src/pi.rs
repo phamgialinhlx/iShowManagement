@@ -47,22 +47,25 @@ pub struct Conversation {
 
 /// The shell line rmux runs to launch pi.
 ///
-/// **`--tui-mode fullscreen`, to match Claude's current default and for the same
-/// reason.** Inline (`regular`) was the original choice, on the belief it matched
-/// Claude — but Claude has since moved to fullscreen, because inline lets the
-/// composer scroll away with the history and, worse, does not reliably re-activate
-/// its input after a reattach: the operator can scroll and view but not type until
-/// the session is restarted. Fullscreen pins the composer and keeps pi's screen
-/// coherent, so a reattached session stays typeable. The costs are the alternate
-/// screen's — in-app mouse scrolling and the reattach-replay display gap Claude
-/// already documents — accepted here for the same trade.
+/// **`--tui-mode regular` — pi's inline mode, no alternate screen.** Inline keeps
+/// the conversation in the terminal's own scrollback, so the operator can scroll
+/// it, `Cmd-F` it, and a remote live view can replay it; the alternate screen
+/// takes all three away and, over ssh, makes the wheel round-trip to the host.
+///
+/// **Fullscreen was tried and reverted.** The symptom that prompted it — "I can
+/// scroll and view but can't type, and have to restart" — was misread as inline
+/// failing to re-activate its composer on reattach. It was not: it was the ssh
+/// connection dropping (in inline you *can* still scroll the local buffer, which
+/// is exactly why it reads as "scroll works, typing doesn't"). The real fix is the
+/// pane auto-reconnecting on a drop (`ClaudePanel`'s exit poll now covers pi).
+/// Fullscreen fixed nothing there and lost scrolling, so inline stands.
 ///
 /// The initial prompt is a **bare positional argument** — pi collects any
 /// non-flag word into its initial messages — and is shell-quoted, because it is
 /// free text that reaches a login shell. `--session-id` resumes an existing
 /// conversation; `--name` labels a new one.
 pub fn launch_line(prompt: Option<&str>, name: Option<&str>, resume_id: Option<&str>) -> String {
-    let mut line = String::from("pi --tui-mode fullscreen");
+    let mut line = String::from("pi --tui-mode regular");
     if let Some(id) = resume_id {
         line.push_str(" --session-id ");
         line.push_str(&rmux_transport::shell_quote(id));
@@ -472,11 +475,13 @@ mod tests {
     }
 
     #[test]
-    fn the_launch_line_is_fullscreen_and_quotes_the_prompt() {
-        // `--tui-mode fullscreen` pins the composer and keeps input working across
-        // a reattach — the same choice, and reason, as Claude's default.
+    fn the_launch_line_is_inline_and_quotes_the_prompt() {
+        // `--tui-mode regular` is inline — the conversation stays in the terminal's
+        // scrollback so it can be scrolled and read back. (Fullscreen was tried and
+        // reverted; it lost scrolling, and the "can't type" it aimed at was a
+        // dropped connection, fixed by the pane auto-reconnecting instead.)
         let line = launch_line(Some("fix the test; rm -rf /"), None, None);
-        assert!(line.starts_with("pi --tui-mode fullscreen"), "{line}");
+        assert!(line.starts_with("pi --tui-mode regular"), "{line}");
         // The prompt survives as one shell word, after the `--` guard.
         assert!(line.contains(" -- 'fix the test; rm -rf /'"), "{line}");
     }
@@ -501,8 +506,8 @@ mod tests {
             .arg(format!("set -- {}; echo $#", &args[3..]))
             .output()
             .expect("sh");
-        // `set -- --tui-mode fullscreen -- '--help me please'`: the first `--`
-        // ends option parsing, leaving four positionals, the last being the whole
+        // `set -- --tui-mode regular -- '--help me please'`: the first `--` ends
+        // option parsing, leaving four positionals, the last being the whole
         // prompt as one word — which is the property that matters.
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "4", "{line}");
     }
