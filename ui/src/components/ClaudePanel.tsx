@@ -268,7 +268,7 @@ export function ClaudePanel({
   const sendImages = async (images: File[]) => {
     const id = runningRef.current;
     if (!id) {
-      setError("Claude is not running in this session yet.");
+      setError(`${provider === "pi" ? "pi" : "Claude"} is not running in this session yet.`);
       return;
     }
 
@@ -285,7 +285,7 @@ export function ClaudePanel({
       for (const image of images) {
         paths.push((await uploadImage(target, image)).path);
       }
-      await invoke("claude_write", { id, data: promptFor(paths) });
+      await invoke("claude_write", { id, data: promptFor(paths, provider) });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

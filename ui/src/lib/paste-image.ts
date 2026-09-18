@@ -67,16 +67,22 @@ export async function uploadImage(target: TargetRef, file: File): Promise<Upload
 }
 
 /**
- * What to type into Claude once the images are there.
+ * What to type into the agent once the images are there.
  *
- * Bare paths, space-separated, with a trailing space so the operator can keep
- * typing their question straight after. Claude picks a path out of a prompt on
- * its own; wrapping it in prose would only add words it has to ignore.
+ * Paths space-separated, with a trailing space so the operator can keep typing
+ * their question straight after.
+ *
+ * **The two agents reference a file differently, and getting this wrong is why a
+ * paste that worked in Claude did nothing in pi.** Claude picks a bare path out
+ * of a prompt on its own. pi does not — it takes files as `@`-mentions (`pi
+ * [@files…]`), so a bare path is just words to it. So pi gets `@<path>` and
+ * Claude gets the bare path.
  *
  * Quoted only when it has to be. A path with a space in it is otherwise two
  * paths, and `~/.rmux/pastes` avoids that by construction — but the operator
  * can drag a file in from anywhere.
  */
-export function promptFor(paths: string[]): string {
-  return `${paths.map((p) => (/[\s'"]/.test(p) ? JSON.stringify(p) : p)).join(" ")} `;
+export function promptFor(paths: string[], provider: "claude" | "pi" = "claude"): string {
+  const mark = provider === "pi" ? "@" : "";
+  return `${paths.map((p) => `${mark}${/[\s'"]/.test(p) ? JSON.stringify(p) : p}`).join(" ")} `;
 }
