@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { api, isTauri, type TargetRef } from "./api";
 import { bufferKey, type Buffer, type BufferKey } from "./buffers";
 import { companionKey, companionName, forget as forgetCompanion } from "./companion";
-import { deckId, isFocusDeck, parseDeck, type Deck } from "./grid";
+import { deckId, isFocusDeck, parseDeck, type Deck, type SavedView } from "./grid";
 import {
   autosaveDecision,
   autosaveEnabled,
@@ -105,6 +105,40 @@ function persistSeen(seen: Record<string, number>) {
   }
 }
 
+/** Saved views live in their own key — small, and unrelated to the session tree,
+ *  so folding them into the workspace blob would only widen its churn. */
+const SAVED_VIEWS_KEY = "rmux.savedViews";
+
+function loadSavedViews(): SavedView[] {
+  try {
+    const raw = storage?.getItem(SAVED_VIEWS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    // Shape-checked, because a hand-edited or older value must degrade to "no
+    // saved views" rather than crash the workbench on boot.
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (v): v is SavedView =>
+        !!v &&
+        typeof v.id === "string" &&
+        typeof v.name === "string" &&
+        !!v.deck &&
+        typeof v.deck.cols === "number" &&
+        typeof v.deck.rows === "number" &&
+        Array.isArray(v.panes),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedViews(views: SavedView[]) {
+  try {
+    storage?.setItem(SAVED_VIEWS_KEY, JSON.stringify(views));
+  } catch {
+    // A full or disabled localStorage still lets the views work this session.
+  }
+}
+
 /** A Claude session is *unseen* when it is idle and its last status change is
  *  newer than what has been acknowledged. Working and waiting are their own
  *  states (handled before this is consulted), so only `idle` can be unseen. Pure
@@ -148,6 +182,9 @@ type State = Core & {
 
   deck: Deck;
   focusedCell: number | null;
+  /** Named layouts the operator saved — grid plus what sits in each cell —
+   *  persisted so they survive relaunch. See `saveCurrentView`/`applyView`. */
+  savedViews: SavedView[];
   railCollapsed: boolean;
   /** The instruments (right) rail collapsed to a strip. Unlike the servers rail
    *  this is a lasting preference, so it is persisted (`rmux.widgetRail.collapsed`)
@@ -228,6 +265,15 @@ type State = Core & {
   focusCell: (index: number | null) => void;
   assignPane: (index: number, ref: PaneRef | null) => void;
   closePane: (index: number) => void;
+
+  // ── saved views ──────────────────────────────────────────────────────────
+  /** Save the current grid + placement under a name (replaces one of the same
+   *  name, so re-saving updates it). */
+  saveCurrentView: (name: string) => void;
+  /** Switch the workbench to a saved view. Cells whose session no longer exists
+   *  come back empty rather than broken. */
+  applyView: (id: string) => void;
+  deleteView: (id: string) => void;
   /** The rail's "open into the focused tile" verb, for each openable node. */
   openSession: (id: string) => void;
   openHost: (serverId: ServerId) => void;
@@ -354,6 +400,7 @@ export const useWorkspace = create<State>((set, get) => ({
   // layout instead of silently dropping everyone into focus mode.
   deck: parseDeck(storage?.getItem("rmux.deck") ?? storage?.getItem("rmux.grid")),
   focusedCell: null,
+  savedViews: loadSavedViews(),
   railCollapsed: false,
   widgetsCollapsed: storage?.getItem(WIDGETS_COLLAPSED_KEY) === "1",
 
@@ -737,6 +784,48 @@ export const useWorkspace = create<State>((set, get) => ({
     set(rClosePane(coreOf(get()), index));
     schedulePersist(get);
   },
+
+  saveCurrentView: (name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const { deck, panes, savedViews } = get();
+    const view: SavedView = {
+      // Re-saving under an existing name updates that view in place; otherwise a
+      // fresh id keyed on the clock, which is unique enough for a personal list.
+      id: savedViews.find((v) => v.name === trimmed)?.id ?? `view-${Date.now().toString(36)}`,
+      name: trimmed,
+      deck,
+      // A copy, not a live reference — a later grid edit must not rewrite a view
+      // the operator already saved.
+      panes: panes.map((p) => (p ? { ...p } : null)),
+    };
+    const next = [...savedViews.filter((v) => v.id !== view.id), view];
+    persistSavedViews(next);
+    set({ savedViews: next });
+  },
+  applyView: (id) => {
+    const state = get();
+    const view = state.savedViews.find((v) => v.id === id);
+    if (!view) return;
+    // A saved cell whose target no longer exists comes back empty rather than
+    // pointing a pane at a session/server/project that was since removed.
+    const alive = (p: PaneRef | null): PaneRef | null => {
+      if (!p) return null;
+      if (p.kind === "session") return state.sessions.some((s) => s.id === p.id) ? p : null;
+      if (p.kind === "host") return state.servers.some((s) => s.id === p.serverId) ? p : null;
+      if (p.kind === "files") return state.projects.some((pr) => pr.id === p.projectId) ? p : null;
+      return p;
+    };
+    storage?.setItem("rmux.deck", deckId(view.deck));
+    set({ deck: view.deck, panes: view.panes.map(alive), focusedCell: null });
+    schedulePersist(get);
+  },
+  deleteView: (id) => {
+    const next = get().savedViews.filter((v) => v.id !== id);
+    persistSavedViews(next);
+    set({ savedViews: next });
+  },
+
   // Focus mode (grid 1) only ever *shows* cell 0, so opening must target it —
   // a stale `focusedCell` left from a grid interaction would otherwise send the
   // pane to a hidden cell and the view would appear not to change.

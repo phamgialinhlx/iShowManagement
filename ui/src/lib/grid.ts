@@ -108,6 +108,19 @@ export function warmSessions<S extends { id: string }>(
  */
 export type Deck = { cols: number; rows: number };
 
+/**
+ * A saved workbench view: the grid layout and what sits in each cell, named so
+ * the operator can switch back to it. Sessions are referenced by id — one that
+ * has since been closed is dropped to an empty cell when the view is applied, so
+ * a saved view never resurrects a dead session or errors on a missing one.
+ */
+export type SavedView = {
+  id: string;
+  name: string;
+  deck: Deck;
+  panes: (PaneRef | null)[];
+};
+
 /** Cells in a deck. The one place `cols * rows` is spelled out. */
 export const deckCells = (deck: Deck): number => Math.max(0, deck.cols * deck.rows);
 

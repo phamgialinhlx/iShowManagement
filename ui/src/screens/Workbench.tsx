@@ -9,6 +9,7 @@ import { WorkspaceRail } from "../components/WorkspaceRail";
 import { WidgetRail, type Active } from "../components/WidgetRail";
 import { AlertStack } from "../components/AlertStack";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
+import { SavedViews } from "../components/SavedViews";
 import { DECKS, deckCells, deckId, layoutPanes } from "../lib/grid";
 import { readHandsFree, useHandsFree, writeHandsFree } from "../lib/hands-free";
 import type { SessionStatus } from "../lib/workspace-model";
@@ -422,6 +423,7 @@ export function Workbench({
                   </button>
                 );
               })}
+              <SavedViews />
             </div>
 
             {activeTarget && <Metrics target={activeTarget} />}
