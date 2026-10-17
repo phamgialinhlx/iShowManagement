@@ -210,6 +210,37 @@ pub async fn claude_end_session<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Apply the session's transport choice to an **interactive** spec.
+///
+/// One function, used by both agent launch paths, because the ordering it
+/// encodes is the whole of this feature and is invisible if it is wrong.
+///
+/// **The probe has to be awaited before the command is built.** The mosh probe
+/// was deliberately removed from `SshTarget::connect` — it cost a round trip
+/// per host per run on exactly the link this exists to fix — so the cache is
+/// empty until someone asks for it. `build_command` is synchronous and reads
+/// that cache only, and an unprobed host is *not* a refusal: it quietly falls
+/// back to ssh with nothing to report. Setting the flag without probing first
+/// therefore looks like a working toggle that never does anything.
+///
+/// The probe is cached per host, so it costs one round trip once per run, and
+/// only for an operator who turned this on.
+///
+/// `false`/`None` touches nothing at all: not setting the flag is what keeps
+/// every other spec on ssh, and it is asserted rather than assumed by
+/// `rmux-ssh/tests/feature_specs.rs`.
+async fn ask_for_low_latency(
+    target: &dyn Target,
+    spec: rmux_transport::CommandSpec,
+    wanted: Option<bool>,
+) -> rmux_transport::CommandSpec {
+    if !wanted.unwrap_or(false) {
+        return spec;
+    }
+    target.probe_low_latency().await;
+    spec.low_latency(true)
+}
+
 /// Launch `claude` and stream its screen to the UI.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -241,6 +272,13 @@ pub async fn claude_start<R: tauri::Runtime>(
     // conversation that silently changed provider on reconnect would be billed
     // and answered by whoever happened to be selected at the time.
     model_profile: Option<String>,
+    // The per-session TRANSPORT choice: ask the target to minimise echo
+    // latency. A *request*, never a protocol — what it becomes is the target's
+    // decision, and absent means the ordinary ssh path. Kept with the session
+    // for the same reason the model profile is: which transport a piece of work
+    // runs over is a property of that work, and a pane that restarts must come
+    // back the way it was launched.
+    low_latency: Option<bool>,
     cols: u16,
     rows: u16,
     output: Channel<Response>,
@@ -318,10 +356,16 @@ pub async fn claude_start<R: tauri::Runtime>(
 
             let mut spec = installed.attach_spec(name, cwd.as_deref(), cols, rows);
             spec = spec.arg("--login-command").arg(line);
+            spec = ask_for_low_latency(resolved.as_ref(), spec, low_latency).await;
 
             ClaudeSession::start_with_spec(resolved.as_ref(), spec, cwd.as_deref(), size)
                 .map_err(err)?
         }
+        // **Not threaded here, on purpose.** This arm is the no-agent fallback,
+        // and it is reached only when the agent is unavailable — which today
+        // means Windows, where a low-latency transport is refused outright
+        // anyway. Passing the request down would mean widening
+        // `start_resuming`'s signature to buy a branch that cannot be taken.
         None => ClaudeSession::start_resuming(
             resolved.as_ref(),
             cwd.as_deref(),
@@ -368,6 +412,8 @@ pub async fn pi_start<R: tauri::Runtime>(
     // classifies `pi-`-prefixed sessions, and `claude_end_session` kills by this
     // name — so closing the pane kills the work with no pi-specific kill needed.
     session_name: Option<String>,
+    // The per-session TRANSPORT choice — see `claude_start`.
+    low_latency: Option<bool>,
     cols: u16,
     rows: u16,
     output: Channel<Response>,
@@ -467,6 +513,7 @@ pub async fn pi_start<R: tauri::Runtime>(
     // hand-built and no env travels on argv.
     let mut spec = installed.attach_spec(name, cwd.as_deref(), cols, rows);
     spec = spec.arg("--login-command").arg(line);
+    spec = ask_for_low_latency(resolved.as_ref(), spec, low_latency).await;
 
     let session =
         Arc::new(ClaudeSession::start_with_spec(resolved.as_ref(), spec, cwd.as_deref(), size)

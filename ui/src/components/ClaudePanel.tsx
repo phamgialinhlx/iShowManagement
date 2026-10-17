@@ -15,6 +15,14 @@ import { scaledFontSize, remeasureOnFontLoad } from "../lib/terminal-font";
 
 /** The size at 100%. Scaled by TEXT SIZE through xterm's own option. */
 const TERM_FONT_BASE = 12;
+
+/**
+ * How long to wait before reattaching after rmux *noticed* a drop.
+ *
+ * See `reconnect`: a deliberate press passes 0 instead, because the reasoning
+ * behind the pause is about a sleeping machine and not about an operator.
+ */
+const DROP_RETRY_DELAY_MS = 1200;
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { FOCUS_EVENT } from "../lib/shortcuts";
 import { ContextMeter } from "./ContextMeter";
@@ -22,8 +30,9 @@ import { BrowserReports } from "./BrowserReports";
 import { record } from "../lib/activity";
 import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
-import { MouseModeTracker } from "../lib/mouse-modes";
+import { AGENT_MOUSE_MODES, MouseModeTracker } from "../lib/mouse-modes";
 import { PanelLoader } from "./PanelLoader";
+import { Icon, IconButton, RELOAD_PATH } from "./SessionPaneChrome";
 
 /**
  * A Claude Code session.
@@ -126,6 +135,7 @@ export function ClaudePanel({
   fullscreen,
   skipPermissions,
   modelProfile,
+  lowLatency,
   agentSession,
   headerActions,
   provider = "claude",
@@ -154,6 +164,14 @@ export function ClaudePanel({
   fullscreen?: boolean;
   /** Launch with `--dangerously-skip-permissions`. Decided when the session was created. */
   skipPermissions?: boolean;
+  /**
+   * Ask the target to minimise echo latency for this pane (Session Settings ›
+   * TRANSPORT). A *request*, not a protocol. Absent is off.
+   *
+   * Passed on both start paths: the agent hosts a Claude and a pi session the
+   * same way, so the transport choice is not provider-specific.
+   */
+  lowLatency?: boolean;
   /**
    * The saved model profile to run under. `undefined` is Anthropic.
    *
@@ -252,6 +270,14 @@ export function ClaudePanel({
   // throw away the conversation the operator is reading.
   const [reconnecting, setReconnecting] = useState(false);
   const reconnectingRef = useRef(false);
+  /**
+   * Whether this reattach was asked for or merely noticed.
+   *
+   * The banner must not say CONNECTION LOST over a reattach the operator
+   * started: they know what they pressed, and a false statement about the
+   * network is how a working feature reads as a fault.
+   */
+  const [reconnectAsked, setReconnectAsked] = useState(false);
   // Bumping this re-runs the mount effect, which is what actually rebuilds the
   // terminal and the attachment. Nothing else in the pane can restart it: the
   // setup effect has no dependencies by design, so that an ordinary re-render
@@ -383,6 +409,49 @@ export function ClaudePanel({
     // disposer; see the note in Terminal.tsx.
     const clipboard = attachClipboard(xterm);
 
+    // **Restore the mouse modes this pane already observed.**
+    //
+    // A fresh xterm has mouse reporting off. Over ssh that corrects itself:
+    // reattaching replays the raw scrollback, the `?1002h`/`?1006h` Claude sent
+    // are in it, and the new terminal turns reporting back on. Over **mosh**
+    // there is no byte replay at all — mosh is a terminal emulator and hands
+    // back a *screen*, so those sequences are never seen again.
+    //
+    // Fullscreen Claude scrolls by mouse reporting, and the alternate screen
+    // has no scrollback of its own, so the wheel does not scroll *less* — it
+    // stops doing anything. Reported exactly that way: scrolling is lost after
+    // coming back, in fullscreen, on mosh and never on ssh.
+    //
+    // `mouseModes` is a ref, so it survives the `generation` bump that rebuilds
+    // this terminal — rmux still knows what Claude had set and only has to say
+    // it again. Written *into* xterm, never sent to Claude: this is terminal
+    // state, which is ours, and not a reimplementation of anything Claude draws.
+    //
+    // Skipped while SELECT is on, which is the operator deliberately holding
+    // the mouse; restoring underneath them would take it back mid-selection.
+    //
+    // Two moments, because they are two different gaps.
+    //
+    // *Now*, if this pane already watched the program turn the mouse on and is
+    // merely being rebuilt — the ssh reattach case, where the ref outlived the
+    // terminal.
+    //
+    // And *when the alternate screen arrives*, which is the *mosh* case and the
+    // one the tracker cannot cover: a pane that mounts fresh and adopts a
+    // running fullscreen session has never seen a `?1002h`, because mosh hands
+    // back a screen rather than the bytes that drew it. The alt buffer is
+    // restored, so the arrival of it is the signal. What rmux knows beats what
+    // it assumes, so a tracked set still wins; `AGENT_MOUSE_MODES` is only the
+    // fallback, and only here, where the TUI is known to want the mouse.
+    const restoreMouse = () => {
+      if (selectMode) return;
+      const tracked = mouseModes.current.restoreSequence();
+      if (tracked) xterm.write(tracked);
+      else if (xterm.buffer.active.type === "alternate") xterm.write(AGENT_MOUSE_MODES);
+    };
+    restoreMouse();
+    const buffers = xterm.buffer.onBufferChange(restoreMouse);
+
     // Vietnamese and every other IME that rewrites what it already typed.
     // macOS Telex fires no composition events at all — it inserts the plain
     // letter and then replaces it via `insertReplacementText`, which xterm
@@ -459,6 +528,7 @@ export function ClaudePanel({
               cwd,
               resume,
               sessionName: agentSession ?? `pi-${sessionId}`,
+              lowLatency,
               cols: xterm.cols,
               rows: xterm.rows,
               output,
@@ -475,6 +545,7 @@ export function ClaudePanel({
               fullscreen,
               skipPermissions,
               modelProfile,
+              lowLatency,
               cols: xterm.cols,
               rows: xterm.rows,
               output,
@@ -504,6 +575,15 @@ export function ClaudePanel({
             return;
           }
           setError(typeof e === "string" ? e : String(e));
+          // The attempt is over, so let go of the in-flight flag. It is normally
+          // cleared by the first byte arriving — the honest signal, since an
+          // attach can succeed against a connection that dies a moment later —
+          // but no byte is coming now, and leaving it set would disable RELOAD
+          // exactly when the operator needs to press it again.
+          if (reconnectingRef.current) {
+            reconnectingRef.current = false;
+            setReconnecting(false);
+          }
         });
     };
 
@@ -604,6 +684,7 @@ export function ClaudePanel({
     return () => {
       disposed = true;
       observer.disconnect();
+      buffers.dispose();
       clipboard();
       ime.dispose();
       settle.dispose();
@@ -632,16 +713,35 @@ export function ClaudePanel({
    * ssh connection; asking to reattach to it yields "no such session" forever,
    * which is the shape of a pane that never comes back.
    */
-  const reconnect = () => {
+  const reconnect = (delay = DROP_RETRY_DELAY_MS, asked = false) => {
     if (reconnectingRef.current) return;
     reconnectingRef.current = true;
     setReconnecting(true);
+    setReconnectAsked(asked);
+    // Captured before the store is cleared: this is the *local* attachment that
+    // has to be let go of, and a moment later there is nothing left naming it.
+    const stale = runningRef.current;
     clearClaudeSession(sessionId);
+    // Drop this machine's view of the session — **never the session**.
+    // `claude_stop` kills the local attach client and nothing else; the
+    // conversation runs under `rmux-agent` on the target and is untouched, which
+    // is the whole reason reattaching by name brings it back whole.
+    // `claude_end_session` is the one that ends work, and no path from here may
+    // reach it. Without this the stalled `ssh` child of a wedged connection is
+    // simply abandoned, and a stuck pane pressed twice leaves two of them.
+    if (stale) void invoke("claude_stop", { id: stale }).catch(() => {});
 
-    // A beat before retrying. A machine waking from sleep has an interface that
-    // is up but not yet routable, so an immediate reattach fails on DNS or a
-    // refused connection and simply burns the attempt.
-    setTimeout(() => setGeneration((n) => n + 1), 1200);
+    // A beat before retrying — but only when *we* noticed the drop. A machine
+    // waking from sleep has an interface that is up but not yet routable, so an
+    // immediate reattach fails on DNS or a refused connection and simply burns
+    // the attempt.
+    //
+    // A deliberate press is the opposite case and passes 0: the operator is
+    // sitting there watching, having decided the pane is dead before the
+    // 90-second keepalive (`ServerAliveInterval` x `ServerAliveCountMax`) will
+    // admit it. Making them wait another 1.2s for a reason that does not apply
+    // reads as the button not having worked.
+    setTimeout(() => setGeneration((n) => n + 1), delay);
   };
 
   // Poll for a dropped connection (and, for Claude, the screen state). Cheap —
@@ -949,7 +1049,36 @@ export function ClaudePanel({
           </span>
         )}
 
-        {headerActions && <div className="ml-auto flex items-center gap-1">{headerActions}</div>}
+        {/*
+          **RELOAD — reattach, never restart.**
+
+          The pane can be dead while looking perfectly alive: drop detection keys
+          on the `ssh` attach process *exiting*, and the keepalive gives it 90
+          seconds (`ServerAliveInterval=15` x `ServerAliveCountMax=6`) before
+          anything notices. Until then the pane is fed by a stream that silently
+          stopped — nothing arrives, typing goes nowhere — and before this the
+          only way out was closing the pane, which *ends the work on the host*.
+
+          This presses the same path the automatic recovery uses: drop the local
+          attachment, reattach by the session's name. The conversation runs under
+          `rmux-agent` on the target and does not notice. It is the last control
+          in the row on purpose — one mutating button, furthest from the view
+          switches beside it.
+        */}
+        <div className="ml-auto flex items-center gap-1">
+          {headerActions}
+          <IconButton
+            label={
+              reconnecting
+                ? "Reattaching…"
+                : `Reattach this session — reconnects to ${target.host ?? "this machine"} without ending your work`
+            }
+            disabled={reconnecting}
+            onClick={() => reconnect(0, true)}
+          >
+            <Icon d={RELOAD_PATH} />
+          </IconButton>
+        </div>
       </header>
 
       {/* What a connected browser sent back for this session. Empty, and takes
@@ -962,7 +1091,8 @@ export function ClaudePanel({
           style={{ borderColor: "var(--border)", background: "var(--hover)" }}
         >
           <span className="micro" style={{ color: "rgb(var(--busy))" }}>
-            CONNECTION LOST — REATTACHING TO {(target.host ?? "this machine").toUpperCase()}
+            {reconnectAsked ? "REATTACHING TO" : "CONNECTION LOST — REATTACHING TO"}{" "}
+            {(target.host ?? "this machine").toUpperCase()}
           </span>
           {/* Said out loud, because the alternative reading is "my work is
               gone". It is not: the conversation runs under the agent on the

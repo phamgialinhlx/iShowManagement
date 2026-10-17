@@ -232,6 +232,37 @@ export function Workbench({
             armed a small padlock rides alongside — the icon-only button must not
             drop the "· locked" signal the text button carried.
           */}
+          {/*
+            A second workbench window, to put on another desktop. Beside the
+            gear because both are window-level actions; icon-only for the same
+            reason — a bare button auto-blocks the drag region, so the window
+            still moves everywhere around it. Each new window carries its own
+            layout (see `window-scope.ts`), so this is "another workbench", not
+            a clone of this one.
+          */}
+          <button
+            type="button"
+            onClick={() => void api.openWindow()}
+            aria-label="New window"
+            title="Open another window — its own layout, for another desktop"
+            className="title-cog inline-flex items-center"
+            style={{ height: 22 }}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="square"
+              strokeLinejoin="miter"
+              aria-hidden="true"
+            >
+              <rect x="3" y="5" width="14" height="14" />
+              <path d="M9 9h12v12H9z" />
+            </svg>
+          </button>
           <button
             type="button"
             onClick={() => void api.openSettings()}

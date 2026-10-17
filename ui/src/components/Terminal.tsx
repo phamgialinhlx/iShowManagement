@@ -43,9 +43,12 @@ export function TerminalView({
   cwd,
   session,
   sessionId,
+  lowLatency,
   ptyId,
+  generation = 0,
   onOpened,
   onExit,
+  onAttachFailed,
   answersFocusRequests = true,
 }: {
   target: TargetRef;
@@ -70,11 +73,44 @@ export function TerminalView({
    * still running, scrollback intact, jobs still going.
    */
   session?: string;
+  /**
+   * Ask the target to minimise echo latency for this shell.
+   *
+   * A *request*, not a protocol — what it becomes is the target's decision, and
+   * a target that cannot answer it falls back with a reason Session Settings
+   * shows. Absent is off, because a low-latency transport keeps a screen rather
+   * than a history and an operator who never chose it must not lose scrollback.
+   */
+  lowLatency?: boolean;
   /** Existing PTY to reattach to. Absent means open a new one. */
   ptyId?: string;
+  /**
+   * Bump to force a teardown and a fresh attach — the shell pane's RELOAD.
+   *
+   * This is the only thing that can restart the view: the setup effect has no
+   * other dependency by design, so an ordinary re-render never tears down a
+   * live terminal. It is a **prop**, not an imperative handle, for two reasons:
+   * the stale PTY handle is the *caller's* (it lives in the workspace store, so
+   * only the caller can clear it, and clearing it is step one), and a number in
+   * the dependency list is visible where the rebuild actually happens.
+   *
+   * **Reattach, never end.** The new attach goes out under the same `session`
+   * name, which is what `rmux-agent attach` adopts; the shell on the target is
+   * untouched. Nothing on this path may reach `terminal_close`, which is the
+   * command that carries an `agent kill`.
+   */
+  generation?: number;
   /** Reports the PTY id so the caller can reattach after a remount. */
   onOpened?: (id: string) => void;
   onExit?: (code: number) => void;
+  /**
+   * The attach could not be made at all.
+   *
+   * Only the caller can clear the in-flight state behind its RELOAD, so a
+   * failure has to be reported or that button stays disabled with no way back —
+   * exactly the dead control the design rules forbid.
+   */
+  onAttachFailed?: (message: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   /** What has been typed since the last Enter — see the submit counter below. */
@@ -93,6 +129,8 @@ export function TerminalView({
   onOpenedRef.current = onOpened;
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+  const onAttachFailedRef = useRef(onAttachFailed);
+  onAttachFailedRef.current = onAttachFailed;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -107,6 +145,17 @@ export function TerminalView({
 
     let disposed = false;
     let terminalId: string | null = null;
+
+    // A new generation is a fresh attach, and this pane has nothing on it until
+    // the agent's replay lands. Without this the previous generation's `ready`
+    // survives, so a reattach shows an empty black rectangle — which is the
+    // "pane looks broken" state the loader exists to prevent, arrived at by the
+    // control meant to fix it.
+    setReady(false);
+    // Likewise the previous generation's error: it is a statement about an attach
+    // that is no longer being attempted, and leaving it on screen over a working
+    // terminal is worse than having said nothing.
+    setError(null);
 
     const xterm = new Xterm({
       theme: terminalTheme(),
@@ -225,6 +274,7 @@ export function TerminalView({
             target,
             cwd,
             session,
+            lowLatency,
             cols: xterm.cols,
             rows: xterm.rows,
             output,
@@ -250,7 +300,9 @@ export function TerminalView({
             bind();
             return;
           }
-          setError(typeof e === "string" ? e : String(e));
+          const message = typeof e === "string" ? e : String(e);
+          setError(message);
+          onAttachFailedRef.current?.(message);
         });
     };
 
@@ -365,7 +417,7 @@ export function TerminalView({
       // destroyed only when the tab is closed.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [generation]);
 
   /**
    * Take the keyboard when a pane switch lands here.
@@ -411,9 +463,13 @@ export function TerminalView({
             }}
           >
           <PanelLoader
-            phase="OPENING SHELL"
+            phase={generation > 0 ? "REATTACHING" : "OPENING SHELL"}
             detail={target.host ?? "local"}
-            hint="First connection to a host also installs the session agent, so this shell survives rmux closing."
+            hint={
+              generation > 0
+                ? "Your shell is still running on the target — this reattaches to it and replays its scrollback."
+                : "First connection to a host also installs the session agent, so this shell survives rmux closing."
+            }
           />
         </div>
       )}

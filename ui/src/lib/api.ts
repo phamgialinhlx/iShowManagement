@@ -482,6 +482,57 @@ export type ParsedProfile = {
   warnings: string[];
 };
 
+/**
+ * What a session's transport made of a low-latency request.
+ *
+ * Phrased without naming a protocol, exactly as Rust phrases it: the caller
+ * asked for a property of the session, and what it needs back is whether it
+ * got one and — when it did not — a sentence it can show. `reason` is already
+ * written for the operator; it is displayed verbatim rather than re-worded.
+ */
+export type LowLatencyOutcome =
+  | { kind: "granted" }
+  | { kind: "declined"; reason: string };
+
+/**
+ * What rmux's attempt to install — or upgrade — `mosh-server` on a host came to.
+ *
+ * Separate outcomes rather than a success flag, because they ask different
+ * things of the operator: `needsPassword` is one command they can run
+ * themselves and carries it; `failed` is a reason to go and look; `unsupported`
+ * is nothing they can do from here; and `nothingNewer` is the one that is
+ * *theirs* to decide — the host's repositories have no mosh new enough, so a
+ * backport, a PPA or accepting the limitation is the only way forward, and the
+ * version it carries is what that decision turns on. Flattening them into "it
+ * did not work" would tell them which to act on — none of them.
+ *
+ * `upgraded` carries both versions because "upgraded" with no numbers is not
+ * something anyone can check, and `alreadyCurrent` exists so the panel can say
+ * the host is fine rather than leaving a space where a state should be.
+ */
+export type MoshInstallOutcome =
+  | { kind: "installed"; manager: string }
+  | { kind: "upgraded"; manager: string; from: string; to: string }
+  | { kind: "nothingNewer"; manager: string; version: string }
+  | { kind: "alreadyCurrent"; version: string }
+  | { kind: "needsPassword"; command: string }
+  | { kind: "failed"; reason: string }
+  | { kind: "unsupported"; reason: string };
+
+/**
+ * A host's `mosh-server` version as rmux reads it.
+ *
+ * `version` is `null` for both "not probed" and "present but unreadable", and
+ * `outdated` is false for both — guessing would mean upgrading packages on
+ * someone's server because a string changed format.
+ */
+export type MoshServerStatus = {
+  version: string | null;
+  outdated: boolean;
+  /** The oldest version rmux is willing to leave a host on, e.g. `1.4.0`. */
+  minimum: string;
+};
+
 export const api = {
   authConfig: (serverUrl: string) => call<AuthConfig>("auth_config", { serverUrl }),
 
@@ -510,6 +561,57 @@ export const api = {
 
   /** Open Settings in its own window, or focus it if it is already open. */
   openSettings: () => call<void>("open_settings"),
+
+  /** Open another workbench window (its own layout, for another desktop).
+   *  Resolves to the new window's label. */
+  openWindow: () => call<string>("open_window"),
+
+  /**
+   * What a low-latency request would get on this connection, and why not when
+   * it would not.
+   *
+   * **On demand, never polled.** The answer is cached per host for the run, so
+   * asking again costs nothing — and it is asked when the TRANSPORT section is
+   * opened rather than on a timer, so a widget nobody opened performs no work.
+   */
+  lowLatencyProbe: (target: TargetRef) =>
+    call<LowLatencyOutcome>("low_latency_probe", { target }),
+
+  /**
+   * What rmux made of a host whose `mosh-server` is missing, or too old.
+   *
+   * **Awaits an attempt that is still running; never polled.** `lowLatencyProbe`
+   * is what starts the attempt, so this is asked immediately after it returns,
+   * and the promise stays pending exactly as long as the work does. `null` means
+   * nothing was attempted — the switch is off, or this host is already fine.
+   */
+  moshInstallStatus: (target: TargetRef) =>
+    call<MoshInstallOutcome | null>("mosh_install_status", { target }),
+
+  /**
+   * Is rmux changing this host's `mosh-server` right now?
+   *
+   * Answers immediately. Asked *before* `moshInstallStatus`, whose promise stays
+   * pending for as long as the work takes — so the in-flight state is drawn only
+   * where something is genuinely in flight, rather than assumed and then taken
+   * back at every host where nothing was attempted.
+   */
+  moshInstallPending: (target: TargetRef) =>
+    call<boolean>("mosh_install_pending", { target }),
+
+  /**
+   * Which `mosh-server` a host has, and whether rmux considers it too old.
+   *
+   * **The comparison is Rust's.** The minimum lives in one place and a second
+   * version parser here would be a second chance to get `1.10` against `1.9`
+   * backwards; `minimum` comes back with it because the sentence shown has to
+   * name it. Reads the cache `lowLatencyProbe` filled, so it is asked after it.
+   */
+  moshServerStatus: (target: TargetRef) =>
+    call<MoshServerStatus>("mosh_server_status", { target }),
+
+  /** Mirror the stored auto-install preference into Rust, which holds the gate. */
+  setMoshAutoInstall: (on: boolean) => call<void>("set_mosh_auto_install", { on }),
 
   /** The heaviest processes on a host. Polled only while the widget is open. */
   metricsProcesses: (target: TargetRef, by: "cpu" | "memory", limit?: number) =>

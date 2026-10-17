@@ -156,6 +156,24 @@ pub struct CommandSpec {
     pub env: BTreeMap<String, String>,
     pub cwd: Option<Utf8PathBuf>,
     pub tty: Tty,
+    /// **A request, not a transport.**
+    ///
+    /// The caller is saying one thing: *this is an interactive session where
+    /// echo latency is what the operator feels*. It is not saying which
+    /// protocol to use, and it must never be read that way — naming a protocol
+    /// here would put transport knowledge in the layer whose entire job is to
+    /// not have any, which is the same mistake as an `if is_local` branch in
+    /// feature code.
+    ///
+    /// **Each [`Target`] decides what to do about it.** A local PTY has no
+    /// round trip at all, so [`LocalTarget`] ignores the flag entirely and its
+    /// argv is unchanged. A target that reaches across a network may answer it
+    /// by choosing a predictive transport, or may decline — in which case the
+    /// decline has to be *visible*, because a session the operator asked to be
+    /// low-latency and quietly is not is the silently-wrong kind of wrong.
+    ///
+    /// Defaults to `false`.
+    pub low_latency: bool,
 }
 
 impl CommandSpec {
@@ -166,6 +184,7 @@ impl CommandSpec {
             env: BTreeMap::new(),
             cwd: None,
             tty: Tty::default(),
+            low_latency: false,
         }
     }
 
@@ -224,6 +243,13 @@ impl CommandSpec {
         self.tty = tty;
         self
     }
+
+    /// Ask the target to minimise echo latency if it can — see
+    /// [`CommandSpec::low_latency`] for what that does and does not promise.
+    pub fn low_latency(mut self, yes: bool) -> Self {
+        self.low_latency = yes;
+        self
+    }
 }
 
 /// A command that can be spawned on the local machine right now — in a PTY, or
@@ -236,6 +262,81 @@ pub struct ResolvedCommand {
     /// `SSH_ASKPASS` and friends, not the user's requested env — that is encoded
     /// into the remote command line instead.
     pub env: BTreeMap<String, String>,
+}
+
+/// A reserved slot on whatever connection a channel rides.
+///
+/// **Opaque on purpose.** Only the [`Target`] that issued it knows what it is
+/// accounting — for SSH it is one of at most
+/// `MAX_CHANNELS_PER_MASTER` slots on one `ControlMaster`, for a local target
+/// there is nothing to account at all — and the caller's whole job is to *hold*
+/// it for exactly as long as the channel lives, then drop it.
+///
+/// It exists because the thing being bounded is not knowable where it is spent.
+/// sshd's `MaxSessions` caps the channels on **one connection** (default 10),
+/// and rmux puts terminals, Claude panes, file listings, metrics samples and
+/// transcript tails on the same one. Measured: 39 client commands queued onto a
+/// connection that permits 10, and three panes stuck on `CONNECTING` for 163
+/// seconds because everything past the tenth waits for a slot that the sessions
+/// already holding one are themselves blocked from releasing.
+///
+/// A terminal holds its channel for its entire lifetime, so the count cannot be
+/// derived from "what is in flight" — somebody has to say when it ended. That
+/// somebody is whoever owns the spawned process, which is why this travels out
+/// of [`Target::open_channel`] rather than being bookkeeping the transport can
+/// do alone. Park it beside the process (see `Terminal::spawn_holding`, whose
+/// reader thread owns it for exactly as long as the pty is open) and the
+/// accounting is exact; drop it early and the transport undercounts a channel
+/// that is still there.
+#[derive(Default)]
+pub struct ChannelLease {
+    /// Dropping this releases the slot. `dyn Send + Sync` so a lease can be
+    /// parked in shared state and dropped from any thread.
+    held: Option<Box<dyn Send + Sync>>,
+}
+
+impl ChannelLease {
+    /// A lease over nothing — for a target with no per-connection limit to run
+    /// into. Not an error and not a refusal: it is the honest answer for a
+    /// local target, and for Windows, where every command is its own
+    /// connection and there is no shared counter to fill.
+    pub const fn none() -> Self {
+        Self { held: None }
+    }
+
+    /// Wrap the issuer's own guard, whose `Drop` releases the slot.
+    pub fn held_by(guard: Box<dyn Send + Sync>) -> Self {
+        Self { held: Some(guard) }
+    }
+
+    /// Whether this lease is actually accounting anything.
+    pub fn is_accounted(&self) -> bool {
+        self.held.is_some()
+    }
+}
+
+impl std::fmt::Debug for ChannelLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelLease").field("accounted", &self.is_accounted()).finish()
+    }
+}
+
+/// What a [`CommandSpec::low_latency`] request actually got.
+///
+/// Phrased without naming a protocol, for the same reason the request is: the
+/// caller asked for a property of the session, and what it needs back is
+/// whether it got it and — when it did not — a sentence it can show. A
+/// [`Target`] that declines must say so, because a session that quietly is not
+/// what was asked for is the silently-wrong kind of wrong: everything works, so
+/// nothing looks broken, and the thing requested is simply absent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LowLatencyOutcome {
+    /// The target answered the request.
+    Granted,
+    /// It could not, and this is what to tell the operator.
+    #[serde(rename_all = "camelCase")]
+    Declined { reason: String },
 }
 
 /// Result of a non-interactive command.
@@ -272,6 +373,32 @@ pub trait Target: Send + Sync + 'static {
     /// Never performs I/O, so terminal creation stays synchronous and cannot
     /// block the UI thread.
     fn build_command(&self, spec: &CommandSpec) -> anyhow::Result<ResolvedCommand>;
+
+    /// Resolve `spec` **and reserve the channel it will ride**, returning both.
+    ///
+    /// The async counterpart of [`Target::build_command`], and it exists for
+    /// one reason: a connection can be full. `build_command` is synchronous and
+    /// documented never to perform I/O, so it can neither wait for a slot nor
+    /// open a second connection — it can only hand back an argv and hope, which
+    /// is exactly how 39 channels came to be queued onto a connection that
+    /// permits 10.
+    ///
+    /// **The caller must hold the returned [`ChannelLease`] for as long as the
+    /// spawned process lives.** Dropping it releases the slot, so a lease
+    /// dropped at the end of the function that spawned a terminal undercounts
+    /// that terminal for the rest of its life.
+    ///
+    /// A trait method for the same reason [`Target::disconnect`] is one:
+    /// whether a target has a per-connection limit is a property of the target,
+    /// so the branch belongs in the impl. The default resolves the command and
+    /// leases nothing, which is correct for a target with no shared connection
+    /// — there is no counter to fill and nothing to wait for.
+    async fn open_channel(
+        &self,
+        spec: &CommandSpec,
+    ) -> anyhow::Result<(ResolvedCommand, ChannelLease)> {
+        Ok((self.build_command(spec)?, ChannelLease::none()))
+    }
 
     /// Run a command to completion and capture its output.
     async fn exec(&self, spec: &CommandSpec) -> anyhow::Result<Output>;
@@ -316,6 +443,48 @@ pub trait Target: Send + Sync + 'static {
     /// is not an error, and a failure here must not stop the caller forgetting
     /// the target.
     async fn disconnect(&self) {}
+
+    /// What the last [`CommandSpec::low_latency`] request on this target
+    /// resolved to, or `None` when none was made.
+    ///
+    /// A trait method for the same reason [`Target::disconnect`] is one:
+    /// whether a target can answer that request at all is a property of the
+    /// target, so the branch belongs in the impl — and callers hold
+    /// `Arc<dyn Target>`, so a fallback they cannot read is a fallback nobody
+    /// reports. Never performs I/O and never re-probes anything: this is a
+    /// reading of what already happened.
+    ///
+    /// The default is `None`, which is correct for a target with no round trip
+    /// to remove — there was nothing to grant and nothing to decline.
+    fn low_latency_outcome(&self) -> Option<LowLatencyOutcome> {
+        None
+    }
+
+    /// Settle — *before a command is built* — whether this target can answer a
+    /// [`CommandSpec::low_latency`] request, and report what it found.
+    ///
+    /// This is the async half that [`Target::low_latency_outcome`] deliberately
+    /// is not. `build_command` is synchronous and documented never to perform
+    /// I/O, so a target that has to *discover* whether it can grant the request
+    /// can only read what it already knows. **A caller that intends to set
+    /// `low_latency` must await this first**, or the discovery has not happened
+    /// yet when the command is built and the request falls back silently and
+    /// for ever.
+    ///
+    /// It is also what the UI asks, so that a control the operator cannot use
+    /// can be *absent* rather than present-and-dead. It must therefore be safe
+    /// to call repeatedly: an implementation caches its answer and a second
+    /// call costs nothing.
+    ///
+    /// A trait method for the same reason [`Target::disconnect`] is one — the
+    /// branch belongs in the impl, and callers hold `Arc<dyn Target>`.
+    async fn probe_low_latency(&self) -> LowLatencyOutcome {
+        LowLatencyOutcome::Declined {
+            reason: "this connection has no low-latency transport, so this session uses its \
+                     ordinary one"
+                .to_owned(),
+        }
+    }
 }
 
 /// Quote a string for a POSIX shell using single quotes.

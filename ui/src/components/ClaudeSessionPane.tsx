@@ -180,6 +180,7 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
             fullscreen={session.fullscreen}
             skipPermissions={session.skipPermissions}
             modelProfile={session.modelProfile}
+            lowLatency={session.lowLatency}
             headerActions={headerActions}
           />
         </div>
@@ -244,6 +245,11 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
               // after a restart rather than a second one being spawned.
               session={companionName(session.id)}
               sessionId={session.id}
+              // The companion shell runs on the conversation's transport. It is
+              // part of the same piece of work, and a split where one half
+              // predicts its echo and the other does not is two terminals that
+              // feel different for no reason the operator can see.
+              lowLatency={session.lowLatency}
               // Shares the conversation's id, so it would answer the same
               // focus request. Switching to a Claude pane means the
               // conversation, not the shell beside it.

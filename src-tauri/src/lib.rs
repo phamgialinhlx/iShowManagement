@@ -33,6 +33,7 @@ mod lock;
 pub mod logs;
 mod model_profile;
 mod services;
+mod new_window;
 mod settings_window;
 mod ssh_keys;
 mod theme;
@@ -180,6 +181,7 @@ pub fn run() {
             ssh_keys::ssh_key_status,
             ssh_keys::ssh_key_install,
             settings_window::open_settings,
+            new_window::open_window,
             lock::lock_status,
             lock::lock_enable,
             lock::lock_disable,
@@ -191,6 +193,11 @@ pub fn run() {
             face_models::face_models_install,
             face_models::face_model_file,
             terminal::terminal_open,
+            terminal::low_latency_probe,
+            terminal::mosh_install_status,
+            terminal::mosh_install_pending,
+            terminal::mosh_server_status,
+            terminal::set_mosh_auto_install,
             terminal::terminal_attach,
             terminal::terminal_write,
             terminal::terminal_resize,
@@ -284,6 +291,25 @@ pub fn run() {
             theme::theme_delete,
         ])
         .setup(|app| {
+            // **Before anything opens a connection.** A previous run that died
+            // without cleaning up leaves `ssh -N` masters behind; measured on a
+            // live machine, six of twelve had been reparented to init and were
+            // still holding a connection half an hour later, most of them with
+            // no socket anyone could ever multiplex over. A master that still
+            // *answers* is deliberately left alone — that is the one
+            // `check_alive` piggybacks on instead of authenticating again.
+            //
+            // The ordering matters: a master of our own that is mid-start has
+            // not created its socket yet and would look exactly like an orphan.
+            // Blocking, not spawned: a spawn races the first IPC command out
+            // of the webview, and a master of ours that is mid-start has no
+            // socket yet — so the reaper would see it as an orphan and kill a
+            // connection being opened right then. That failure is rare, random
+            // and arrives as "this host would not connect at launch", which is
+            // the worst shape a bug can have. It costs one `ps` before the
+            // window appears.
+            tauri::async_runtime::block_on(rmux_ssh::ControlMaster::reap_orphans());
+
             // Bring the askpass bridge up before any connection can need it.
             // A failure here only costs password/2FA hosts, so it is logged
             // rather than aborting startup.

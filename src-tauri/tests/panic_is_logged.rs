@@ -1,7 +1,9 @@
 //! A panic must name itself in the log.
 //!
 //! This is the test for a real, expensive gap: a panic on a tokio worker
-//! aborted the whole app (`panic = "abort"`), and `rmux.log` — the file the
+//! aborted the whole app (the profile was `panic = "abort"` then; it is
+//! `unwind` now, for reasons in `Cargo.toml`, and this test is unaffected —
+//! the hook runs either way, which is the point), and `rmux.log` — the file the
 //! operator exports when asked what happened — contained **nothing about it**.
 //! The message goes to stderr, a Finder-launched `.app` has nowhere for stderr
 //! to go, and the log only mirrors `tracing`. The single artefact was a macOS

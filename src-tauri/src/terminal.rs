@@ -16,8 +16,10 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rmux_ssh::SshTarget;
 use rmux_term::{TermSize, Terminal, TerminalEvent};
+use rmux_ssh::MoshInstallOutcome;
 use rmux_transport::{
-    CommandSpec, LocalTarget, SshHostId, Target, TargetId, local::terminal_env,
+    CommandSpec, LocalTarget, LowLatencyOutcome, SshHostId, Target, TargetId,
+    local::terminal_env,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -134,6 +136,118 @@ async fn resolve_target(
     Ok(resolved)
 }
 
+/// What a low-latency request would get on this connection, and why.
+///
+/// Asked by the TRANSPORT section of Session Settings *when it is opened*, so a
+/// control that cannot work is **absent** rather than present and dead. It is
+/// on demand and never a poller: the answer is cached per host for the run, so
+/// reopening the section costs nothing and a host is asked at most once.
+///
+/// Resolving the target first is deliberate — the probe runs over the
+/// ControlMaster that is already open, so it costs no handshake of its own.
+#[tauri::command]
+pub async fn low_latency_probe(
+    store: State<'_, TerminalStore>,
+    target: TargetRef,
+) -> Result<LowLatencyOutcome, String> {
+    let resolved = resolve_target(store.inner(), &target).await?;
+    Ok(resolved.probe_low_latency().await)
+}
+
+/// What rmux's attempt to install — or **upgrade** — `mosh-server` on this host
+/// came to.
+///
+/// **Asked once, right after `low_latency_probe`.** That probe is what starts an
+/// attempt, so by the time this is called there is either something to await or
+/// nothing was started. Both questions come back through one call because they
+/// are one mechanism and the panel has one place to report them; when a host has
+/// settled answers to both, the upgrade is the later fact and the one reported.
+///
+/// It *awaits an attempt that is still running* rather than being polled. One
+/// call, resolving when there is something to say: a poller on a package
+/// install would be a request every second or two for minutes, for a fact that
+/// changes exactly once. `None` means no attempt was made — the switch is off,
+/// the host is local, or nothing probed it — and the caller must then say
+/// nothing rather than invent a state.
+///
+/// Nothing here resolves or connects a target: it reads a decision another task
+/// is making, so a host that is slow to install cannot make this slow to answer
+/// for any *other* reason.
+#[tauri::command]
+pub async fn mosh_install_status(target: TargetRef) -> Result<Option<MoshInstallOutcome>, String> {
+    match target.id() {
+        TargetId::Local => Ok(None),
+        TargetId::Ssh(host) => Ok(rmux_ssh::mosh_install::status(&host).await),
+    }
+}
+
+/// What version of `mosh-server` this host has, and whether rmux considers it
+/// too old.
+///
+/// **The comparison is Rust's, not the panel's.** The minimum lives in one place
+/// (`rmux_ssh::MOSH_MIN_SERVER_VERSION`) and a second version parser in the
+/// webview would be a second chance to get `1.10` versus `1.9` backwards. The
+/// number is handed over as well, because the sentence the operator reads has to
+/// name it.
+///
+/// Reads the cache the low-latency probe filled and never probes anything, so
+/// this is only meaningful after `low_latency_probe` — which is exactly when the
+/// panel asks. `version: null` covers both "not probed" and "present but its
+/// version could not be read", and `outdated` is false for both: guessing there
+/// would mean upgrading packages on someone's server because a string changed
+/// format.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoshServerStatus {
+    version: Option<String>,
+    outdated: bool,
+    minimum: String,
+}
+
+#[tauri::command]
+pub fn mosh_server_status(target: TargetRef) -> MoshServerStatus {
+    let version = match target.id() {
+        TargetId::Local => None,
+        TargetId::Ssh(host) => rmux_ssh::mosh::cached_server_version(&host),
+    };
+    MoshServerStatus {
+        version: version.map(|v| v.to_string()),
+        outdated: rmux_ssh::mosh::is_outdated(version),
+        minimum: rmux_ssh::MOSH_MIN_SERVER_VERSION.to_string(),
+    }
+}
+
+/// Is rmux changing this host's `mosh-server` right now?
+///
+/// Answers immediately and never waits — which is the whole reason it is
+/// separate from `mosh_install_status`, whose promise stays pending for as long
+/// as the attempt runs. The panel asks this first, so it draws an in-flight
+/// state only where there is genuinely something in flight rather than assuming
+/// one and taking it back a moment later.
+#[tauri::command]
+pub fn mosh_install_pending(target: TargetRef) -> bool {
+    match target.id() {
+        TargetId::Local => false,
+        TargetId::Ssh(host) => rmux_ssh::mosh_install::pending(&host),
+    }
+}
+
+/// Whether rmux may install `mosh-server` on a host that has not got one.
+///
+/// Default **on** — that is what was asked for — and mirrored here from the
+/// webview's stored preference at startup and on every change, exactly as the
+/// benchmark-logging gate is. Rust holds the live gate because the decision is
+/// made in a background task the webview never sees.
+///
+/// Off is off, for an upgrade exactly as for an install — the setting means
+/// "rmux may change this host", and replacing a package on it is squarely that.
+/// No detection, no `sudo`, nothing written to `~/.rmux/mosh-install.json`.
+#[tauri::command]
+pub fn set_mosh_auto_install(on: bool) {
+    rmux_ssh::mosh_install::set_enabled(on);
+    tracing::info!("automatic mosh-server install {}", if on { "enabled" } else { "disabled" });
+}
+
 /// Open a terminal and start streaming its output.
 // An IPC entry point: every argument is a distinct thing the webview must send,
 // and bundling them into a struct would only move the same list behind a name.
@@ -147,6 +261,12 @@ pub async fn terminal_open<R: tauri::Runtime>(
     // `session` is a stable name for the shell on the target. The same name
     // always reattaches to the same shell, which is what survives a restart.
     session: Option<String>,
+    // Ask the target to minimise echo latency for this shell — the per-session
+    // TRANSPORT choice. A *request*, never a protocol: what it becomes is the
+    // target's decision, and `None`/`false` is the ordinary ssh path. Kept with
+    // the session for the same reason the model profile is, so a pane that
+    // restarts comes back on the transport it was launched with.
+    low_latency: Option<bool>,
     cols: u16,
     rows: u16,
     output: Channel<Response>,
@@ -184,6 +304,16 @@ pub async fn terminal_open<R: tauri::Runtime>(
 
     for (key, value) in terminal_env() {
         spec = spec.env(key, value);
+    }
+
+    // **The probe has to happen before the command is built.** `build_command`
+    // is synchronous and reads a cache the probe fills; an unprobed host is not
+    // a refusal, it is simply unknown, so setting the flag without awaiting
+    // this would fall back to ssh silently and for ever. Cached per host, so
+    // this costs one round trip once per run and only for an operator who asked.
+    if low_latency.unwrap_or(false) {
+        resolved.probe_low_latency().await;
+        spec = spec.low_latency(true);
     }
 
     // For SSH this becomes `ssh -tt host -- <agent> attach --session ...`,

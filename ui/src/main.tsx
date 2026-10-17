@@ -9,6 +9,7 @@ import { applyAppearance } from "./components/AppearancePanel";
 import { applyUserCss } from "./lib/user-css";
 import { applyCachedThemeEarly, initTheme } from "./lib/theme-runtime";
 import { bench, syncDebugLogging } from "./lib/debug-log";
+import { syncMoshAutoInstall } from "./lib/mosh-install";
 
 // Before the first paint: applying these in an effect would flash the defaults
 // on every launch. The theme applies its localStorage paint-cache synchronously
@@ -73,6 +74,12 @@ syncVisibility();
 // Push the stored benchmark-logging preference to Rust once, so the Rust-side
 // metrics instrumentation respects it even before the Settings window is opened.
 if (!isSettingsWindow) syncDebugLogging();
+
+// Same shape, and for the same reason: the gate lives in Rust because the work
+// it gates is a background task, so the stored preference has to be pushed
+// before the first host is probed. Workbench only — Settings holds no
+// connections, and a transient window must not race the one that does.
+if (!isSettingsWindow) syncMoshAutoInstall();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

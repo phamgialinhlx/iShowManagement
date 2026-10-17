@@ -66,6 +66,7 @@ export type NewSession = {
     SessionV3,
     | "resume"
     | "cwd"
+    | "lowLatency"
     | "fullscreen"
     | "skipPermissions"
     | "modelProfile"

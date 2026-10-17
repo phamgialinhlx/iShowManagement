@@ -57,6 +57,11 @@ pub async fn open_settings(app: AppHandle) -> Result<(), String> {
             state: Some(tauri::utils::WindowEffectState::Active),
             radius: None,
             color: None,
+            // Added by tauri 2.12. `false` is the behaviour every build
+            // before it had: the vibrancy view sits *behind* the webview and
+            // must not take mouse events, or it swallows clicks meant for the
+            // page. The glass rules already depend on it being inert.
+            interactive: false,
         })
         .decorations(true);
 

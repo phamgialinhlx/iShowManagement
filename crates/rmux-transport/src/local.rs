@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 
 use crate::{
-    CommandSpec, NoConsoleWindow, Output, Platform, ResolvedCommand, Target, TargetId, Tty,
+    CommandSpec, LowLatencyOutcome, NoConsoleWindow, Output, Platform, ResolvedCommand, Target,
+    TargetId, Tty,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -87,6 +88,20 @@ fn resolve_program(program: &str) -> String {
 impl Target for LocalTarget {
     fn id(&self) -> &TargetId {
         &TargetId::Local
+    }
+
+    /// Nothing to grant, and nothing to be sorry about.
+    ///
+    /// A local PTY has no round trip in it, so there is no echo wait to remove
+    /// — the request is not refused for a fault, it is simply already
+    /// satisfied by physics. The sentence says that rather than reading as a
+    /// missing capability, because a control that says "unavailable" on the
+    /// operator's own machine invites them to go and install something.
+    async fn probe_low_latency(&self) -> LowLatencyOutcome {
+        LowLatencyOutcome::Declined {
+            reason: "this session runs on this machine, so there is no round trip to remove"
+                .to_owned(),
+        }
     }
 
     fn build_command(&self, spec: &CommandSpec) -> anyhow::Result<ResolvedCommand> {
@@ -319,6 +334,21 @@ mod tests {
         assert_eq!(out.status, 3);
         assert!(out.stdout_or_err().is_err());
         assert!(out.stderr.contains("boom"));
+    }
+
+    /// A local PTY has no round trip, so there is nothing for the request to
+    /// buy here — and nothing it may change. The argv must be byte-identical
+    /// with the flag set and unset, or "low latency" would have become a
+    /// transport decision taken in the wrong place.
+    #[test]
+    fn low_latency_is_ignored_locally() {
+        let target = LocalTarget::new();
+        let spec = CommandSpec::new("git").arg("status");
+
+        let plain = target.build_command(&spec).unwrap();
+        let asked = target.build_command(&spec.clone().low_latency(true)).unwrap();
+
+        assert_eq!(plain, asked);
     }
 
     #[test]

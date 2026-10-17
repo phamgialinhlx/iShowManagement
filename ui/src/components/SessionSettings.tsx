@@ -1,8 +1,17 @@
 import { useEffect, useState } from "react";
 
-import { api, isTauri, type JiraProfile, type JiraProject } from "../lib/api";
+import {
+  api,
+  isTauri,
+  type JiraProfile,
+  type JiraProject,
+  type LowLatencyOutcome,
+  type MoshInstallOutcome,
+  type MoshServerStatus,
+} from "../lib/api";
 import { useWorkspace } from "../lib/workspace";
 import { ModelChoice } from "./ModelChoice";
+import { PanelLoader } from "./PanelLoader";
 
 /**
  * Settings for one session.
@@ -29,6 +38,41 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
   const configure = useWorkspace((s) => s.configureSession);
   const setModelProfile = useWorkspace((s) => s.setModelProfile);
   const setFullscreen = useWorkspace((s) => s.setFullscreen);
+  const setLowLatency = useWorkspace((s) => s.setLowLatency);
+  const target = useWorkspace((s) => s.targetOf(sessionId));
+
+  /**
+   * **What renders is decided by the session's kind, and a setting that cannot
+   * work is absent rather than greyed.**
+   *
+   * This panel used to be reachable only from the Claude pane, so every section
+   * in it was a Claude section by construction. It is now the settings for
+   * *any* session — a pi conversation or a plain shell — and the rule that a
+   * control which cannot work must be missing rather than disabled decides each
+   * one individually:
+   *
+   * - **TRANSPORT** applies to every kind. It is a property of the *connection*,
+   *   not of what runs over it, and `terminal_open`, `claude_start` and
+   *   `pi_start` all carry `low_latency`. A plain shell is in fact where it is
+   *   felt most, since every keystroke is a round trip.
+   * - **MODEL, CLAUDE RENDERING, CLAUDE ACCOUNT** are Claude's. `pi_start`
+   *   takes no model profile, no Claude account and no rendering mode (pi picks
+   *   its TUI mode on its own launch line), and a shell has no agent at all.
+   * - **CONTEXT WINDOW** is the denominator of the rail's context meter, which
+   *   is filled from `claude_transcript`'s usage. Nothing else produces one, so
+   *   for pi and for a shell the field would configure a meter that never draws.
+   * - **JIRA PROJECT** is offered to both agent kinds. It is not only the Claude
+   *   pane's Jira tab: the rail's JIRA widget renders for whichever session is
+   *   active and is keyed by its id, so a pi conversation pointed at a ticket
+   *   gets a working board and its transitions. The tab is Claude-only, so the
+   *   copy below says which of the two a given session gets rather than
+   *   promising a tab that will not appear. A shell is left out: it is a
+   *   terminal rather than a piece of tracked work, and nothing in a shell pane
+   *   ever reads it.
+   */
+  const kind = session?.kind;
+  const isClaude = kind === "claude";
+  const showJira = kind === "claude" || kind === "pi";
 
   const [profiles, setProfiles] = useState<JiraProfile[] | null>(null);
   const [profile, setProfile] = useState("");
@@ -37,6 +81,38 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
   const [account, setAccount] = useState(session?.claudeAccount ?? "");
   const [window_, setWindow] = useState(String(session?.contextWindow ?? ""));
   const [error, setError] = useState<string | null>(null);
+  /**
+   * What this connection would make of a low-latency request.
+   *
+   * `null` is *not probed yet*, which is neither a yes nor a no — so the
+   * section claims neither and shows that it is asking. `undefined` never
+   * occurs; the probe either answers or fails.
+   */
+  const [transport, setTransport] = useState<LowLatencyOutcome | null>(null);
+  /** The probe itself failed — a different thing from the host declining. */
+  const [transportError, setTransportError] = useState<string | null>(null);
+  /**
+   * What rmux made of a host that has no `mosh-server`.
+   *
+   * Three values and they are three different things. `undefined` is *the
+   * answer has not arrived*, which is the in-flight install — the probe is what
+   * starts one, and the call below stays pending for exactly as long as it
+   * runs, so this needs no poller and has none. `null` is *nothing was
+   * attempted*: the switch is off, or this refusal was about something an
+   * install cannot fix. Anything else is an outcome to report.
+   */
+  const [install, setInstall] = useState<MoshInstallOutcome | null | undefined>(null);
+  /**
+   * Which `mosh-server` this host has, and whether rmux thinks it too old.
+   *
+   * Read from Rust rather than derived here: the minimum is defined once, and a
+   * second version comparison in the webview is a second chance to get `1.10`
+   * against `1.9` backwards. `null` is *not asked yet*.
+   */
+  const [server, setServer] = useState<MoshServerStatus | null>(null);
+  /** Shown after a verified install, then allowed to fade — a success is not a
+   *  state to live with, unlike the two failures beside it. */
+  const [installed, setInstalled] = useState<string | null>(null);
   /** Why the connection list could not be read, as the server put it. */
   const [profileError, setProfileError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -48,8 +124,13 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
   // empty list, so "you are not signed in", "the server said no" and "there
   // genuinely are no connections" all rendered as one sentence covering all
   // three — which tells the operator nothing about which one to go and fix.
+  //
+  // Gated on the section being shown, not only on the section being rendered:
+  // asking the Cowork server which Jira connections exist, for a shell that
+  // will never display the answer, is exactly the "a widget switched off must
+  // not run" failure in miniature.
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || !showJira) return;
     let cancelled = false;
     api
       .jiraProfiles()
@@ -67,7 +148,116 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [showJira]);
+
+  /**
+   * Ask, once, when this tab is opened.
+   *
+   * **On demand and never a poller.** This component is mounted only while the
+   * SETTINGS view is on screen, so a session nobody configured performs no
+   * work — the rule that a widget which is switched off must not run. The
+   * answer is cached per host in Rust for the whole run, so reopening the tab,
+   * or opening it for a second session on the same machine, costs nothing.
+   *
+   * It is also why the probe was taken out of `connect`: asking every host at
+   * startup is a round trip per host on exactly the slow link this feature
+   * exists to fix.
+   */
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    setTransport(null);
+    setTransportError(null);
+    setInstall(null);
+    setServer(null);
+    setInstalled(null);
+    api
+      .lowLatencyProbe(target)
+      .then(async (outcome) => {
+        if (cancelled) return;
+        setTransport(outcome);
+
+        /*
+          **Asked, not polled, and asked of the state that already exists.**
+
+          The probe above is what starts an install *or an upgrade*, so by the
+          time this runs there is either an attempt to await or there is not.
+          `moshInstallPending` says which, immediately — and it is asked first
+          because `moshInstallStatus`'s promise stays pending for precisely as
+          long as the work takes, which is what makes the in-flight state honest
+          without a timer anywhere. Assuming an attempt and taking it back would
+          flash "installing…" at every host where nothing was attempted.
+
+          Asked on both outcomes, not only on a refusal: a host that *has* a
+          mosh-server can have one too old to be usable, and that is the same
+          mechanism reporting through the same call.
+
+          Nothing here reads the refusal's *wording* to decide what applies.
+          That sentence is prose written for the operator and is free to change;
+          the fact lives in Rust's own record of what it attempted and of what
+          version it read, which is the only thing that can be right.
+        */
+        const report = async (): Promise<MoshInstallOutcome | null> => {
+          const [pending, version] = await Promise.all([
+            api.moshInstallPending(target).catch(() => false),
+            api.moshServerStatus(target).catch(() => null),
+          ]);
+          if (cancelled) return null;
+          setServer(version);
+          if (pending) setInstall(undefined);
+
+          const settled = await api.moshInstallStatus(target).catch(() => null);
+          if (cancelled) return null;
+          setInstall(settled);
+          return settled;
+        };
+
+        const settled = await report();
+        if (cancelled || !settled) return;
+
+        if (settled.kind === "upgraded") {
+          // The version on screen is now false, and Rust has already replaced
+          // its own cached reading.
+          const again = await api.moshServerStatus(target).catch(() => null);
+          if (!cancelled) setServer(again);
+          return;
+        }
+
+        if (settled.kind === "installed") {
+          // The refusal on screen is now false. Rust has already updated its
+          // cached answer for this host, so asking again replaces "no
+          // mosh-server here" with the control itself rather than leaving the
+          // operator reading a sentence that stopped being true.
+          setInstalled(settled.manager);
+          const again = await api.lowLatencyProbe(target).catch(() => null);
+          if (cancelled || !again) return;
+          setTransport(again);
+          // **And the second question, which that re-probe is what asks.** An
+          // install can perfectly well land a mosh-server that is already too
+          // old — Debian oldstable's archive holds 1.3.2 — and the re-probe
+          // above is what starts the upgrade. Without this the operator would
+          // be shown a version with nothing saying rmux was already acting on
+          // it, and would find out only by reopening the tab.
+          await report();
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setTransportError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(target)]);
+
+  // A success is allowed to fade; the two failures beside it are not, because
+  // they are still true and still want something from the operator.
+  useEffect(() => {
+    if (!installed) return;
+    const timer = setTimeout(() => setInstalled(null), 2500);
+    return () => clearTimeout(timer);
+  }, [installed]);
 
   useEffect(() => {
     if (!profile) {
@@ -88,11 +278,20 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
 
   const [saved, setSaved] = useState(false);
 
+  /**
+   * Only the fields this kind actually showed are written.
+   *
+   * `configure` reads an absent key as "leave it alone" and a present-but-empty
+   * one as "clear it", so sending every key unconditionally would let a pi
+   * session's Save quietly erase a Claude account or context window it never
+   * displayed — a setting changed by a control that was not on screen.
+   */
   const save = () => {
     configure(sessionId, {
-      claudeAccount: account.trim(),
-      jiraProject: project,
-      contextWindow: Number(window_) || 0,
+      ...(isClaude
+        ? { claudeAccount: account.trim(), contextWindow: Number(window_) || 0 }
+        : {}),
+      ...(showJira ? { jiraProject: project } : {}),
     });
     // Confirmed in place, next to the control that did it, and allowed to fade —
     // there is no dialog to close, so without this nothing marks that the click
@@ -120,16 +319,18 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
             with, so a running conversation cannot be moved without restarting
             it. The note says so, because a control that appears to do nothing
             is the same "is this broken?" impression as one that does. */}
-        <div className="flex flex-col gap-1">
-          <ModelChoice
-            value={session?.modelProfile ?? null}
-            onChange={(id) => setModelProfile(sessionId, id ?? undefined)}
-          />
-          <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
-            Takes effect the next time this session's Claude starts — restart the Claude tab to
-            switch provider. Profiles are managed under Settings › Models.
-          </span>
-        </div>
+        {isClaude && (
+          <div className="flex flex-col gap-1">
+            <ModelChoice
+              value={session?.modelProfile ?? null}
+              onChange={(id) => setModelProfile(sessionId, id ?? undefined)}
+            />
+            <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+              Takes effect the next time this session's Claude starts — restart the Claude tab to
+              switch provider. Profiles are managed under Settings › Models.
+            </span>
+          </div>
+        )}
 
         {/*
           **Moved here out of the Claude tab's header.**
@@ -147,6 +348,7 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
           Both trade-offs are honest and named in the copy below. The explicit
           per-session choice persists and always wins over the default.
         */}
+        {isClaude && (
         <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
           <span className="micro">CLAUDE RENDERING</span>
           <div className="flex gap-2">
@@ -175,7 +377,284 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
             effect the next time this session's Claude starts.
           </span>
         </div>
+        )}
 
+        {/*
+          **TRANSPORT — and the absent switch is the design.**
+
+          Where the connection cannot answer a low-latency request, the *reason*
+          is shown and there is no control at all. A greyed switch invites "how
+          do I enable this"; a missing one asks nothing, and the sentence beside
+          it already says what would have to change. The reason is Rust's,
+          printed verbatim — re-wording it here would be a second copy to keep
+          true.
+
+          Nothing is claimed before the answer arrives. Not probed is neither a
+          yes nor a no, so the section says it is asking, and names the machine
+          it is asking — over ssh that machine is the reason it is slow.
+
+          Shown only under Tauri: in a browser preview there is no connection to
+          measure, and a control with nothing behind it is worse than none.
+        */}
+        {isTauri() && (
+          <div
+            className="flex flex-col gap-1"
+            style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}
+          >
+            <span className="micro">TRANSPORT</span>
+            {transportError ? (
+              <span
+                role="alert"
+                className="data text-[10.5px]"
+                style={{ color: "rgb(var(--primary))" }}
+              >
+                {transportError}
+              </span>
+            ) : transport === null ? (
+              <PanelLoader
+                variant="inline"
+                phase={`asking ${host ?? "this machine"} about a low-latency transport…`}
+              />
+            ) : transport.kind === "declined" ? (
+              <div className="flex flex-col gap-1">
+                <span
+                  className="data text-[10.5px] leading-relaxed"
+                  style={{ color: "var(--text-soft)" }}
+                >
+                  {transport.reason}
+                </span>
+
+                {/*
+                  **The attempt reports itself, beside the sentence it answers.**
+
+                  A host with no `mosh-server` is the one refusal rmux can act
+                  on, so it does — in the background, with this as the only
+                  place the operator is told. Every branch below is a *different
+                  ask*: a password host is one command they can run, a failure
+                  is somewhere to go and look, and an unsupported host is
+                  neither. "It did not work" would have said none of that.
+
+                  Red is only on the failure. Needing a password is the host
+                  behaving correctly and rmux declining to argue with it, which
+                  is not an alarm.
+                */}
+                {install === undefined ? (
+                  <PanelLoader
+                    variant="inline"
+                    phase={`installing mosh-server on ${host ?? "this machine"}…`}
+                  />
+                ) : install?.kind === "needsPassword" ? (
+                  <div className="flex flex-col gap-1">
+                    <span
+                      className="data text-[10px] leading-relaxed"
+                      style={{ color: "var(--text-soft)" }}
+                    >
+                      Installing it needs a password on this host, and rmux will never ask one for
+                      it — repeated password attempts are how a machine gets locked out. It will
+                      not try this host again. Run it yourself:
+                    </span>
+                    <code
+                      className="data inset px-2 py-[5px] text-[10px] leading-relaxed"
+                      style={{ color: "var(--text)", userSelect: "text", wordBreak: "break-all" }}
+                    >
+                      {install.command}
+                    </code>
+                  </div>
+                ) : install?.kind === "failed" ? (
+                  <span
+                    role="alert"
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "rgb(var(--primary))" }}
+                  >
+                    rmux tried to install mosh-server here and it did not work: {install.reason}
+                  </span>
+                ) : install?.kind === "unsupported" ? (
+                  <span
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    rmux cannot install it here — {install.reason}.
+                  </span>
+                ) : null}
+                {/* The stored choice is left alone rather than cleared: this
+                    host says no, another one this session is moved to may not,
+                    and silently unsetting a preference the operator made is the
+                    kind of change nothing on screen would account for. */}
+                {session?.lowLatency && (
+                  <span
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    This session still asks for it, and gets ssh here.
+                  </span>
+                )}
+              </div>
+            ) : (
+              <>
+                {/*
+                  **The upgrade reports itself here, where the control is.**
+
+                  A host with a `mosh-server` too old for what rmux does with it
+                  is not a refusal — low latency works — so it does not belong
+                  beside the refusals above. It belongs next to the switch it
+                  changes the behaviour of.
+
+                  Every branch is a different ask. `nothingNewer` is the one the
+                  *operator* has to act on: nothing rmux can run will move this
+                  host, so it says which version they are on and what that costs
+                  them. Needing a password is the host behaving correctly and
+                  rmux declining to argue with it, which is not an alarm; red is
+                  only on the two that are.
+                */}
+                {install === undefined ? (
+                  <PanelLoader
+                    variant="inline"
+                    phase={`upgrading mosh-server on ${host ?? "this machine"}${
+                      server?.version ? ` from ${server.version}` : ""
+                    }…`}
+                  />
+                ) : install?.kind === "upgraded" ? (
+                  <span
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "var(--text-soft)" }}
+                  >
+                    mosh-server on {host ?? "this machine"} upgraded from {install.from} to{" "}
+                    {install.to} with {install.manager}. Takes effect the next time this session
+                    starts.
+                  </span>
+                ) : install?.kind === "nothingNewer" ? (
+                  <div className="flex flex-col gap-1">
+                    <span
+                      role="alert"
+                      className="data text-[10px] leading-relaxed"
+                      style={{ color: "rgb(var(--primary))" }}
+                    >
+                      This host has mosh-server {install.version} and {install.manager} has nothing
+                      newer to offer. rmux cannot fix this one.
+                    </span>
+                    <span
+                      className="data text-[10px] leading-relaxed"
+                      style={{ color: "var(--text-soft)" }}
+                    >
+                      Older than {server?.minimum ?? "1.4.0"}, so coming back to a fullscreen agent
+                      pane over mosh can lose the ability to scroll it, and drag-to-copy there may
+                      not reach the clipboard. A backport or a newer repository would fix it; using
+                      SSH for this session avoids it.
+                    </span>
+                  </div>
+                ) : install?.kind === "needsPassword" ? (
+                  <div className="flex flex-col gap-1">
+                    <span
+                      className="data text-[10px] leading-relaxed"
+                      style={{ color: "var(--text-soft)" }}
+                    >
+                      This host has mosh-server {server?.version ?? "older than we would like"}, and
+                      upgrading it needs a password — which rmux will never ask for, because
+                      repeated password attempts are how a machine gets locked out. It will not try
+                      this host again. Run it yourself:
+                    </span>
+                    <code
+                      className="data inset px-2 py-[5px] text-[10px] leading-relaxed"
+                      style={{ color: "var(--text)", userSelect: "text", wordBreak: "break-all" }}
+                    >
+                      {install.command}
+                    </code>
+                  </div>
+                ) : install?.kind === "failed" ? (
+                  <span
+                    role="alert"
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "rgb(var(--primary))" }}
+                  >
+                    rmux tried to upgrade mosh-server here and it did not work: {install.reason}
+                  </span>
+                ) : install?.kind === "unsupported" ? (
+                  <span
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    rmux cannot upgrade it here — {install.reason}.
+                  </span>
+                ) : install?.kind === "alreadyCurrent" ? (
+                  <span
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    mosh-server {install.version} — already current.
+                  </span>
+                ) : server?.outdated ? (
+                  // Reached when rmux is *not* allowed to change this host: the
+                  // reading still stands and is still worth saying, because the
+                  // limitation is real whether or not anything was attempted.
+                  <span
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "var(--text-soft)" }}
+                  >
+                    This host has mosh-server {server.version}, older than {server.minimum}.
+                    Automatic upgrades are switched off, so it stays that way — coming back to a
+                    fullscreen agent pane over mosh may lose the ability to scroll it.
+                  </span>
+                ) : server?.version ? (
+                  <span
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    mosh-server {server.version} — already current.
+                  </span>
+                ) : null}
+
+                {/* Said once, beside the control it just enabled, and then
+                    allowed to go — a success is not a state to live with. The
+                    next-start caveat is the part worth saying: the pane on
+                    screen is still the ssh one it was launched as. */}
+                {installed && (
+                  <span
+                    className="data text-[10px] leading-relaxed"
+                    style={{ color: "var(--text-soft)" }}
+                  >
+                    mosh-server installed on {host ?? "this machine"} with {installed}. It takes
+                    effect the next time this session starts.
+                  </span>
+                )}
+                <div className="flex gap-2">
+                  {([false, true] as const).map((mode) => (
+                    <button
+                      key={String(mode)}
+                      type="button"
+                      className="chip"
+                      onClick={() => session && setLowLatency(session.id, mode)}
+                      style={{
+                        flex: "1 1 0",
+                        color: !!session?.lowLatency === mode ? "var(--text)" : "var(--text-faint)",
+                        background:
+                          !!session?.lowLatency === mode ? "var(--hover)" : "transparent",
+                        textDecoration: !!session?.lowLatency === mode ? "underline" : "none",
+                      }}
+                    >
+                      {mode ? "LOW LATENCY" : "SSH"}
+                    </button>
+                  ))}
+                </div>
+                <span
+                  className="data text-[10px] leading-relaxed"
+                  style={{ color: "var(--text-soft)" }}
+                >
+                  Predicts each keystroke locally instead of waiting for the host to echo it —
+                  the delay a slow link is actually felt as. The cost is scrollback: this pane
+                  would keep a screen, not a history.{" "}
+                  {server?.outdated
+                    ? "On this host's older mosh-server, drag-to-copy in a fullscreen agent pane " +
+                      "may also stop reaching the clipboard, since it travels by OSC 52; Select " +
+                      "mode still works. "
+                    : ""}
+                  Takes effect next time this session starts.
+                </span>
+              </>
+            )}
+          </div>
+        )}
+
+        {isClaude && (
         <label className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
           <span className="micro">CLAUDE ACCOUNT</span>
           <input
@@ -191,7 +670,9 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
             under Settings › Claude.
           </span>
         </label>
+        )}
 
+        {isClaude && (
         <label className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
           <span className="micro">CONTEXT WINDOW</span>
           <select
@@ -211,7 +692,9 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
             200k or 1M, so without one of the two there is no honest percentage to show.
           </span>
         </label>
+        )}
 
+        {showJira && (
         <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
           <span className="micro">JIRA PROJECT</span>
           {profiles === null ? (
@@ -267,18 +750,44 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
                 ))}
               </select>
               <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
-                Choosing a project adds a Jira tab to this session.
+                {/* Named per kind rather than promised in general: a pi pane has
+                    no Jira tab to add, and telling someone a tab will appear
+                    that then does not is the same "is this broken?" impression
+                    as showing a dead control. */}
+                {isClaude
+                  ? "Choosing a project adds a Jira tab to this session, and a JIRA widget to the rail while it is the active session."
+                  : "Choosing a project adds a JIRA widget to the rail while this is the active session. pi panes have no Jira tab of their own."}
               </span>
             </>
           )}
         </div>
+        )}
 
-        <div className="flex items-center gap-3">
-          <button type="button" className="btn btn-primary" onClick={save}>
-            Save
-          </button>
-          {saved && <span className="micro">SAVED</span>}
-        </div>
+        {/* Saved fields only. TRANSPORT and the rest write straight to the
+            store as they are clicked, so a shell — which has nothing else —
+            gets no button that would save nothing. */}
+        {(isClaude || showJira) && (
+          <div className="flex items-center gap-3">
+            <button type="button" className="btn btn-primary" onClick={save}>
+              Save
+            </button>
+            {saved && <span className="micro">SAVED</span>}
+          </div>
+        )}
+
+        {/* Every section this kind has was gated away — which happens to a shell
+            outside the desktop shell, where there is no connection to ask about
+            a transport either. An empty box reads as a pane that failed to
+            load, so it says which it is. */}
+        {!isClaude && !showJira && !isTauri() && (
+          <span
+            className="data text-[10.5px] leading-relaxed"
+            style={{ borderTop: "1px solid var(--border)", paddingTop: 12, color: "var(--text-soft)" }}
+          >
+            A shell session's only setting is its transport, and that needs the rmux desktop
+            shell — there is no connection to measure in a browser preview.
+          </span>
+        )}
 
         {error && (
           <p role="alert" className="data text-[11px]" style={{ color: "rgb(var(--primary))" }}>

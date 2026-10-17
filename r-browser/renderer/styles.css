@@ -1,0 +1,1275 @@
+/*
+ * SIGNAL ROOM, ported to R browser's chrome.
+ * ==========================================
+ *
+ * Adapted from `ui/src/styles/signal-room.css` rather than imported: that file
+ * starts with `@import "tailwindcss"` and is written for an app that has
+ * Tailwind's utilities underneath it. This one has no Tailwind at all, so every
+ * layout rule a class needs is spelled out here. The *tokens* and the four
+ * rules are the same, because two apps in one repository that disagree about
+ * what red means are two design systems.
+ *
+ *   0. Red (`--primary`) appears ONLY where the operator must act. Work in
+ *      progress is amber (`--busy`). A console `error` is a genuine act-now, so
+ *      it wears red; a `warn` does not.
+ *   1. Zero border-radius, everywhere. Hairlines, not glows.
+ *   2. No blinking or pulsing. Liveness is shown by data moving — the one
+ *      animation in this file is the indeterminate load hairline, which *is*
+ *      data moving (a navigation in flight), and the caret.
+ *   3. No emoji. Inline SVG only.
+ */
+
+:root {
+  --primary: 230 59 46;
+
+  --app-bg: #060606;
+  --app-panel: #0a0a0a;
+  --app-panel-2: #0e0e0e;
+  --app-elev: #121212;
+
+  --border: rgba(232, 230, 225, 0.14);
+  --border-strong: rgba(232, 230, 225, 0.24);
+  --hover: rgba(232, 230, 225, 0.055);
+
+  --text: #e8e6e1;
+  --text-soft: #98958f;
+  /* 4.57:1 against the panel. Most of what wears this is 9px micro-labels,
+     which is exactly the size that cannot afford to be dim. */
+  --text-faint: #7e7b74;
+
+  --busy: 242 168 60;
+  --warn: #e0a44a;
+  --ok: #6fbf8f;
+
+  /*
+   * No font packages are imported — this app ships no web fonts, so the stacks
+   * fall through to the system faces. The *shape* of the stack is kept
+   * identical to rmux's so that a machine which has IBM Plex Mono installed
+   * renders both apps the same way.
+   */
+  --font-display: "SFU Futura", "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-body: var(--font-display);
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+
+  --ease: cubic-bezier(0.2, 0.9, 0.3, 1);
+  --dur: 0.3s;
+
+  color-scheme: dark;
+}
+
+/*
+ * Rule 1, enforced rather than encouraged. Form controls arrive rounded from
+ * the platform stylesheet, so this has to be global and has to be `!important`
+ * — a single stray rounded corner reads as a mistake against everything else.
+ */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  /* The chrome is an application, not a document. */
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea {
+  /* Rule 0's one unconditional home: the caret is always "you must act". */
+  caret-color: rgb(var(--primary));
+  user-select: text;
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+::selection {
+  background: rgb(var(--primary) / 0.3);
+  color: var(--text);
+}
+
+/* Square, thin, and always space-reserving: macOS overlay scrollbars float over
+   content, which makes a URL's last characters unreadable. */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #242424;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2e2e2e;
+}
+
+/* ------------------------------------------------------------------- type */
+
+.micro {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.data {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.soft { color: var(--text-soft); }
+.faint { color: var(--text-faint); }
+.alert { color: rgb(var(--primary)); }
+.busy { color: rgb(var(--busy)); }
+.ok { color: var(--ok); }
+
+.selectable,
+.selectable * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * A URL truncated from the *left*, so the path survives.
+ *
+ * `direction: rtl` moves the ellipsis to the front; `unicode-bidi: plaintext`
+ * stops the string itself being reordered, which without it puts a trailing `/`
+ * at the start and reads as a corrupted URL rather than a shortened one.
+ */
+.truncate-left {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
+}
+
+/* --------------------------------------------------------------- controls */
+
+.btn {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  padding: 6px 14px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--text-faint);
+}
+
+.btn:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+/*
+ * The primary action: a chalk plate that turns signal red on hover. Red on
+ * *intent to act* is rule 0 — this is the one control where the operator is
+ * about to do the thing red is reserved for.
+ */
+.btn-primary {
+  background: var(--text);
+  color: #0a0a0a;
+  border-color: var(--text);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: rgb(var(--primary));
+  border-color: rgb(var(--primary));
+  color: var(--text);
+}
+
+/* A disabled primary must not keep the chalk plate, or it renders exactly like
+   an enabled one and simply refuses to respond. */
+.btn-primary:disabled {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-faint);
+}
+
+/*
+ * `.chip` is `.btn`'s reading at caption size. The affordance is the *border*:
+ * at nine pixels a tone difference is not a state anyone reads, so a control
+ * that carried only `.micro` would be indistinguishable from a heading.
+ */
+.chip {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.chip:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--text-faint);
+  color: var(--text);
+}
+
+/* Engaged reads as pressed *in*, not merely brighter — and carries an underline
+   as well as a tone, for the same nine-pixel reason as `.seg`. */
+.chip[aria-pressed="true"] {
+  background: var(--hover);
+  color: var(--text);
+  border-color: var(--text-faint);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+/*
+ * PICK, armed. The single place in this app where a *persistent* red is
+ * correct: the operator has been asked to point at something and the app is
+ * waiting on them. It stops being red the moment the picker disarms.
+ */
+.chip.armed,
+.btn.armed {
+  border-color: rgb(var(--primary));
+  color: rgb(var(--primary));
+  background: rgb(var(--primary) / 0.1);
+}
+
+.chip:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+/* A destructive chip — delete, clear all. Quiet at rest so the row does not read
+   as an alarm, and red only on hover: the accent is earned the moment the
+   pointer is actually over the thing that will remove data, which is the "make
+   the wrong click hard" rule without a persistent red competing for attention. */
+.chip-danger:hover:not(:disabled) {
+  border-color: rgb(var(--primary));
+  color: rgb(var(--primary));
+  background: rgb(var(--primary) / 0.1);
+}
+
+/* Pushes what follows to the far end of a flex bar. */
+.spacer {
+  flex: 1 1 auto;
+}
+
+/* The bookmark star, inside the address pill at its right end. */
+.address-star {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.address-star:hover {
+  color: var(--text);
+  background: transparent;
+}
+
+/* Pinned: the one warm accent, earned — this page is bookmarked. */
+.address-star[aria-pressed="true"] {
+  color: rgb(var(--primary));
+}
+
+/* The address-bar suggestion strip. A chrome strip (not a floating dropdown),
+   so it shrinks the page slot instead of being hidden behind the native view.
+   Bounded height with its own scroll, so a long list does not push the page
+   away — it is a panel, not an ever-growing bar. */
+.omni-suggest {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface, rgba(0, 0, 0, 0.35));
+}
+
+.omni-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+/* Keyboard/hover highlight — the accent bar on the left is the "this one" mark,
+   consistent with how the app marks a current thing elsewhere. */
+.omni-row.active {
+  background: var(--hover);
+  border-left-color: rgb(var(--primary));
+  color: var(--text);
+}
+
+.omni-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--text-faint);
+}
+
+.omni-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 1px;
+}
+
+.omni-title {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.omni-url {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.omni-count {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+/* The save-password bar: a chrome strip below the toolbar, so it shrinks the
+   page slot rather than trying (and failing) to paint over the native view. */
+.password-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface, transparent);
+}
+
+.password-bar-text {
+  flex: 1 1 auto;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.password-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+/* Saved-password manager rows. */
+.pw-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pw-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.pw-secret {
+  font-family: var(--font-mono);
+  color: var(--text);
+  word-break: break-all;
+}
+
+.pw-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* An icon-only square control: the toolbar arrows, a row's close button. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.icon-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.seg {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border-strong);
+}
+
+.seg > button {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.seg > button + button {
+  border-left: 1px solid var(--border);
+}
+
+.seg > button:hover:not(:disabled):not([aria-pressed="true"]) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* Selected carries an underline as well as a tone — at 9px a tone-only
+   difference is not a state anyone can see. */
+.seg > button[aria-pressed="true"] {
+  background: var(--hover);
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.field {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 9px;
+  width: 100%;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  color: var(--text);
+  outline: none;
+  transition: border-color var(--dur) var(--ease);
+}
+
+.field:focus {
+  border-color: var(--border-strong);
+}
+
+.field[aria-invalid="true"] {
+  border-color: rgb(var(--primary));
+}
+
+/* A number field wide enough for four digits and no wider — the width is what
+   says "this is a pixel count" before the label is read. */
+.field-num {
+  width: 60px;
+  text-align: right;
+}
+
+select.field {
+  cursor: pointer;
+  appearance: none;
+  padding-right: 9px;
+}
+
+/* A checkbox that reads at caption size, with its label as the hit target. */
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+
+.check input {
+  width: 11px;
+  height: 11px;
+  margin: 0;
+  accent-color: rgb(var(--primary));
+  cursor: pointer;
+}
+
+/* ----------------------------------------------------------------- shell */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--app-bg);
+}
+
+/* The top chrome is fixed-height by content; the middle row takes the rest. */
+.chrome {
+  flex: 0 0 auto;
+  background: var(--app-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.middle {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+
+/*
+ * The page slot. Deliberately empty — the site is a `WebContentsView` painted
+ * *over* this rectangle by main, never a DOM node. Everything here is therefore
+ * about geometry: whatever this box measures is what `setLayout` reports.
+ */
+.page-slot {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--app-bg);
+  position: relative;
+}
+
+/* Shown only when no tab exists — otherwise the native view covers this box
+   entirely and anything drawn here is invisible. */
+.page-slot-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+/* ------------------------------------------------------------------ tabs */
+
+/*
+ * The row that drags the window.
+ *
+ * On macOS `titleBarStyle: 'hiddenInset'` removes the native title bar, so the
+ * window is immovable unless the page declares `-webkit-app-region: drag`
+ * somewhere. It shipped without one and could not be moved at all. The rule is
+ * enforced by `checks/window-drag-check.ts`, syntactically, because this is
+ * invisible to every other gate: it is not a type error, not a build failure,
+ * and no harness that renders the DOM can feel whether a window moved.
+ */
+.tabbar {
+  display: flex;
+  align-items: stretch;
+  height: 30px;
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+}
+
+/*
+ * Room for the traffic lights, and a drag handle rather than dead space.
+ *
+ * This replaces a `margin-left` on the strip. A margin left a gap that looked
+ * exactly like a title bar and did nothing, which is worse than no gap: it
+ * invites the drag it cannot answer.
+ */
+.tabbar-inset {
+  flex: 0 0 0;
+}
+
+.is-mac .tabbar-inset {
+  flex-basis: 78px;
+}
+
+/*
+ * The always-present handle, `flex-shrink: 0` on purpose.
+ *
+ * It must never be squeezed to nothing by a row of tabs, because a window with
+ * many tabs is precisely the one the operator most wants to move.
+ */
+.tabbar-drag {
+  flex: 0 0 72px;
+}
+
+.tabstrip {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  /* Without this a flex child refuses to shrink below its content width, so the
+     strip pushes the drag handle off the window instead of scrolling. */
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* A horizontal bar that can scroll needs its own thin track, or the last tab
+     sits under the window edge with nothing saying there are more. */
+  scrollbar-width: thin;
+  /*
+   * Everything in here is a control, and a control inside a drag region does
+   * not receive clicks on macOS — the window moves instead. Declared on the
+   * container rather than on each tab so a control added later inherits it.
+   */
+  -webkit-app-region: no-drag;
+}
+
+/*
+ * macOS: a `hiddenInset` titlebar paints the window's traffic lights over the
+ * top-left, and the tab strip is the row they land on — so the first tab sat
+ * *under* the red/yellow/green buttons. A left MARGIN (not padding) keeps it
+ * clear of them: padding is inside the scroll box and would slide away as the
+ * tabs scroll, re-covering a tab under the buttons; a margin sits outside it and
+ * holds. The buttons start at x:14 and span ~60px. Only this row is inset — the
+ * toolbar below is already clear of the buttons' height.
+ */
+/* Superseded by `.tabbar-inset`, which is the same space made draggable. */
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  width: 186px;
+  padding: 0 6px 0 9px;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: default;
+  overflow: hidden;
+}
+
+.tab:hover {
+  background: var(--hover);
+}
+
+.tab[aria-selected="true"] {
+  background: var(--app-panel-2);
+  color: var(--text);
+  /* An inset top hairline rather than a glow — rule 1. */
+  box-shadow: inset 0 1px 0 var(--border-strong);
+}
+
+.tab-title {
+  flex: 1 1 auto;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-favicon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+/* The close button appears on hover or on the selected tab - always present in the
+   DOM so the title's width does not change when the pointer arrives. */
+.tab-close {
+  flex: 0 0 auto;
+  visibility: hidden;
+}
+
+.tab:hover .tab-close,
+.tab[aria-selected="true"] .tab-close {
+  visibility: visible;
+}
+
+/*
+ * Loading is a hairline that *travels*, not a dot that pulses (rule 2). A
+ * moving bar says "bytes are arriving"; a blinking dot says only "this element
+ * has an animation on it".
+ */
+.tab-loading {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.tab-loading::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  background: rgb(var(--busy));
+  animation: rb-travel 1.1s linear infinite;
+}
+
+@keyframes rb-travel {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(350%); }
+}
+
+.tab-new {
+  flex: 0 0 auto;
+  width: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.tab-new:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* --------------------------------------------------------------- toolbar */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  min-height: 34px;
+}
+
+.toolbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: 0 0 auto;
+}
+
+.address {
+  flex: 1 1 auto;
+  min-width: 120px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  padding: 0 8px;
+  height: 24px;
+}
+
+.address:focus-within {
+  border-color: var(--border-strong);
+}
+
+.address input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* A failed navigation is the operator's problem to act on, so the frame says so
+   in red rather than leaving an empty page that looks like a hang. */
+.address[data-error="true"] {
+  border-color: rgb(var(--primary));
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* ------------------------------------------------------------------ menu */
+
+.menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 3px);
+  right: 0;
+  z-index: 40;
+  min-width: 190px;
+  background: var(--app-panel);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 24px 70px -30px rgb(0 0 0 / 0.8);
+  padding: 3px 0;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 5px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 3px 0;
+}
+
+/* --------------------------------------------------------------- devices */
+
+.devicebar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--app-panel-2);
+}
+
+.devicebar .group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* ------------------------------------------------------------- inspector */
+
+.inspector {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--app-panel);
+  border-left: 1px solid var(--border);
+}
+
+/*
+ * The drag handle. 5px wide and its own element: a border cannot be grabbed,
+ * and a hit target narrower than about four pixels is one the operator misses
+ * and instead clicks the page behind it.
+ */
+.inspector-grip {
+  flex: 0 0 auto;
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  border-left: 1px solid var(--border);
+}
+
+.inspector-grip:hover {
+  background: var(--hover);
+}
+
+.inspector-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--border);
+}
+
+.inspector-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* A panel's own toolbar: filters, clears, copies. Never scrolls. */
+.panel-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--border);
+}
+
+/*
+ * **The scrolling element carries the ceiling, not a wrapper.**
+ *
+ * `flex: 1` plus `overflow-y: auto` bounds nothing on its own — it resolves
+ * against the nearest ancestor with a *definite* height, and a column that
+ * sizes to its content does not have one. Every list in this app (console,
+ * network, annotations, sessions) is unbounded in principle and small in the
+ * page you happen to be testing against, so each one gets `min-height: 0` to
+ * make the flex basis definite *and* a `max-height` as the backstop.
+ */
+.scroll-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ----------------------------------------------------------------- notes */
+
+.note-row {
+  display: flex;
+  gap: 7px;
+  padding: 7px;
+  border-bottom: 1px solid var(--border);
+}
+
+.note-row:hover {
+  background: var(--hover);
+}
+
+.note-index {
+  flex: 0 0 auto;
+  width: 18px;
+  padding-top: 1px;
+}
+
+.note-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.note-shot {
+  width: 100%;
+  max-height: 96px;
+  object-fit: cover;
+  object-position: top left;
+  border: 1px solid var(--border);
+  display: block;
+}
+
+.note-text {
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.note-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+/* The live edit-mode changes captured with a note. A row of flat, zero-radius
+   chips — hairline border, no fill — because they are reference, not an action:
+   the operator reads them to confirm the prompt will carry them. */
+.note-edits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.note-edit {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.note-edit .truncate {
+  max-width: 130px;
+}
+
+/* An element that no longer resolves. This is *information*, not an alarm the
+   operator must act on — the note is still worth keeping — so it is amber. */
+.note-stale {
+  color: rgb(var(--busy));
+}
+
+textarea.field {
+  resize: vertical;
+  min-height: 46px;
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------------- console */
+
+.log-row {
+  display: flex;
+  gap: 7px;
+  padding: 3px 7px;
+  border-bottom: 1px solid rgba(232, 230, 225, 0.05);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  align-items: baseline;
+}
+
+.log-row:hover {
+  background: var(--hover);
+}
+
+.log-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-soft);
+}
+
+/* Rule 0: an uncaught error is a genuine "act now". A warning is work in
+   progress, so it is amber, and an ordinary log stays monochrome. */
+.log-row[data-level="error"] .log-text { color: rgb(var(--primary)); }
+.log-row[data-level="warn"] .log-text { color: rgb(var(--busy)); }
+
+.log-stack {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 4px 7px 6px 32px;
+  border-bottom: 1px solid rgba(232, 230, 225, 0.05);
+}
+
+/* --------------------------------------------------------------- network */
+
+.net-row {
+  display: grid;
+  grid-template-columns: 34px 30px 34px 44px 46px 1fr;
+  gap: 6px;
+  align-items: baseline;
+  padding: 3px 7px;
+  border-bottom: 1px solid rgba(232, 230, 225, 0.05);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: transparent;
+  color: var(--text-soft);
+}
+
+.net-row:hover {
+  background: var(--hover);
+}
+
+/* Only failures and non-2xx get colour. Colouring every row would make the
+   column decorative, and then the one row that matters does not stand out. */
+.net-row[data-bad="true"] { color: rgb(var(--primary)); }
+.net-row[data-warn="true"] { color: rgb(var(--busy)); }
+
+.net-detail {
+  padding: 6px 7px 8px 7px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  /* Headers and bodies are the one place in this chrome worth copying out by
+     hand, so they opt back into selection. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.net-detail pre {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow: auto;
+}
+
+/* ---------------------------------------------------------------- status */
+
+.status {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--app-panel);
+  min-height: 22px;
+}
+
+.status-spacer { flex: 1 1 auto; }
+
+/*
+ * A state dot. Static by definition — rule 2. Connected is monochrome because
+ * "it works" is not something to act on; *disconnected* is also monochrome,
+ * because rmux being closed is a documented, ordinary state that degrades one
+ * panel rather than an alarm.
+ */
+.dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  background: var(--text-faint);
+}
+
+.dot[data-on="true"] { background: var(--text); }
+
+.popover {
+  position: absolute;
+  bottom: calc(100% + 3px);
+  left: 0;
+  z-index: 40;
+  width: 300px;
+  background: var(--app-panel);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 24px 70px -30px rgb(0 0 0 / 0.8);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  /* Unbounded in principle: a machine can hold a great many sessions, and the
+     list has already outgrown a dialog once in this repository. */
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.session-row:hover { background: var(--hover); }
+.session-row[aria-pressed="true"] {
+  border-color: var(--border-strong);
+  background: var(--hover);
+}
+
+/* --------------------------------------------------------------- outcome */
+
+/*
+ * Every mutating control reports beside itself. Errors persist until the next
+ * attempt; successes may fade. The fade is opacity over 2.5s on an element that
+ * is then removed — not a pulse, and it runs once.
+ */
+.outcome {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+
+.outcome[data-kind="error"] { color: rgb(var(--primary)); }
+.outcome[data-kind="busy"] { color: rgb(var(--busy)); }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.row-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pad { padding: 8px 7px; }
+
+/* An empty or loading pane must say what it is and where from — never a blank
+   box, which is indistinguishable from a broken one. */
+.empty {
+  padding: 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/*
+ * A caution that sits beside the control it is about.
+ *
+ * Amber, not red: red is reserved for "you must act" and this is advice about
+ * a choice the operator is allowed to make. Width-capped because it wraps under
+ * a button rather than running the width of the panel.
+ */
+.warn-text {
+  color: var(--warn);
+  max-width: 36ch;
+  line-height: 1.35;
+}

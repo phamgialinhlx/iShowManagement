@@ -73,6 +73,28 @@ fn the_window_can_be_dragged() {
     );
 }
 
+/// A second workbench window (`new_window.rs` labels them `main-2`, `main-3`, …)
+/// has the same custom title bar, so it needs the same grants. The capability
+/// file covers them with a `main-*` glob; drop that and every extra window opens
+/// unmovable, with nothing said — exactly the failure the `main` case above once
+/// shipped.
+#[test]
+fn an_extra_window_can_also_be_dragged() {
+    let app = test_app();
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main-2", Default::default())
+        .build()
+        .expect("failed to build webview");
+
+    let result = call(&webview, "plugin:window|start_dragging");
+
+    assert!(
+        !was_denied_by_acl(&result),
+        "start_dragging is blocked for a `main-2` window — the `main-*` glob is \
+         missing from capabilities/default.json's windows, so extra windows \
+         cannot be moved. Got: {result:?}"
+    );
+}
+
 #[test]
 fn the_window_chrome_controls_are_permitted() {
     let app = test_app();

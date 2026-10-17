@@ -3,6 +3,7 @@ import { create } from "zustand";
 
 import { api, isTauri } from "./api";
 import { useWorkspace } from "./workspace";
+import { isPrimaryWindow } from "./window-scope";
 import type { ServerId } from "./workspace-model";
 
 /**
@@ -407,12 +408,16 @@ export function notifyAutoBridge(): void {
  * of store updates coalesces into a single pass.
  */
 export function useAutoBridge(): void {
+  // Only the primary window runs the sweep. With more than one workbench window
+  // open, every one of them would fire the same SSH bridge commands at once and
+  // contend over the shared status key. See `window-scope.ts`.
+  const primary = isPrimaryWindow();
   const servers = useWorkspace((s) => s.servers);
   const present = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const evaluate = useCallback(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || !primary) return;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
       void (async () => {
@@ -434,7 +439,7 @@ export function useAutoBridge(): void {
         }
       })();
     }, 300);
-  }, []);
+  }, [primary]);
 
   // App start (already signed in) and every servers-list change. The guards
   // inside `runAutoBridge` decide whether anything actually happens.

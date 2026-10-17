@@ -23,6 +23,32 @@
 /** The DEC private modes that control mouse reporting and its encoding. */
 const MOUSE_MODES = [9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016] as const;
 
+/**
+ * What a full-screen agent TUI switches on, used **only** when this pane never
+ * saw the program do it.
+ *
+ * The tracker learns from the program's own output, which is the right source
+ * and the only one for an arbitrary program. It has one blind spot, and it is
+ * the case the operator actually hits: reattaching over **mosh**. mosh is a
+ * terminal emulator and hands back a rendered *screen*, not the bytes that
+ * produced it, so a pane that mounts fresh — after relaunching rmux, say —
+ * adopts a running fullscreen session having never observed a single `?1002h`.
+ * The tracker is empty, `restoreSequence()` is empty, and there is nothing to
+ * put back.
+ *
+ * Meanwhile the alternate screen *is* restored, and xterm translates the wheel
+ * into **cursor keys** whenever the alt buffer is active and the mouse is not
+ * reported. Measured as: scrolling a pi pane walks its prompt history instead
+ * of scrolling, and a fullscreen Claude pane will not scroll at all.
+ *
+ * 1002 (button-event tracking) and 1006 (SGR encoding) are what Claude and pi
+ * both set; 1006 matters because without it coordinates past column 223 are
+ * unencodable. This is applied only to an **agent** pane, where the TUI is
+ * known to want the mouse, and never to a plain shell — turning reporting on
+ * under a program that does not expect it feeds it junk input.
+ */
+export const AGENT_MOUSE_MODES = "\x1b[?1002h\x1b[?1006h";
+
 /** Matches `ESC [ ? <params> h|l`, where params may be `1002;1006`. */
 const DECSET = /\x1b\[\?([\d;]+)([hl])/g;
 

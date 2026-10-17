@@ -63,3 +63,9 @@ tmp/
 web/dist
 ui/dist
 references/iShowManagement-0.2.8/
+
+# R Browser build output. `out/` holds the bundled main process and the
+# renderer; `release/` holds electron-builder's installers. Both are
+# reproducible from source and one of them is a hundred megabytes.
+r-browser/out/
+r-browser/release/

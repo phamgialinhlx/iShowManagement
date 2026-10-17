@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    // Mirrors the alias in `renderer/vite.config.ts`. Two places, because the
+    // bundler and the type checker each resolve independently — and a path that
+    // only Vite knows about builds fine and fails `tsc`, which is how an alias
+    // ends up silently unchecked.
+    "paths": { "@shared/*": ["shared/*"] },
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["shared/**/*.ts", "main/**/*.ts", "page/**/*.ts", "renderer/**/*.ts", "renderer/**/*.tsx", "checks/**/*.ts"]
+}

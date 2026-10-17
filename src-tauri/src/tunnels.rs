@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use rmux_ssh::forward::Forwards;
+use rmux_transport::TargetId;
 
 #[derive(Default)]
 pub struct TunnelStore {
@@ -24,6 +25,23 @@ pub struct TunnelStore {
 impl TunnelStore {
     pub fn forwards(&self) -> Arc<Forwards> {
         Arc::clone(&self.forwards)
+    }
+}
+
+/// The connection string the forward should dial — the **full `user@host`
+/// label**, not the bare host.
+///
+/// The forward runs its own ssh (`ControlPath=none`) and offers the host's key
+/// by deriving its filename from this string (`~/.ssh/rmux_<label>_ed25519`).
+/// Passing the bare host would look for `rmux_192.168.1.5_ed25519` while the key
+/// is `rmux_yitec_192.168.1.5_ed25519`, so the key would not be found and a
+/// key-only host would reject the tunnel with `Permission denied`. This is the
+/// same label the master authenticates with (`SshHostId::label`). `None` for a
+/// local target, which needs no tunnel.
+fn conn(target: &crate::terminal::TargetRef) -> Option<String> {
+    match target.id() {
+        TargetId::Ssh(host) => Some(host.label()),
+        TargetId::Local => None,
     }
 }
 
@@ -62,7 +80,7 @@ pub async fn port_forward(
     target: crate::terminal::TargetRef,
     port: u16,
 ) -> Result<rmux_ssh::forward::Forward, String> {
-    Ok(store.forwards().start(target.host.as_deref(), port).await)
+    Ok(store.forwards().start(conn(&target).as_deref(), port).await)
 }
 
 #[tauri::command]
@@ -71,7 +89,7 @@ pub async fn port_unforward(
     target: crate::terminal::TargetRef,
     port: u16,
 ) -> Result<(), String> {
-    store.forwards().stop(target.host.as_deref(), port).await;
+    store.forwards().stop(conn(&target).as_deref(), port).await;
     Ok(())
 }
 
@@ -81,7 +99,7 @@ pub async fn ports_forwarded(
     store: tauri::State<'_, TunnelStore>,
     target: crate::terminal::TargetRef,
 ) -> Result<Vec<rmux_ssh::forward::Forward>, String> {
-    Ok(store.forwards().list(target.host.as_deref()).await)
+    Ok(store.forwards().list(conn(&target).as_deref()).await)
 }
 
 /// A SOCKS proxy onto the target — every port at once, and its DNS too.
@@ -95,5 +113,5 @@ pub async fn port_proxy(
     store: tauri::State<'_, TunnelStore>,
     target: crate::terminal::TargetRef,
 ) -> Result<u16, String> {
-    store.forwards().socks(target.host.as_deref()).await
+    store.forwards().socks(conn(&target).as_deref()).await
 }

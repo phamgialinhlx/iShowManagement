@@ -56,6 +56,59 @@ fn free_local_port() -> std::io::Result<u16> {
     Ok(port)
 }
 
+/// The options every forward and proxy connection shares.
+///
+/// **`ControlPath=none` is what makes the identity necessary.** A multiplexed
+/// command rides the master, which already carries the host's `-i`; a forward
+/// deliberately runs its *own* connection (see the module comment), so it does
+/// **not** inherit that. Without the key here a key-only host answers
+/// `Permission denied (publickey,password)` — and `BatchMode=yes` means there is
+/// no password prompt to fall back to, so it fails silently and for good. This
+/// was the exact "an installed key has to be offered" bug from the master path,
+/// still live on this one. `identity` is empty when rmux has no key for the host,
+/// because naming a missing file makes ssh warn on every connection.
+fn base_forward_options(identity: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-N",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        // Never prompt. A forward has no terminal to answer on.
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    args.extend_from_slice(identity);
+    args
+}
+
+/// `ssh -N -L port:localhost:port <host>`, with the host's key.
+fn forward_command_args(host: &str, port: u16, identity: &[String]) -> Vec<String> {
+    let mut args = base_forward_options(identity);
+    args.push("-L".into());
+    args.push(format!("{port}:localhost:{port}"));
+    args.push(host.into());
+    args
+}
+
+/// `ssh -N -D 127.0.0.1:port <host>`, with the host's key.
+///
+/// `127.0.0.1:` is not decoration: a bare `-D <port>` binds per the host's
+/// `GatewayPorts`, and a SOCKS proxy reachable from the LAN is an open route into
+/// the operator's infrastructure for anyone on the same network.
+fn socks_command_args(host: &str, port: u16, identity: &[String]) -> Vec<String> {
+    let mut args = base_forward_options(identity);
+    args.push("-D".into());
+    args.push(format!("127.0.0.1:{port}"));
+    args.push(host.into());
+    args
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ForwardState {
@@ -152,16 +205,7 @@ impl Forwards {
     async fn spawn(&self, host: &str, port: u16) -> std::io::Result<Child> {
         Command::new("ssh")
             .no_console_window()
-            .arg("-N")
-            // See the module comment: both of these are load-bearing.
-            .args(["-o", "ControlPath=none"])
-            .args(["-o", "ExitOnForwardFailure=yes"])
-            // Never prompt. A forward has no terminal to answer on, so without
-            // this a host wanting a passphrase hangs forever with no output.
-            .args(["-o", "BatchMode=yes"])
-            .args(["-o", "ConnectTimeout=8"])
-            .args(["-L", &format!("{port}:localhost:{port}")])
-            .arg(host)
+            .args(forward_command_args(host, port, &crate::keys::identity_args_for(host)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -250,17 +294,7 @@ impl Forwards {
 
         let mut child = Command::new("ssh")
             .no_console_window()
-            .arg("-N")
-            .args(["-o", "ControlPath=none"])
-            .args(["-o", "ExitOnForwardFailure=yes"])
-            .args(["-o", "BatchMode=yes"])
-            .args(["-o", "ConnectTimeout=8"])
-            // `127.0.0.1:` is not decoration. A bare `-D <port>` binds according
-            // to the host's `GatewayPorts`, and a SOCKS proxy reachable from the
-            // LAN is an open route into the operator's infrastructure for
-            // anyone on the same network.
-            .args(["-D", &format!("127.0.0.1:{port}")])
-            .arg(host)
+            .args(socks_command_args(host, port, &crate::keys::identity_args_for(host)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -401,7 +435,7 @@ mod tests {
         // ControlMaster `ssh -N -L` exits the instant it registers the forward
         // and looks dead; without ExitOnForwardFailure a failed bind looks
         // *alive* and serves whatever else owns the port.
-        let args = forward_args("example", 3000);
+        let args = forward_command_args("example", 3000, &[]);
         assert!(args.windows(2).any(|w| w == ["-o", "ControlPath=none"]), "{args:?}");
         assert!(args.windows(2).any(|w| w == ["-o", "ExitOnForwardFailure=yes"]), "{args:?}");
         assert!(args.windows(2).any(|w| w == ["-o", "BatchMode=yes"]), "{args:?}");
@@ -410,27 +444,36 @@ mod tests {
     #[test]
     fn the_local_port_matches_the_remote_port() {
         // The whole design: the operator types the address they already know.
-        let args = forward_args("example", 5173);
+        let args = forward_command_args("example", 5173, &[]);
         assert!(args.windows(2).any(|w| w == ["-L", "5173:localhost:5173"]), "{args:?}");
     }
 
-    /// Mirrors [`Forwards::spawn`]'s argument list so it can be asserted without
-    /// running ssh.
-    fn forward_args(host: &str, port: u16) -> Vec<String> {
-        vec![
-            "-N".into(),
-            "-o".into(),
-            "ControlPath=none".into(),
-            "-o".into(),
-            "ExitOnForwardFailure=yes".into(),
-            "-o".into(),
-            "BatchMode=yes".into(),
-            "-o".into(),
-            "ConnectTimeout=8".into(),
-            "-L".into(),
-            format!("{port}:localhost:{port}"),
-            host.into(),
-        ]
+    #[test]
+    fn a_forward_offers_the_hosts_key_before_the_destination() {
+        // The bug this guards: the forward runs its own connection
+        // (`ControlPath=none`), so it does not inherit the master's `-i`. Without
+        // the key a key-only host answered "Permission denied (publickey,
+        // password)" and BatchMode left no password prompt — the FORWARD button
+        // failed on every host that authenticates with an rmux-generated key,
+        // while the host's terminals (multiplexed through the master) worked
+        // fine. Both the -L forward and the -D proxy carry the identity now.
+        let identity = ["-i".to_owned(), "/keys/rmux_yitec_1.2.3.4_ed25519".to_owned()];
+
+        for args in [
+            forward_command_args("yitec@1.2.3.4", 3000, &identity),
+            socks_command_args("yitec@1.2.3.4", 3000, &identity),
+        ] {
+            let i = args.iter().position(|a| a == "-i").expect("-i present");
+            let key = args.iter().position(|a| a.ends_with("rmux_yitec_1.2.3.4_ed25519")).unwrap();
+            let host = args.iter().rposition(|a| a == "yitec@1.2.3.4").unwrap();
+            assert_eq!(key, i + 1, "the key path follows -i: {args:?}");
+            assert!(i < host, "the identity is offered before the destination: {args:?}");
+        }
+
+        // And with no key rmux has generated, nothing is added — naming a missing
+        // file makes ssh warn on every connection.
+        let bare = forward_command_args("example", 3000, &[]);
+        assert!(!bare.iter().any(|a| a == "-i"), "{bare:?}");
     }
 
     #[test]

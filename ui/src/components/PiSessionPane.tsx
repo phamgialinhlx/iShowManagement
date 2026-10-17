@@ -8,6 +8,7 @@ import { TranscriptView } from "./TranscriptView";
 import { FilesPane } from "./FilesPane";
 import { GitPane } from "./GitPane";
 import { TerminalView } from "./Terminal";
+import { SessionSettings } from "./SessionSettings";
 import {
   companionKey,
   companionName,
@@ -25,6 +26,7 @@ import {
   FOLDER_PATH,
   SPLIT_PATH,
   GIT_PATH,
+  GEAR_PATH,
 } from "./SessionPaneChrome";
 
 /**
@@ -40,13 +42,21 @@ import {
  * status/transcript polls are skipped because pi exposes neither.
  *
  * The sub-views mirror the Claude pane's, minus the ones pi has no notion of
- * (Jira, model, permissions, session settings): **transcript, files, git** and
- * the **companion terminal split**. Files and git are agent-agnostic and reuse
+ * (the in-pane Jira board, model, permissions): **transcript, files, git**,
+ * **settings** and the **companion terminal split**. Settings is shared with the
+ * Claude pane verbatim — `SessionSettings` reads everything it needs from the
+ * store and renders only the sections that apply to the session's kind, so pi
+ * gets TRANSPORT and the Jira project and none of the Claude-only ones. It is
+ * here because TRANSPORT is a property of the *connection*, which pi has just as
+ * much as Claude does; leaving it out was what made the low-latency toggle
+ * reachable from exactly one of the three session kinds.
+ *
+ * Files and git are agent-agnostic and reuse
  * the same components verbatim; the transcript reads through `pi_transcript`
  * via `TranscriptView`'s provider seam. The chrome (icons, back bar) is the
  * shared `SessionPaneChrome`, so the two panes cannot drift.
  */
-type View = "pi" | "transcript" | "files" | "git";
+type View = "pi" | "transcript" | "files" | "git" | "settings";
 
 export function PiSessionPane({ session }: { session: SessionV3 }) {
   const target = useWorkspace((s) => s.targetOf(session.id));
@@ -133,6 +143,9 @@ export function PiSessionPane({ session }: { session: SessionV3 }) {
           <Icon d={GIT_PATH} />
         </IconButton>
       )}
+      <IconButton label="Session settings" onClick={() => setView("settings")}>
+        <Icon d={GEAR_PATH} />
+      </IconButton>
     </>
   );
 
@@ -163,6 +176,7 @@ export function PiSessionPane({ session }: { session: SessionV3 }) {
             cwd={session.hostName ? undefined : (session.cwd ?? folder)}
             agentSession={reattachName(session)}
             resume={session.resume}
+            lowLatency={session.lowLatency}
             headerActions={headerActions}
           />
         </div>
@@ -191,6 +205,12 @@ export function PiSessionPane({ session }: { session: SessionV3 }) {
             <GitPane projectId={project.id} />
           </BackView>
         )}
+
+        {active === "settings" && (
+          <BackView label="SETTINGS" onBack={() => setView("pi")}>
+            <SessionSettings sessionId={session.id} />
+          </BackView>
+        )}
       </div>
 
       {splitting && (
@@ -216,6 +236,8 @@ export function PiSessionPane({ session }: { session: SessionV3 }) {
               // after a restart rather than a second one being spawned.
               session={companionName(session.id)}
               sessionId={session.id}
+              // The companion shell runs on the conversation's transport.
+              lowLatency={session.lowLatency}
               // Shares the conversation's id, so it would answer the same focus
               // request. Switching to the pi pane means the conversation, not
               // the shell beside it.

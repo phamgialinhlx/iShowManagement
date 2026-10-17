@@ -284,8 +284,15 @@ use rmux_transport::{LocalTarget, TargetId};
 /// Resolve a target for a one-shot read.
 ///
 /// Not cached, unlike `MetricsStore`: nothing here is a *difference* between
-/// samples, so there is no baseline to preserve and a fresh target costs only
-/// the ControlMaster socket that is already open.
+/// samples, so there is no baseline to preserve.
+///
+/// A fresh target is cheap **because the ControlMaster is not part of it** —
+/// `SshTarget::new` takes the one shared master for that destination out of
+/// `rmux_ssh::mux`'s registry. It was not always so, and the earlier version of
+/// this comment ("a fresh target costs only the ControlMaster socket that is
+/// already open") was the assumption that leaked twelve `ssh -N` processes for
+/// five hosts: a target per call, six subsystems per host, each with a state
+/// lock of its own that serialised nothing against the others.
 async fn resolved(target: &TargetRef) -> Result<Box<dyn Target>, String> {
     match target.id() {
         TargetId::Local => Ok(Box::new(LocalTarget::new())),

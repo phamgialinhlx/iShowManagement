@@ -34,3 +34,11 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+# Driven by `tests/feature_specs.rs`, which pins every existing feature to the
+# ssh path now that mosh is a second transport. The features are *run* through
+# their own public entry points against a recording target rather than having
+# their command shapes copied here — a copied list is a list that drifts.
+rmux-fs.workspace = true
+rmux-metrics.workspace = true
+rmux-agent.workspace = true

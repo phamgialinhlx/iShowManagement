@@ -6,6 +6,7 @@ import { api, isTauri, type TargetRef } from "./api";
 import { bufferKey, type Buffer, type BufferKey } from "./buffers";
 import { companionKey, companionName, forget as forgetCompanion } from "./companion";
 import { deckId, isFocusDeck, parseDeck, type Deck, type SavedView } from "./grid";
+import { isPrimaryWindow, scopedKey } from "./window-scope";
 import {
   autosaveDecision,
   autosaveEnabled,
@@ -15,6 +16,7 @@ import {
   RETRY_DELAY,
 } from "./autosave";
 import {
+  EMPTY_V3,
   reattachName,
   resolveWorkspace,
   serverId as deriveServerId,
@@ -50,8 +52,20 @@ import {
  * Phase 1; the file/editor buffer subsystem lands in Phase 2 with the files pane.
  */
 
+// The **pool** — servers, projects, sessions and their open files — is shared by
+// every window: a second workbench should carry all your servers and sessions,
+// not open blank. So these keys are *unscoped*, and a cross-window `storage`
+// listener (below) keeps each open window's pool in step.
 const V3_KEY = "rmux.workspace.v3";
 const V2_KEY = "rmux.workspace.v2";
+// The **layout** — which sessions are placed in which tiles, and the grid — is
+// per-window, so each desktop can show a different view of the same pool without
+// the windows fighting over one another's panes. Scoped by window label (see
+// `window-scope.ts`); the primary window keeps the bare keys, so existing
+// installs keep the layout they already have.
+const LAYOUT_KEY = scopedKey("rmux.workspace.layout");
+const DECK_KEY = scopedKey("rmux.deck");
+const GRID_KEY = scopedKey("rmux.grid");
 /** The instruments-rail collapse flag, persisted on its own since before the rail
  *  moved into this store. Kept out of the v3 snapshot so existing installs keep it. */
 const WIDGETS_COLLAPSED_KEY = "rmux.widgetRail.collapsed";
@@ -210,6 +224,7 @@ type State = Core & {
         | "name"
         | "resume"
         | "cwd"
+        | "lowLatency"
         | "fullscreen"
         | "skipPermissions"
         | "modelProfile"
@@ -249,6 +264,8 @@ type State = Core & {
     settings: { claudeAccount?: string; jiraProject?: string; contextWindow?: number },
   ) => void;
   setFullscreen: (id: string, fullscreen: boolean) => void;
+  /** Session Settings › TRANSPORT. Absent is off — see `SessionV3.lowLatency`. */
+  setLowLatency: (id: string, lowLatency: boolean) => void;
   setModelProfile: (id: string, profile: string | undefined) => void;
   setResume: (id: string, resume: string) => void;
 
@@ -296,8 +313,37 @@ type State = Core & {
   restoreFiles: (projectId: ProjectId) => void;
 };
 
+/** The per-window layout: which sessions sit in which tiles. */
+type Layout = { panes: (PaneRef | null)[]; activeSession: string | null };
+
+function loadLayout(): Layout | null {
+  const raw = storage?.getItem(LAYOUT_KEY);
+  if (!raw) return null;
+  try {
+    const l = JSON.parse(raw) as Partial<Layout>;
+    return { panes: l.panes ?? [...EMPTY_V3.panes], activeSession: l.activeSession ?? null };
+  } catch {
+    return null;
+  }
+}
+
 function load(): PersistedV3 {
-  return resolveWorkspace(storage?.getItem(V3_KEY) ?? null, storage?.getItem(V2_KEY) ?? null);
+  const pool = resolveWorkspace(storage?.getItem(V3_KEY) ?? null, storage?.getItem(V2_KEY) ?? null);
+
+  const layout = loadLayout();
+  if (layout) {
+    // This window has its own saved layout — the pool comes from the shared key,
+    // the arrangement from the scoped one.
+    pool.panes = layout.panes;
+    pool.activeSession = layout.activeSession;
+  }
+  // No scoped layout yet: keep the panes the shared blob carries. For the
+  // primary window that is its own saved layout; for a fresh extra window it is
+  // the primary's, so a **new window opens as a duplicate** — same sessions on
+  // screen — and then diverges as it is rearranged, because its layout is
+  // written to its own scoped key. rmux's daemon multiplexes several clients per
+  // session, so two windows showing the same session is safe.
+  return pool;
 }
 
 /** Snapshot the persisted subset. The old `rmux.workspace.v2` blob is left in
@@ -318,13 +364,34 @@ function persist(state: State) {
     activePath[projectId] = key ? (state.buffers[key]?.path ?? null) : null;
   }
 
+  // The layout is this window's own — always written to the scoped key.
+  try {
+    const layout: Layout = { panes: state.panes, activeSession: state.activeSession };
+    storage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+  } catch {
+    // A full or disabled localStorage must never stop the app working.
+  }
+
+  // The pool is shared. The primary window owns the panes/activeSession still
+  // carried in the shared blob (for downgrade, and to seed a first extra
+  // window); an extra window must **not** stamp its own view there, or it would
+  // overwrite the layout the primary saved. So an extra window preserves
+  // whatever the shared blob already holds for those two fields.
+  let poolPanes = state.panes;
+  let poolActive = state.activeSession;
+  if (!isPrimaryWindow()) {
+    const prev = resolveWorkspace(storage.getItem(V3_KEY) ?? null, null);
+    poolPanes = prev.panes;
+    poolActive = prev.activeSession;
+  }
+
   const snapshot: PersistedV3 = {
     version: 3,
     servers: state.servers,
     projects: state.projects,
     sessions: state.sessions,
-    panes: state.panes,
-    activeSession: state.activeSession,
+    panes: poolPanes,
+    activeSession: poolActive,
     openPaths,
     activePath,
   };
@@ -398,7 +465,15 @@ export const useWorkspace = create<State>((set, get) => ({
   // `rmux.deck` is the new key; `rmux.grid` is the old bare number every
   // existing install still has. Reading both means an upgrade keeps the
   // layout instead of silently dropping everyone into focus mode.
-  deck: parseDeck(storage?.getItem("rmux.deck") ?? storage?.getItem("rmux.grid")),
+  // A fresh extra window has no scoped deck yet, so it falls through to the
+  // primary's (`rmux.deck`) — opening with the same grid it duplicated, then
+  // keeping its own once changed.
+  deck: parseDeck(
+    storage?.getItem(DECK_KEY) ??
+      storage?.getItem(GRID_KEY) ??
+      storage?.getItem("rmux.deck") ??
+      storage?.getItem("rmux.grid"),
+  ),
   focusedCell: null,
   savedViews: loadSavedViews(),
   railCollapsed: false,
@@ -705,6 +780,11 @@ export const useWorkspace = create<State>((set, get) => ({
     schedulePersist(get);
   },
 
+  setLowLatency: (id, lowLatency) => {
+    set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? { ...x, lowLatency } : x)) }));
+    schedulePersist(get);
+  },
+
   setFullscreen: (id, fullscreen) => {
     set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? { ...x, fullscreen } : x)) }));
     schedulePersist(get);
@@ -771,7 +851,7 @@ export const useWorkspace = create<State>((set, get) => ({
 
   // ── panes / grid ───────────────────────────────────────────────────────────
   setDeck: (deck) => {
-    storage?.setItem("rmux.deck", deckId(deck));
+    storage?.setItem(DECK_KEY, deckId(deck));
     // A cell selected under the old layout may not exist under the new one.
     set({ deck, focusedCell: null });
   },
@@ -816,7 +896,7 @@ export const useWorkspace = create<State>((set, get) => ({
       if (p.kind === "files") return state.projects.some((pr) => pr.id === p.projectId) ? p : null;
       return p;
     };
-    storage?.setItem("rmux.deck", deckId(view.deck));
+    storage?.setItem(DECK_KEY, deckId(view.deck));
     set({ deck: view.deck, panes: view.panes.map(alive), focusedCell: null });
     schedulePersist(get);
   },
@@ -1015,6 +1095,33 @@ export const useWorkspace = create<State>((set, get) => ({
     })();
   },
 }));
+
+/**
+ * Keep every open window's **pool** in step.
+ *
+ * The pool (servers, projects, sessions, open files) is one shared key, so when
+ * one window connects a server or starts a session, the others should see it —
+ * and, just as importantly, a window that has been sitting open must not later
+ * persist its *stale* pool over the newer one. A `storage` event fires only in
+ * the windows that did **not** write it, so this merges the fresh pool in while
+ * leaving this window's own layout (panes, active session, deck) alone.
+ */
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== V3_KEY || e.newValue === null) return;
+    const pool = resolveWorkspace(e.newValue, null);
+    useWorkspace.setState({
+      servers: pool.servers,
+      projects: pool.projects,
+      sessions: pool.sessions,
+      openPaths: pool.openPaths,
+      activePath: pool.activePath,
+      // Panes and activeSession are this window's own — deliberately untouched,
+      // so a rearrangement in another window does not reach across and move
+      // these tiles.
+    });
+  });
+}
 
 // Keep the same derived-server-id helper reachable for callers that only have a
 // target (the new-session wizard resolves a target → server before creating a

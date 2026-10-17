@@ -11,6 +11,7 @@ import { RedstonePanel } from "../components/RedstonePanel";
 import { AppearancePanel } from "../components/AppearancePanel";
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { EditorPanel } from "../components/EditorPanel";
+import { ConnectionsPanel } from "../components/ConnectionsPanel";
 import { ShortcutSettings } from "../components/ShortcutSettings";
 import { api, isTauri, type SignedIn } from "../lib/api";
 import { SERVER_KEY } from "../components/SignIn";
@@ -38,6 +39,7 @@ type Section =
   | "redstone"
   | "notifications"
   | "editor"
+  | "connections"
   | "shortcuts"
   | "appearance"
   | "diagnostics";
@@ -50,6 +52,7 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "redstone", label: "REDSTONE", blurb: "Let its agent drive a server's sessions" },
   { id: "notifications", label: "NOTIFICATIONS", blurb: "When a session wants you" },
   { id: "editor", label: "EDITOR", blurb: "Whether edits save themselves" },
+  { id: "connections", label: "CONNECTIONS", blurb: "What rmux may change on a host" },
   { id: "shortcuts", label: "SHORTCUTS", blurb: "Move around without the mouse" },
   { id: "appearance", label: "APPEARANCE", blurb: "Colours, backdrop and interface scale" },
   { id: "diagnostics", label: "DIAGNOSTICS", blurb: "Export the log when something breaks" },
@@ -177,6 +180,12 @@ export function Settings() {
               <EditorPanel />
             </ErrorBoundary>
           )}
+          {section === "connections" && (
+            <ErrorBoundary label="Connections">
+              <ConnectionsPanel />
+            </ErrorBoundary>
+          )}
+
           {section === "shortcuts" && (
             <ErrorBoundary label="Shortcuts">
               <ShortcutSettings />

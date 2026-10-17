@@ -140,7 +140,25 @@ uuid = { version = "1", features = ["v4", "serde"] }
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
+# **`unwind`, and this reverses an earlier deliberate choice.** `abort` was
+# right about rmux's *own* panics — a bug should stop the process rather than
+# limp on with half a subsystem dead — and that is still what happens, because
+# `logs::route_panics_to_log` runs from the panic hook either way.
+#
+# What `abort` also did was break a dependency's *handled* error path. Tauri
+# serves the whole UI over a custom URL scheme; when the webview stops a task
+# that is still being answered, `WKURLSchemeTask::didFinish` raises an
+# `NSException`. wry knows this and wraps the call in `objc2::exception::catch`
+# — but that exception has to cross a Rust `extern "C"` frame to get there, and
+# under `panic = "abort"` the frame is `nounwind`, so it reaches
+# `panic_cannot_unwind` and calls `abort()` instead of being caught. The guard
+# written to survive the race is disabled by our own profile.
+#
+# Measured before the change: five identical SIGABRTs in one day, every one on
+# a `tokio-rt-worker` with `didFinish` under `objc2::exception::catch` in the
+# stack, and the rate climbing (1–3/day since 16 Aug, 5 on the 28th, 6 on the
+# 29th). The baseline is what makes the change checkable.
+panic = "unwind"
 # **`debuginfo`, not `true`.** `strip = true` removes the symbol *table* as well,
 # so a macOS crash report against a shipped build symbolicates to nothing at all
 # — which is exactly what happened: a reproducible panic, two crash reports, and

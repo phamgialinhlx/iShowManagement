@@ -100,6 +100,26 @@ export type SessionV3 = {
    */
   cwd?: string;
 
+  /**
+   * Ask this session's transport to minimise echo latency (Session Settings ›
+   * TRANSPORT).
+   *
+   * **Absent means off**, and that is deliberate rather than incidental: a
+   * low-latency transport keeps a screen rather than a history, so scrolling
+   * back in such a pane returns nothing. An operator who never chose it must
+   * not lose their scrollback, and every session saved before this existed has
+   * no value here — so the reconciliation is simply that `undefined` is `false`.
+   * Unlike `fullscreen`, nothing seeds it on creation.
+   *
+   * Kept *with* the session for the same reason the model profile is: which
+   * transport a piece of work runs over is a property of that work, and a pane
+   * that restarts must come back the way it was launched.
+   *
+   * Applies to every kind — a Claude or pi pane, a shell, and the companion
+   * shell that shares a conversation's id.
+   */
+  lowLatency?: boolean;
+
   // ── claude-only ──────────────────────────────────────────────────────────
   resume?: string;
   fullscreen?: boolean;
