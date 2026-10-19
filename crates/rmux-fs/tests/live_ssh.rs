@@ -413,3 +413,58 @@ async fn a_real_file_downloads_byte_for_byte() {
     assert!(clobber.is_err(), "downloading onto an existing file must refuse, not overwrite");
     eprintln!("downloaded {written} bytes intact across {} windows", written.div_ceil(8 * 1024 * 1024));
 }
+
+/// A file past the old 64 MB cap streams to a real host intact, and a second
+/// upload onto the same name is refused.
+///
+/// RMUX_LIVE_HOST=user@host cargo test -p rmux-fs --test live_ssh large_upload -- --ignored --nocapture
+#[tokio::test]
+#[ignore = "needs a real SSH host; set RMUX_LIVE_HOST"]
+async fn a_large_upload_streams_to_a_real_host_intact() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use rmux_fs::{FileSystem, TargetFs};
+    use rmux_transport::{CommandSpec, Target, Tty};
+
+    let Some(host) = live_host() else { return };
+    let target = SshTarget::new(SshHostId::new(&host));
+    target.connect().await.expect("failed to connect");
+
+    let len = 100 * 1024 * 1024 + 7;
+    let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+    let bytes: Vec<u8> = (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect();
+    let local = std::env::temp_dir().join(format!("rmux-live-upload-{}", std::process::id()));
+    std::fs::write(&local, &bytes).unwrap();
+    let expected = {
+        let out = std::process::Command::new("shasum").args(["-a", "256"]).arg(&local).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap().to_owned()
+    };
+
+    let remote = format!("/tmp/rmux-live-upload-{}.bin", std::process::id());
+    // A second target for the same host shares its connection; `SshTarget` is not `Clone`.
+    let fs = TargetFs::new(SshTarget::new(SshHostId::new(&host)));
+    let sent = AtomicU64::new(0);
+    let started = std::time::Instant::now();
+    fs.upload_file(&remote, &local, &sent).await.expect("upload failed");
+    let secs = started.elapsed().as_secs_f64();
+    eprintln!("uploaded {} MB in {secs:.1}s ({:.1} MB/s)", len >> 20, (len as f64 / 1048576.0) / secs);
+    assert_eq!(sent.load(Ordering::Relaxed), len as u64);
+
+    let sum = target
+        .exec(&CommandSpec::new("sh").arg("-c").arg(format!("sha256sum {remote}")).tty(Tty::None))
+        .await
+        .unwrap();
+    let refused = fs.upload_file(&remote, &local, &AtomicU64::new(0)).await;
+    let _ = target.exec(&CommandSpec::new("rm").arg("-f").arg(&remote).tty(Tty::None)).await;
+    let _ = std::fs::remove_file(&local);
+
+    assert_eq!(sum.stdout.split_whitespace().next(), Some(expected.as_str()), "the far side's bytes differ");
+    assert!(refused.unwrap_err().to_string().contains("already exists"));
+}
