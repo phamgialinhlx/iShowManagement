@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 
 use crate::{
-    CommandSpec, LowLatencyOutcome, NoConsoleWindow, Output, Platform, ResolvedCommand, Target,
-    TargetId, Tty,
+    run_feeding, CommandSpec, LowLatencyOutcome, NoConsoleWindow, Output, Platform,
+    ResolvedCommand, Stdin, Target, TargetId, Tty,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -146,37 +146,18 @@ impl Target for LocalTarget {
         spec: &CommandSpec,
         input: &[u8],
     ) -> anyhow::Result<Output> {
-        use tokio::io::AsyncWriteExt;
-
         let resolved = self.build_command(&spec.clone().tty(Tty::None))?;
+        run_feeding(&resolved, spec.cwd.as_ref(), Stdin::Bytes(input)).await
+    }
 
-        let mut cmd = tokio::process::Command::new(&resolved.program);
-        cmd.no_console_window();
-        cmd.args(&resolved.args);
-        for (k, v) in &resolved.env {
-            cmd.env(k, v);
-        }
-        if let Some(cwd) = &spec.cwd {
-            cmd.current_dir(cwd);
-        }
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let mut child = cmd.spawn()?;
-        // Take the handle so it is dropped (closing stdin) before we await the
-        // output — a child reading to EOF would otherwise block forever.
-        let mut stdin = child.stdin.take().expect("stdin was piped");
-        stdin.write_all(input).await?;
-        stdin.flush().await?;
-        drop(stdin);
-
-        let out = child.wait_with_output().await?;
-        Ok(Output {
-            status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+    async fn exec_with_input_file(
+        &self,
+        spec: &CommandSpec,
+        input: &std::path::Path,
+        sent: &std::sync::atomic::AtomicU64,
+    ) -> anyhow::Result<Output> {
+        let resolved = self.build_command(&spec.clone().tty(Tty::None))?;
+        run_feeding(&resolved, spec.cwd.as_ref(), Stdin::File { path: input, sent }).await
     }
 
     fn platform(&self) -> Option<Platform> {

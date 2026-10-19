@@ -794,6 +794,19 @@ export const api = {
     call<void>("fs_upload", { target, path, base64 }),
 
   /**
+   * A staged upload, for files of any size: begin, append chunks, finish.
+   *
+   * `fsUpload` carries the whole file as one string and is capped for it; this
+   * carries one chunk at a time and Rust streams the assembled file from disk.
+   * `finish` emits `fs-upload-progress` while the network leg runs.
+   */
+  fsUploadBegin: () => call<string>("fs_upload_begin"),
+  fsUploadChunk: (id: string, base64: string) => call<void>("fs_upload_chunk", { id, base64 }),
+  fsUploadFinish: (target: TargetRef, path: string, id: string, size: number) =>
+    call<void>("fs_upload_finish", { target, path, id, size }),
+  fsUploadAbort: (id: string) => call<void>("fs_upload_abort", { id }),
+
+  /**
    * Copy a file off the target into this machine's downloads folder.
    *
    * **The bytes never enter the webview.** Unlike `fsUpload`, which has to carry

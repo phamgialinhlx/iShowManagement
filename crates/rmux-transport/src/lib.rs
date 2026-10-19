@@ -347,6 +347,70 @@ pub struct Output {
     pub stderr: String,
 }
 
+/// What a one-shot reads on stdin.
+pub enum Stdin<'a> {
+    Bytes(&'a [u8]),
+    /// Streamed from disk, never loaded whole, counting into `sent`.
+    File { path: &'a std::path::Path, sent: &'a std::sync::atomic::AtomicU64 },
+}
+
+/// Spawn a resolved command, feed it `input`, and collect its output.
+///
+/// The one implementation behind both targets' `exec_with_input*`, so a fix to
+/// how stdin is fed cannot land in one and miss the other. Stdin is closed
+/// before the output is awaited: the far side's `cat` reads to EOF, so holding
+/// it open would deadlock.
+pub async fn run_feeding(
+    resolved: &ResolvedCommand,
+    cwd: Option<&Utf8PathBuf>,
+    input: Stdin<'_>,
+) -> anyhow::Result<Output> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut cmd = tokio::process::Command::new(&resolved.program);
+    cmd.no_console_window();
+    cmd.args(&resolved.args);
+    for (k, v) in &resolved.env {
+        cmd.env(k, v);
+    }
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn()?;
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    match input {
+        Stdin::Bytes(bytes) => stdin.write_all(bytes).await?,
+        Stdin::File { path, sent } => {
+            use tokio::io::AsyncReadExt;
+
+            // A loop rather than `io::copy` only so `sent` moves as it goes.
+            let mut file = tokio::fs::File::open(path).await?;
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                stdin.write_all(&buf[..n]).await?;
+                sent.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    stdin.flush().await?;
+    drop(stdin);
+
+    let out = child.wait_with_output().await?;
+    Ok(Output {
+        status: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
 impl Output {
     pub fn ok(&self) -> bool {
         self.status == 0
@@ -410,6 +474,31 @@ pub trait Target: Send + Sync + 'static {
     /// quoting hazard.
     async fn exec_with_input(&self, spec: &CommandSpec, input: &[u8])
     -> anyhow::Result<Output>;
+
+    /// Run a command, streaming the file at `input` to its stdin.
+    ///
+    /// For uploads of any size: the file is copied into the pipe a buffer at a
+    /// time, so memory stays flat whether it is a screenshot or a 6 GB archive.
+    /// [`Target::exec_with_input`] needs the whole payload in memory, which is
+    /// exactly what capped uploads at 64 MB.
+    ///
+    /// The default reads the file whole and defers to `exec_with_input` — right
+    /// for a test double, and wrong for a real target, which must override it
+    /// (both of ours do, through [`run_feeding`]).
+    ///
+    /// `sent` counts the bytes handed to the command as they go, so a caller can
+    /// report a long transfer's progress honestly rather than inventing one.
+    async fn exec_with_input_file(
+        &self,
+        spec: &CommandSpec,
+        input: &std::path::Path,
+        sent: &std::sync::atomic::AtomicU64,
+    ) -> anyhow::Result<Output> {
+        let bytes = tokio::fs::read(input).await?;
+        let out = self.exec_with_input(spec, &bytes).await?;
+        sent.store(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(out)
+    }
 
     /// The target's OS, if known yet.
     fn platform(&self) -> Option<Platform>;

@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { api, type TargetRef } from "./api";
 
 /**
@@ -23,8 +24,16 @@ import { api, type TargetRef } from "./api";
  * the first collision loses work the operator had every reason to expect.
  */
 
-/** The limit Rust enforces. Mirrored here only to fail before encoding 200MB. */
-export const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
+/**
+ * The slice read and sent per IPC call.
+ *
+ * Files used to cross as one base64 string, which is why they were capped at
+ * 64 MB: the string is built, copied and parsed whole on both sides. A chunk
+ * bounds that to a few megabytes whatever the file's size, and Rust appends
+ * each to a staging file it then streams. Big enough that the per-call overhead
+ * vanishes, small enough that no single call is a noticeable stall.
+ */
+const CHUNK_BYTES = 4 * 1024 * 1024;
 
 export type UploadFailure = { name: string; message: string };
 
@@ -34,13 +43,13 @@ export type UploadOutcome = {
 };
 
 /**
- * Read a `File` as base64.
+ * Read a `Blob` as base64.
  *
  * `FileReader` rather than `btoa(String.fromCharCode(...bytes))`: spreading a
  * multi-megabyte array into a call blows the argument limit and throws, which
  * would make this work in testing and fail on a real screenshot.
  */
-function toBase64(file: File): Promise<string> {
+function toBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(reader.error ?? new Error("could not read the file"));
@@ -50,8 +59,53 @@ function toBase64(file: File): Promise<string> {
       const comma = result.indexOf(",");
       resolve(comma >= 0 ? result.slice(comma + 1) : result);
     };
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
+}
+
+const percent = (part: number, whole: number) =>
+  whole > 0 ? Math.min(100, Math.floor((part / whole) * 100)) : 100;
+
+/**
+ * One file: stage it in chunks, then have Rust stream it to the target.
+ *
+ * Two phases, reported separately because they run at very different speeds:
+ * reading is local disk and takes seconds, sending is the network and takes the
+ * rest. A single bar that hit 100% at the end of reading and then sat there for
+ * minutes would be a progress report that lies.
+ */
+async function uploadOne(
+  target: TargetRef,
+  path: string,
+  file: File,
+  onPhase: (phase: string) => void,
+): Promise<void> {
+  const id = await api.fsUploadBegin();
+  let finished = false;
+  try {
+    for (let offset = 0; offset < file.size; offset += CHUNK_BYTES) {
+      onPhase(`reading ${percent(offset, file.size)}%`);
+      await api.fsUploadChunk(id, await toBase64(file.slice(offset, offset + CHUNK_BYTES)));
+    }
+
+    onPhase("sending 0%");
+    const unlisten = await listen<{ id: string; sent: number; size: number }>(
+      "fs-upload-progress",
+      ({ payload }) => {
+        if (payload.id === id) onPhase(`sending ${percent(payload.sent, payload.size)}%`);
+      },
+    );
+    try {
+      // `finish` discards the staging copy itself, success or not.
+      finished = true;
+      await api.fsUploadFinish(target, path, id, file.size);
+    } finally {
+      unlisten();
+    }
+  } finally {
+    // A failure while staging leaves a partial copy of a possibly private file.
+    if (!finished) void api.fsUploadAbort(id).catch(() => {});
+  }
 }
 
 export async function uploadFiles(
@@ -67,14 +121,10 @@ export async function uploadFiles(
     onProgress?.(index, files.length, file.name);
 
     try {
-      if (file.size > MAX_UPLOAD_BYTES) {
-        // Checked before encoding: building an 85MB base64 string to then be
-        // told it is too big wastes the seconds the operator is watching.
-        throw new Error(`too large — the limit is ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB`);
-      }
-
       const path = await api.fsJoin(dir, file.name);
-      await api.fsUpload(target, path, await toBase64(file));
+      await uploadOne(target, path, file, (phase) =>
+        onProgress?.(index, files.length, `${file.name} · ${phase}`),
+      );
       uploaded.push(file.name);
     } catch (e) {
       failed.push({ name: file.name, message: e instanceof Error ? e.message : String(e) });

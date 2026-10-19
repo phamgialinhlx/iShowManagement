@@ -46,12 +46,12 @@ pub struct DirEntry {
 /// anything is shown, so this is a comfort limit rather than a capability one.
 pub const MAX_PREVIEW_BYTES: u64 = 24 * 1024 * 1024;
 
-/// Largest file the tree will upload.
+/// Largest payload [`FileSystem::upload`] accepts in one piece.
 ///
-/// The limit is the IPC bridge, not the disk: the webview has to hand the bytes
-/// over as one base64 string, which inflates them by a third and is built,
-/// copied and parsed in memory on both sides. A cap that says so beats a
-/// several-hundred-megabyte drag that appears to hang the app.
+/// That entry point takes the bytes in memory, handed over as one base64 string
+/// that is built, copied and parsed on both sides — fine for a pasted image,
+/// ruinous for an archive. The file tree does not use it: it stages the file in
+/// chunks and calls [`FileSystem::upload_file`], which streams and has no cap.
 pub const MAX_UPLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A non-text file, encoded for the webview.
@@ -91,6 +91,17 @@ pub trait FileSystem: Send + Sync {
     /// whatever folder was under the pointer, so the name is chosen by the file
     /// rather than typed, and a silent overwrite is the likely accident.
     async fn upload(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()>;
+    /// [`FileSystem::upload`], streamed from a file on this machine.
+    ///
+    /// The path for uploads of any size: nothing holds the whole file in memory,
+    /// so there is no ceiling but the far side's disk. Same refusal to clobber.
+    /// `sent` counts bytes as they are handed over, for progress.
+    async fn upload_file(
+        &self,
+        path: &str,
+        local: &std::path::Path,
+        sent: &std::sync::atomic::AtomicU64,
+    ) -> anyhow::Result<()>;
 
     /// Copy a file off the target and onto this machine.
     ///
@@ -114,6 +125,25 @@ pub trait FileSystem: Send + Sync {
     /// Find text under `root`. See `search` for why this runs `grep` on the
     /// machine that owns the disk rather than walking the tree from here.
     async fn search(&self, root: &str, query: &SearchQuery) -> anyhow::Result<Vec<SearchHit>>;
+}
+
+/// The remote half of an upload: `cat` from stdin into a new file.
+///
+/// `Tty::None` is load-bearing: a PTY would translate the byte stream on its way
+/// through and quietly corrupt anything that is not text.
+fn upload_spec(path: &str) -> CommandSpec {
+    CommandSpec::new("sh").arg("-c").arg(protocol::upload_script(path)).tty(Tty::None)
+}
+
+/// Read [`protocol::upload_script`]'s one-byte verdict.
+fn upload_outcome(path: &str, out: &rmux_transport::Output) -> anyhow::Result<()> {
+    anyhow::ensure!(out.stdout.trim_end() != "X", "{path} already exists");
+    anyhow::ensure!(
+        out.status == 0 && out.stdout.trim_end() == "O",
+        "failed to upload {path}: {}",
+        out.stderr.trim()
+    );
+    Ok(())
 }
 
 /// A filesystem reached by running shell commands on a [`Target`].
@@ -212,20 +242,18 @@ impl<T: Target> FileSystem for TargetFs<T> {
     }
 
     async fn upload(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()> {
-        // `Tty::None` is load-bearing: a PTY would translate the byte stream on
-        // its way through and quietly corrupt anything that is not text.
-        let spec =
-            CommandSpec::new("sh").arg("-c").arg(protocol::upload_script(path)).tty(Tty::None);
+        let out = self.target.exec_with_input(&upload_spec(path), bytes).await?;
+        upload_outcome(path, &out)
+    }
 
-        let out = self.target.exec_with_input(&spec, bytes).await?;
-        anyhow::ensure!(out.stdout.trim_end() != "X", "{path} already exists");
-        // (see `download` below for the reverse direction)
-        anyhow::ensure!(
-            out.status == 0 && out.stdout.trim_end() == "O",
-            "failed to upload {path}: {}",
-            out.stderr.trim()
-        );
-        Ok(())
+    async fn upload_file(
+        &self,
+        path: &str,
+        local: &std::path::Path,
+        sent: &std::sync::atomic::AtomicU64,
+    ) -> anyhow::Result<()> {
+        let out = self.target.exec_with_input_file(&upload_spec(path), local, sent).await?;
+        upload_outcome(path, &out)
     }
 
     /// Windowed, so peak memory is one chunk rather than the whole file — see
@@ -425,6 +453,32 @@ impl FileSystem for LocalFs {
             })?;
         file.write_all(bytes).await?;
         file.flush().await?;
+        Ok(())
+    }
+
+    async fn upload_file(
+        &self,
+        path: &str,
+        local: &std::path::Path,
+        sent: &std::sync::atomic::AtomicU64,
+    ) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        // `create_new`, for the same reason as `upload`.
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => anyhow::anyhow!("{path} already exists"),
+                _ => e.into(),
+            })?;
+        let mut source = tokio::fs::File::open(local).await?;
+        let copied = tokio::io::copy(&mut source, &mut file).await?;
+        file.flush().await?;
+        // A local copy is disk speed; one update at the end is all it earns.
+        sent.store(copied, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

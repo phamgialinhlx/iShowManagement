@@ -164,6 +164,180 @@ pub async fn fs_upload(
     filesystem(store.inner(), &target).await?.upload(&path, &bytes).await.map_err(err)
 }
 
+/// Where an upload is assembled before it is streamed to the target.
+///
+/// ## Why stage at all
+///
+/// The webview holds the dropped file as a `File` with no path, so its bytes can
+/// only cross the IPC bridge as JSON. In one piece that capped uploads at 64 MB
+/// — a base64 string of the whole file, built, copied and parsed on both sides.
+/// In chunks appended here, peak memory is one chunk whatever the file's size,
+/// and [`FileSystem::upload_file`] then streams it from disk.
+///
+/// ## Why the cache directory, `0700`/`0600`
+///
+/// A dropped file is frequently private, and a world-readable staging copy of
+/// it is a leak that outlives the upload. The app's own cache directory rather
+/// than `/tmp`: on Linux that is shared, and a predictable name there can be
+/// pre-created by another account.
+fn staging_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager as _;
+
+    let dir = app.path().app_cache_dir().map_err(err)?.join("uploads");
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(err)?;
+    }
+    Ok(dir)
+}
+
+/// The staged file for `id`.
+///
+/// The id arrives from the webview, so it is checked to be the shape
+/// [`fs_upload_begin`] issues — hex only — before it is joined onto a path. An
+/// id of `../../.ssh/authorized_keys` would otherwise be an append to any file
+/// this user can write.
+fn staged(app: &tauri::AppHandle, id: &str) -> Result<std::path::PathBuf, String> {
+    let well_formed = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit());
+    if !well_formed {
+        return Err("not an upload this app started".to_owned());
+    }
+    Ok(staging_dir(app)?.join(format!("{id}.part")))
+}
+
+/// Staged files older than this belong to an upload that never finished — the
+/// app quit or crashed mid-transfer. Nobody can resume them, so they are litter.
+const STALE_STAGING: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Start staging an upload; returns the id its chunks are sent under.
+#[tauri::command]
+pub async fn fs_upload_begin(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = staging_dir(&app)?;
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > STALE_STAGING);
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let id = format!(
+        "{nanos:x}{:x}{:04x}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(dir.join(format!("{id}.part"))).map_err(err)?;
+    Ok(id)
+}
+
+/// Append one base64 chunk to a staged upload.
+#[tauri::command]
+pub async fn fs_upload_chunk(app: tauri::AppHandle, id: String, base64: String) -> Result<(), String> {
+    use base64::Engine as _;
+    use std::io::Write as _;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.as_bytes())
+        .map_err(|e| format!("could not decode the upload: {e}"))?;
+    // `append` without `create`: a chunk for an upload that was never begun, or
+    // already finished, is refused rather than starting a fresh file.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(staged(&app, &id)?)
+        .map_err(|_| "this upload is no longer in progress".to_owned())?;
+    file.write_all(&bytes).map_err(err)?;
+    Ok(())
+}
+
+/// Progress of [`fs_upload_finish`], emitted while it streams.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadProgress {
+    id: String,
+    sent: u64,
+    size: u64,
+}
+
+/// Send a staged upload to the target, then discard the staging copy.
+///
+/// Emits `fs-upload-progress` twice a second while it runs: the network leg is
+/// the slow one, and a large upload that reports nothing for minutes reads as
+/// a hung app. The count is bytes handed to `ssh`, so it is measured, not
+/// estimated — it runs ahead of the far disk only by the pipe's buffer.
+///
+/// `size` is the length the webview read. A staged file of any other length
+/// means a chunk went missing, and sending it would write a truncated file that
+/// looks complete — so it is refused, the same rule reads follow.
+#[tauri::command]
+pub async fn fs_upload_finish(
+    app: tauri::AppHandle,
+    store: State<'_, FsStore>,
+    target: TargetRef,
+    path: String,
+    id: String,
+    size: u64,
+) -> Result<(), String> {
+    let local = staged(&app, &id)?;
+
+    let result = async {
+        let staged_len = std::fs::metadata(&local).map_err(err)?.len();
+        if staged_len != size {
+            return Err(format!(
+                "{path} was not uploaded — only {staged_len} of {size} bytes arrived"
+            ));
+        }
+        let fs = filesystem(store.inner(), &target).await?;
+        let sent = std::sync::atomic::AtomicU64::new(0);
+        let upload = fs.upload_file(&path, &local, &sent);
+        tokio::pin!(upload);
+
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            tokio::select! {
+                done = &mut upload => break done.map_err(err),
+                _ = tick.tick() => {
+                    use tauri::Emitter as _;
+                    let sent = sent.load(std::sync::atomic::Ordering::Relaxed);
+                    let _ = app.emit("fs-upload-progress", UploadProgress { id: id.clone(), sent, size });
+                }
+            }
+        }
+    }
+    .await;
+
+    let _ = std::fs::remove_file(&local);
+    result
+}
+
+/// Discard a staged upload that will not be finished.
+#[tauri::command]
+pub async fn fs_upload_abort(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let _ = std::fs::remove_file(staged(&app, &id)?);
+    Ok(())
+}
+
 /// What a completed download tells the operator.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]

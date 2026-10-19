@@ -284,7 +284,7 @@ async fn anything_carrying_bytes_rides_stdin_and_stays_on_ssh() {
 fn a_one_shot_cannot_opt_into_a_terminal_emulator() {
     let source = include_str!("../src/lib.rs");
 
-    for f in ["async fn exec(", "async fn exec_with_input("] {
+    for f in ["async fn exec(", "async fn exec_with_input(", "async fn exec_with_input_file("] {
         let body = source.split(f).nth(1).unwrap_or_else(|| panic!("{f} is gone"));
         let head: String = body.chars().take(400).collect();
         assert!(
