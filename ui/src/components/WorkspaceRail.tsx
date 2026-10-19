@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { createContext, useContext, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
 import { useRailWidth } from "../lib/rail-width";
@@ -48,6 +48,30 @@ function writeFolded(set: Set<string>) {
 }
 
 /** `user@host:port`, or `local` for the local machine. */
+/**
+ * The sessions a rail search matched, or `null` when nothing is being searched.
+ *
+ * Context rather than a prop through Server → Project → row: both levels need
+ * it to decide whether to render at all, and threading it by hand is two more
+ * props on components that already carry fold state.
+ */
+const RailMatch = createContext<Set<string> | null>(null);
+
+/**
+ * Whether `name` matches a search: every word, anywhere, ignoring case.
+ *
+ * Words rather than one substring so "rs voice" finds `rs-voice` and the
+ * order typed does not matter — a title is half-remembered, not quoted.
+ */
+export function matchesSearch(name: string, query: string): boolean {
+  const haystack = name.toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((word) => haystack.includes(word));
+}
+
 function serverLabel(server: Server): string {
   const t = server.target;
   if (!t.host) return "local";
@@ -543,7 +567,11 @@ function ProjectNode({
   // machines, and this control is reached without naming one.
   const host = allServers.find((sv) => sv.id === project.serverId);
 
-  const mine = sessions.filter((s) => s.projectId === project.id);
+  const match = useContext(RailMatch);
+  const mine = sessions.filter((s) => s.projectId === project.id && (!match || match.has(s.id)));
+  // While searching, a folded project still shows its matches: a hit hidden
+  // inside a collapsed group is a search that says "found" and shows nothing.
+  const open = !folded || match !== null;
   const [confirming, setConfirming] = useState(false);
   const [adding, setAdding] = useState(false);
   // Parallel to `adding` (the Claude ✦ picker), so the two never collide — pi
@@ -581,6 +609,9 @@ function ProjectNode({
     openSession(id);
     setAdding(false);
   };
+
+  // After every hook, so the hook order is the same whether or not it matches.
+  if (match && mine.length === 0) return null;
 
   return (
     <div>
@@ -830,7 +861,7 @@ function ProjectNode({
 
       {/* Children hang off a vertical guide line, as in the reference. */}
       <AnimatePresence initial={false}>
-        {!folded && mine.length > 0 && (
+        {open && mine.length > 0 && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
@@ -887,6 +918,7 @@ function ServerNode({
   const removeServer = useWorkspace((s) => s.removeServer);
   const [confirming, setConfirming] = useState(false);
 
+  const match = useContext(RailMatch);
   const projectIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
   const mine = useMemo(
     () => allSessions.filter((s) => projectIds.has(s.projectId)),
@@ -904,6 +936,9 @@ function ServerNode({
     }
     return waiting ? "waiting" : "idle";
   }, [mine, runtime, seen]);
+
+  if (match && !mine.some((s) => match.has(s.id))) return null;
+  const open = !folded || match !== null;
 
   return (
     <div className="mb-1">
@@ -1071,7 +1106,7 @@ function ServerNode({
         </div>
       )}
 
-      {!folded &&
+      {open &&
         projects.map((project) => (
           <ProjectNode
             key={project.id}
@@ -1080,7 +1115,7 @@ function ServerNode({
             onToggle={() => onToggleProject(project.id)}
           />
         ))}
-      {!folded && projects.length === 0 && (
+      {open && !match && projects.length === 0 && (
         <p className="micro px-3 py-2 pl-6" style={{ color: "var(--text-faint)" }}>
           no projects — add one with +
         </p>
@@ -1107,6 +1142,13 @@ export function WorkspaceRail({
   const { width: railWidth, startResize } = useRailWidth("rmux.rail.width", RAIL_DEFAULT);
 
   const [folded, setFolded] = useState<Set<string>>(readFolded);
+  // Not persisted: a filter that survives a restart opens the app to a rail
+  // that looks like sessions have gone missing.
+  const [query, setQuery] = useState("");
+  const match = useMemo(
+    () => (query.trim() ? new Set(sessions.filter((s) => matchesSearch(s.name, query)).map((s) => s.id)) : null),
+    [sessions, query],
+  );
   const toggleNode = (id: string) =>
     setFolded((prev) => {
       const next = new Set(prev);
@@ -1148,7 +1190,41 @@ export function WorkspaceRail({
         </div>
       )}
 
+      {!collapsed && (
+        <div className="relative shrink-0 border-b px-2 py-1.5" style={{ borderColor: "var(--border)" }}>
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setQuery("");
+                e.currentTarget.blur();
+              }
+            }}
+            placeholder="Search sessions"
+            aria-label="Search sessions by title"
+            spellCheck={false}
+            className="data w-full bg-transparent px-1.5 py-1 pr-6 text-[12px] outline-none"
+            style={{ color: "var(--text)" }}
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              aria-label="Clear search"
+              title="Clear (Esc)"
+              className="absolute right-3 top-1/2 -translate-y-1/2 opacity-70 hover:opacity-100"
+              style={{ color: "var(--text-soft)" }}
+            >
+              <CloseIcon />
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+        <RailMatch.Provider value={match}>
         {!collapsed &&
           servers.map((server) => (
             <ServerNode
@@ -1161,6 +1237,12 @@ export function WorkspaceRail({
               onNewProject={onNewProject}
             />
           ))}
+
+        </RailMatch.Provider>
+
+        {match && match.size === 0 && !collapsed && (
+          <p className="micro px-3 py-3 leading-relaxed">no session titles match “{query.trim()}”</p>
+        )}
 
         {servers.length === 0 && !collapsed && (
           <p className="micro px-3 py-3 leading-relaxed">no servers yet — connect one, or add a local folder</p>

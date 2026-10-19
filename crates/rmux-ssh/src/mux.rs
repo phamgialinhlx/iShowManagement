@@ -1244,8 +1244,8 @@ mod tests {
 
     #[test]
     fn distinct_destinations_get_distinct_sockets() {
-        let a = control_path_for_member(&SshHostId::new("host-a"));
-        let b = control_path_for_member(&SshHostId::new("host-b"));
+        let a = control_path_for_member(&SshHostId::new("host-a"), 0);
+        let b = control_path_for_member(&SshHostId::new("host-b"), 0);
         assert_ne!(a, b);
 
         // Same alias but a different user is a different authenticated session
@@ -1254,7 +1254,7 @@ mod tests {
             alias: "host-a".to_owned(),
             user: Some("root".to_owned()),
             port: None,
-        });
+        }, 0);
         assert_ne!(a, root);
     }
 
