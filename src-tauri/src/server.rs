@@ -14,14 +14,13 @@
 //! to `rmux-agent` on the far side; they keep going with nobody attached, which
 //! is the whole point of the agent. This closes the pipe, not the work.
 
-use tauri::State;
-
-use crate::agent::AgentStore;
-use crate::claude::ClaudeStore;
-use crate::claude_status::ClaudeStatusStore;
-use crate::files::FsStore;
-use crate::metrics::MetricsStore;
-use crate::terminal::{TargetRef, TerminalStore};
+use rmux_app::TargetRef;
+use rmux_app::agent::AgentStore;
+use rmux_app::claude::ClaudeStore;
+use rmux_app::claude_status::ClaudeStatusStore;
+use rmux_app::files::FsStore;
+use rmux_app::metrics::MetricsStore;
+use rmux_app::terminal::TerminalStore;
 
 /// What a disconnect actually did.
 ///
@@ -52,16 +51,29 @@ pub struct Disconnected {
 /// Each store caches independently, and one survivor is enough to keep the
 /// master alive. A disconnect that half-worked looks exactly like one that did
 /// nothing, so the count is surfaced rather than discarded.
+///
+/// The six stores are the ones in the shared `Ctx` — the very instances the
+/// commands in `rmux-app` cache into. Evicting any other copy would report a
+/// disconnect while the connection stayed up.
 #[tauri::command]
-pub async fn server_disconnect(
-    terminal: State<'_, TerminalStore>,
-    claude: State<'_, ClaudeStore>,
-    files: State<'_, FsStore>,
-    metrics: State<'_, MetricsStore>,
-    agent: State<'_, AgentStore>,
-    status: State<'_, ClaudeStatusStore>,
+pub async fn server_disconnect<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     target: TargetRef,
 ) -> Result<Disconnected, String> {
+    let ctx = crate::bridge::ctx(&app);
+    disconnect(&ctx, target).await
+}
+
+/// [`server_disconnect`] against a [`rmux_app::Ctx`] directly — what the
+/// command does, reachable from a test without a Tauri app.
+pub async fn disconnect(ctx: &rmux_app::Ctx, target: TargetRef) -> Result<Disconnected, String> {
+    let terminal = ctx.store::<TerminalStore>();
+    let claude = ctx.store::<ClaudeStore>();
+    let files = ctx.store::<FsStore>();
+    let metrics = ctx.store::<MetricsStore>();
+    let agent = ctx.store::<AgentStore>();
+    let status = ctx.store::<ClaudeStatusStore>();
+
     let id = target.id();
 
     // Any store that has it will do — they all hold the same resolved target.
@@ -115,13 +127,14 @@ pub async fn server_disconnect(
 #[tauri::command]
 pub async fn server_alias<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-    store: State<'_, ClaudeStore>,
     target: TargetRef,
     key: String,
     alias: String,
 ) -> Result<(), String> {
-    let resolved = crate::claude::resolve(store.inner(), &target).await?;
-    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+    let ctx = crate::bridge::ctx(&app);
+    let store = ctx.store::<ClaudeStore>();
+    let resolved = rmux_app::claude::resolve(&store, &target).await?;
+    let installed = rmux_app::agent::ensure_agent(&ctx, resolved.as_ref()).await?;
 
     let spec = rmux_transport::CommandSpec::new(&installed.program)
         .arg("alias")

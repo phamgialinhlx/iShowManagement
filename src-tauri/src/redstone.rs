@@ -315,7 +315,7 @@ pub async fn redstone_capabilities(base_url: String) -> Result<Capabilities, Str
 #[tauri::command]
 pub async fn redstone_enrol(
     app: tauri::AppHandle,
-    target: crate::terminal::TargetRef,
+    target: rmux_app::TargetRef,
 ) -> Result<HostStatus, String> {
     let session = load_session().ok_or(
         "sign in to Redstone first, or enrol with a token pasted from its web UI",
@@ -372,7 +372,7 @@ pub async fn redstone_enrol(
 #[tauri::command]
 pub async fn redstone_enrol_with_token(
     app: tauri::AppHandle,
-    target: crate::terminal::TargetRef,
+    target: rmux_app::TargetRef,
     endpoint: String,
     token: String,
     host_id: Option<String>,
@@ -426,12 +426,12 @@ fn now() -> Option<u64> {
 /// part with the mode bits and the stdin rule on it.
 async fn install(
     app: &tauri::AppHandle,
-    target: &crate::terminal::TargetRef,
+    target: &rmux_app::TargetRef,
     enrolment: rmux_bridge::Enrolment,
 ) -> Result<HostStatus, String> {
-    let claude_store = app.state::<crate::claude::ClaudeStore>();
-    let resolved = crate::claude::resolve(&claude_store, target).await?;
-    let installed = crate::agent::ensure_agent(app, resolved.as_ref()).await?;
+    let claude_store = crate::bridge::store::<rmux_app::claude::ClaudeStore, _>(app);
+    let resolved = rmux_app::claude::resolve(&claude_store, target).await?;
+    let installed = rmux_app::agent::ensure_agent(&crate::bridge::ctx(app), resolved.as_ref()).await?;
     let home = home_of(resolved.as_ref()).await?;
 
     // Over stdin. See `write_enrolment_script`.
@@ -473,10 +473,10 @@ struct Minted {
 #[tauri::command]
 pub async fn redstone_host_status(
     app: tauri::AppHandle,
-    target: crate::terminal::TargetRef,
+    target: rmux_app::TargetRef,
 ) -> Result<HostStatus, String> {
-    let claude_store = app.state::<crate::claude::ClaudeStore>();
-    let resolved = crate::claude::resolve(&claude_store, &target).await?;
+    let claude_store = crate::bridge::store::<rmux_app::claude::ClaudeStore, _>(&app);
+    let resolved = rmux_app::claude::resolve(&claude_store, &target).await?;
     let home = home_of(resolved.as_ref()).await?;
 
     let raw = run(resolved.as_ref(), &read_enrolment_script(&home)).await?;
@@ -487,7 +487,7 @@ pub async fn redstone_host_status(
     // Only asked once we know the host is enrolled — provisioning the agent to
     // discover that an unenrolled machine has no bridge would upload a megabyte
     // to answer "no".
-    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+    let installed = rmux_app::agent::ensure_agent(&crate::bridge::ctx(&app), resolved.as_ref()).await?;
     let running = run(resolved.as_ref(), &bridge_status_script(&installed.program))
         .await
         .map(|out| out.contains("running"))
@@ -518,17 +518,17 @@ pub async fn redstone_host_status(
 #[tauri::command]
 pub async fn redstone_start_bridge(
     app: tauri::AppHandle,
-    target: crate::terminal::TargetRef,
+    target: rmux_app::TargetRef,
 ) -> Result<HostStatus, String> {
-    let claude_store = app.state::<crate::claude::ClaudeStore>();
-    let resolved = crate::claude::resolve(&claude_store, &target).await?;
+    let claude_store = crate::bridge::store::<rmux_app::claude::ClaudeStore, _>(&app);
+    let resolved = rmux_app::claude::resolve(&claude_store, &target).await?;
     let home = home_of(resolved.as_ref()).await?;
 
     let raw = run(resolved.as_ref(), &read_enrolment_script(&home)).await?;
     let enrolment: rmux_bridge::Enrolment = serde_json::from_str(raw.trim())
         .map_err(|_| "this host is not enrolled — nothing to start".to_owned())?;
 
-    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+    let installed = rmux_app::agent::ensure_agent(&crate::bridge::ctx(&app), resolved.as_ref()).await?;
     let started = run(resolved.as_ref(), &start_bridge_script(&home, &installed.program)).await?;
 
     Ok(HostStatus {
@@ -543,12 +543,12 @@ pub async fn redstone_start_bridge(
 #[tauri::command]
 pub async fn redstone_unenrol(
     app: tauri::AppHandle,
-    target: crate::terminal::TargetRef,
+    target: rmux_app::TargetRef,
 ) -> Result<HostStatus, String> {
-    let claude_store = app.state::<crate::claude::ClaudeStore>();
-    let resolved = crate::claude::resolve(&claude_store, &target).await?;
+    let claude_store = crate::bridge::store::<rmux_app::claude::ClaudeStore, _>(&app);
+    let resolved = rmux_app::claude::resolve(&claude_store, &target).await?;
     let home = home_of(resolved.as_ref()).await?;
-    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+    let installed = rmux_app::agent::ensure_agent(&crate::bridge::ctx(&app), resolved.as_ref()).await?;
 
     run(resolved.as_ref(), &unenrol_script(&home, &installed.program)).await?;
 

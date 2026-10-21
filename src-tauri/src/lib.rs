@@ -10,17 +10,12 @@ mod askpass;
 mod background;
 mod control;
 mod notify;
-mod paste;
 mod redstone;
 mod uplink;
 mod userpath;
 mod tunnels;
-pub mod agent;
 pub mod bridge;
-pub mod claude;
-mod claude_account;
 mod claude_login;
-pub mod claude_status;
 mod auth;
 mod face_models;
 mod glass;
@@ -28,16 +23,10 @@ mod identity_migration;
 mod keychain;
 mod lock;
 pub mod logs;
-mod model_profile;
-mod services;
 mod new_window;
 mod settings_window;
-mod ssh_keys;
 mod theme;
-pub mod files;
-pub mod metrics;
 pub mod server;
-pub mod terminal;
 
 /// A target as the UI sees it. Lives in `rmux-app` with the commands that
 /// return it.
@@ -69,11 +58,6 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             auth::jira_transition,
             auth::jira_comment,
             auth::jira_create,
-            services::docker_containers,
-            services::docker_action,
-            services::host_sessions,
-            ssh_keys::ssh_key_status,
-            ssh_keys::ssh_key_install,
             settings_window::open_settings,
             new_window::open_window,
             lock::lock_status,
@@ -86,40 +70,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             face_models::face_models_status,
             face_models::face_models_install,
             face_models::face_model_file,
-            terminal::terminal_open,
-            terminal::low_latency_probe,
-            terminal::mosh_install_status,
-            terminal::mosh_install_pending,
-            terminal::mosh_server_status,
-            terminal::set_mosh_auto_install,
-            terminal::terminal_attach,
-            terminal::terminal_write,
-            terminal::terminal_resize,
-            terminal::terminal_close,
             askpass::answer_prompt,
-            files::fs_list,
-            files::fs_read,
-            files::fs_write,
-            files::fs_home,
-            files::fs_preview,
-            files::fs_create_file,
-            files::fs_create_dir,
-            files::fs_rename,
-            files::fs_delete,
-            files::fs_upload,
-            files::fs_upload_begin,
-            files::fs_upload_chunk,
-            files::fs_upload_finish,
-            files::fs_upload_abort,
-            files::fs_download,
-            model_profile::model_profiles,
-            model_profile::model_profile_parse,
-            model_profile::model_profile_save,
-            model_profile::model_profile_delete,
-            metrics::metrics_sample,
-            metrics::metrics_processes,
-            metrics::metrics_kill,
-            paste::claude_paste_image,
             notify::notify,
             notify::notify_reset,
             uplink::host_uplink,
@@ -142,38 +93,11 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             redstone::redstone_unenrol,
             redstone::redstone_host_status,
             redstone::redstone_start_bridge,
-            claude::claude_start,
-            claude::pi_start,
-            claude::claude_list_sessions,
-            claude::claude_list_all_sessions,
-            claude::pi_list_all_sessions,
-            claude::claude_transcript,
-            claude::pi_transcript,
-            claude::claude_end_session,
-            claude_account::claude_account_status,
-            claude_account::claude_account_save,
-            claude_account::claude_account_forget,
-            claude_account::claude_login_command,
-            claude_account::claude_usage_report,
             claude_login::claude_login_start,
             claude_login::claude_login_submit,
             claude_login::claude_login_cancel,
-            claude::claude_attach,
-            claude::claude_state,
-            claude::claude_send,
-            claude::claude_interrupt,
-            claude::claude_resize,
-            claude::claude_write,
-            claude::claude_stop,
-            claude_status::claude_status_watch,
             server::server_disconnect,
             server::server_alias,
-            terminal::terminal_detach,
-            claude_status::claude_status_unwatch,
-            files::fs_join,
-            files::fs_parent,
-            files::fs_search,
-            files::ssh_config_hosts,
             background::background_set,
             background::background_clear,
             settings_window::restart_app,
@@ -278,14 +202,12 @@ pub fn run() {
                 None => empty_response(),
             }
         })
+        // The stores of the commands that live in `rmux-app` (terminal, files,
+        // metrics, claude, claude status, agent) are *not* managed here: they
+        // are held in the one `Ctx` (`bridge::ctx`), and desktop-only code that
+        // needs one reaches it through that, so each exists exactly once.
         .manage(auth::AuthStore::default())
         .manage(askpass::PromptStore::default())
-        .manage(terminal::TerminalStore::default())
-        .manage(files::FsStore::default())
-        .manage(metrics::MetricsStore::default())
-        .manage(claude::ClaudeStore::default())
-        .manage(claude_status::ClaudeStatusStore::default())
-        .manage(agent::AgentStore::default())
         .manage(claude_login::LoginStore::default())
         .manage(tunnels::TunnelStore::default())
         .manage(control::ControlState::default())

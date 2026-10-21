@@ -11,8 +11,10 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rmux_agent::provision::{self, Installed};
 use rmux_transport::{Target, TargetId};
-use tauri::Manager;
 use tokio::sync::OnceCell;
+
+use crate::ctx::Ctx;
+use crate::host::Host;
 
 /// Provisioning results, one per target.
 #[derive(Default)]
@@ -44,8 +46,8 @@ impl AgentStore {
 
 /// Ensure the agent is installed on `target`, uploading it if this is the first
 /// time rmux has seen this host.
-pub async fn ensure_agent<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
+pub async fn ensure_agent(
+    ctx: &Ctx,
     target: &dyn Target,
 ) -> Result<Installed, String> {
     // **Persistence on Windows is gated off, deliberately and provisionally.**
@@ -68,13 +70,13 @@ pub async fn ensure_agent<R: tauri::Runtime>(
         );
     }
 
-    let store = app.state::<AgentStore>();
+    let store = ctx.store::<AgentStore>();
     let cell = {
         let mut guard = store.by_target.lock();
         Arc::clone(guard.entry(target.id().clone()).or_default())
     };
 
-    let source = source_for(app);
+    let source = source_for(ctx.host());
     cell.get_or_try_init(|| async { provision::ensure(target, &source).await })
         .await
         .cloned()
@@ -86,8 +88,8 @@ pub async fn ensure_agent<R: tauri::Runtime>(
 /// A bundled app carries them as resources; `cargo run` finds them next to the
 /// executable in `target/debug`. Both are checked, newest-build-wins, so a
 /// developer never debugs against a stale bundled copy.
-fn source_for<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> provision::DirectorySource {
-    let resource_dir = app.path().resource_dir().ok();
+fn source_for(host: &dyn Host) -> provision::DirectorySource {
+    let resource_dir = host.resource_dir();
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
     provision::default_source(resource_dir.as_deref(), exe_dir.as_deref())

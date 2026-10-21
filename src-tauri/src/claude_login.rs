@@ -26,7 +26,7 @@
 //! not available.
 //!
 //! The token itself never reaches the webview, and never becomes an argument to
-//! anything: see [`crate::claude_account`].
+//! anything: see [`rmux_app::claude_account`].
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -37,7 +37,7 @@ use rmux_transport::{CommandSpec, Tty};
 use serde::Serialize;
 use tauri::State;
 
-use crate::terminal::TargetRef;
+use rmux_app::TargetRef;
 
 /// How long to wait for the CLI to print its authorisation URL.
 const URL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
@@ -79,8 +79,8 @@ fn fail(message: impl Into<String>) -> String {
 /// Start `claude setup-token` and wait for the URL it prints.
 #[tauri::command]
 pub async fn claude_login_start(
+    app: tauri::AppHandle,
     store: State<'_, LoginStore>,
-    claude_store: State<'_, crate::claude::ClaudeStore>,
     target: Option<TargetRef>,
 ) -> Result<LoginStarted, String> {
     // Replace any previous attempt rather than refusing: an abandoned flow would
@@ -90,7 +90,8 @@ pub async fn claude_login_start(
     // Resolved through the same store the Claude tab uses, so a login on a host
     // reuses that host's existing ControlMaster connection rather than opening a
     // second one.
-    let target = crate::claude::resolve(&claude_store, &target.unwrap_or(TargetRef { host: None, user: None, port: None })).await?;
+    let claude_store = crate::bridge::store::<rmux_app::claude::ClaudeStore, _>(&app);
+    let target = rmux_app::claude::resolve(&claude_store, &target.unwrap_or(TargetRef { host: None, user: None, port: None })).await?;
 
     // A login shell, because `claude` is installed by a version manager whose
     // PATH only exists there — spawning the binary directly gives "command not
@@ -167,9 +168,10 @@ pub async fn claude_login_start(
 /// Hand the CLI the code from the browser, and take the token it prints.
 #[tauri::command]
 pub async fn claude_login_submit(
+    app: tauri::AppHandle,
     store: State<'_, LoginStore>,
     code: String,
-) -> Result<crate::claude_account::AccountStatus, String> {
+) -> Result<rmux_app::claude_account::AccountStatus, String> {
     let code = code.trim().to_owned();
     if code.is_empty() {
         return Err(fail("paste the code from your browser first"));
@@ -202,7 +204,7 @@ pub async fn claude_login_submit(
     // and a process for nothing.
     cancel_locked(&store);
 
-    crate::claude_account::claude_account_save(token).await
+    rmux_app::claude_account::claude_account_save(crate::bridge::ctx(&app).host(), token).await
 }
 
 /// Abandon a login in progress.

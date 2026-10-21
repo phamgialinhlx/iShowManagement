@@ -1,0 +1,109 @@
+//! `rmux-web` — see `docs/rmux-web.md` and the crate docs.
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::process::ExitCode;
+
+use rmux_web::{Options, cli, conns, host};
+
+fn main() -> ExitCode {
+    let cli = match cli::parse(std::env::args().skip(1)) {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprintln!("rmux-web: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if cli.help {
+        println!("{}", cli::USAGE);
+        return ExitCode::SUCCESS;
+    }
+    // Before anything is created, bound or generated.
+    if let Err(e) = cli::check_listen(cli.listen, cli.allow_non_loopback) {
+        eprintln!("rmux-web: {e}");
+        return ExitCode::from(2);
+    }
+
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("rmux-web: starting the runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(run(cli)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("rmux-web: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: cli::Cli) -> anyhow::Result<()> {
+    let token = match &cli.token_file {
+        Some(path) => cli::read_token_file(path)?,
+        None => cli::generate_token()?,
+    };
+    let (router, _state) = rmux_web::build(Options {
+        registry: rmux_app::registry(),
+        ui_dir: cli.ui.clone(),
+        resource_dir: cli.resources.clone(),
+        data_dir: host::default_data_dir()?,
+        cache_dir: host::default_cache_dir()?,
+        token: token.clone(),
+        queue_capacity: conns::DEFAULT_QUEUE_CAPACITY,
+    })?;
+
+    let listener = tokio::net::TcpListener::bind(cli.listen)
+        .await
+        .map_err(|e| anyhow::anyhow!("binding {}: {e}", cli.listen))?;
+    let bound = listener.local_addr()?;
+    if cli.ui.is_none() {
+        tracing::warn!("no --ui given: serving /api only");
+    }
+    // The one and only time the token is printed.
+    eprintln!("rmux-web: open http://{}/#token={token}", display_addr(bound));
+    drop(token);
+
+    rmux_web::serve(listener, router, shutdown()).await?;
+    tracing::info!("stopped");
+    Ok(())
+}
+
+/// The address to put in the printed URL: an unspecified bind is reachable on
+/// loopback, which is what the operator tunnels to.
+fn display_addr(addr: SocketAddr) -> SocketAddr {
+    match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => SocketAddr::new(Ipv4Addr::LOCALHOST.into(), addr.port()),
+        IpAddr::V6(ip) if ip.is_unspecified() => SocketAddr::new(Ipv6Addr::LOCALHOST.into(), addr.port()),
+        _ => addr,
+    }
+}
+
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+}

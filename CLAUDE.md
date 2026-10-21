@@ -1298,7 +1298,7 @@ reaches the session's environment and appears in **zero** process argv.
 ## Model profiles — running against Kimi, GLM or a gateway
 
 Claude Code picks its provider out of the environment, so "use GLM here" is a set of
-variables. `rmux_claude::profile` is that set, named and saved; `src-tauri/src/model_profile.rs`
+variables. `rmux_claude::profile` is that set, named and saved; `crates/rmux-app/src/model_profile.rs`
 stores and applies it.
 
 - **A profile decides where the operator's credential is sent.** `ANTHROPIC_BASE_URL` and

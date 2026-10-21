@@ -6,14 +6,15 @@
 //! Drives the terminal commands through the real IPC layer.
 //!
 //! The `rmux-term` unit tests cover the PTY itself. What they cannot cover is the
-//! glue: command registration, argument deserialisation, the `State` registry,
-//! and the error paths for stale terminal ids. Tauri's mock runtime exercises all
+//! glue: command registration (the `rmux-app` registry, through the desktop
+//! bridge), argument deserialisation, the shared store, and the error paths for
+//! stale terminal ids. Tauri's mock runtime exercises all
 //! of that headlessly, against the app's real generated context.
 //!
 //! It does NOT verify that output bytes cross the boundary unencoded — the mock
 //! runtime has no webview to receive channel messages, so that claim rests on
-//! `Response::new(InvokeResponseBody::Raw(..))` in `terminal.rs` and on observing
-//! the running app.
+//! `Sink::send_bytes` in `crates/rmux-app/src/terminal.rs` (pinned raw by
+//! `tests/registry_bridge.rs`) and on observing the running app.
 
 use serde_json::json;
 use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponseBody};
@@ -23,13 +24,10 @@ use tauri::webview::InvokeRequest;
 /// Build an app exposing the terminal commands, exactly as `run()` does.
 fn test_app() -> tauri::App<tauri::test::MockRuntime> {
     mock_builder()
-        .manage(rmux_lib::terminal::TerminalStore::default())
-        .invoke_handler(tauri::generate_handler![
-            rmux_lib::terminal::terminal_open,
-            rmux_lib::terminal::terminal_write,
-            rmux_lib::terminal::terminal_resize,
-            rmux_lib::terminal::terminal_close,
-        ])
+        .invoke_handler(rmux_lib::bridge::invoke_handler(
+            std::sync::Arc::new(rmux_app::registry()),
+            tauri::generate_handler![rmux_lib::logs::log_status],
+        ))
         // The real context, not `mock_context` — the latter carries an EMPTY ACL
         // (`Resolved::default()`), so every command is rejected with "Plugin not
         // found". Using the app's own generated context also means this test

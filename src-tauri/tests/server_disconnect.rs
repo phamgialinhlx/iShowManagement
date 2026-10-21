@@ -9,12 +9,12 @@
 
 use std::sync::Arc;
 
-use rmux_lib::agent::AgentStore;
-use rmux_lib::claude::ClaudeStore;
-use rmux_lib::claude_status::ClaudeStatusStore;
-use rmux_lib::files::FsStore;
-use rmux_lib::metrics::MetricsStore;
-use rmux_lib::terminal::TerminalStore;
+use rmux_app::agent::AgentStore;
+use rmux_app::claude::ClaudeStore;
+use rmux_app::claude_status::ClaudeStatusStore;
+use rmux_app::files::FsStore;
+use rmux_app::metrics::MetricsStore;
+use rmux_app::terminal::TerminalStore;
 use rmux_transport::{LocalTarget, Target, TargetId};
 
 fn local() -> Arc<dyn Target> {
@@ -131,4 +131,46 @@ async fn evicting_a_status_watcher_aborts_its_task() {
          and the real one would be reconnecting to the host just disconnected"
     );
     assert!(!store.evict_target(&id), "and it is no longer registered");
+}
+
+/// **The disconnect evicts the stores the commands actually use.**
+///
+/// The stores moved into `rmux-app`'s `Ctx`; `server_disconnect` must reach
+/// those very instances. A Tauri-managed second copy would make every count
+/// above true of a cache nobody reads, while the connection stayed up.
+#[tokio::test]
+async fn the_disconnect_evicts_the_shared_ctx_stores() {
+    struct NoHost;
+    impl rmux_app::Host for NoHost {
+        fn resource_dir(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn data_dir(&self) -> anyhow::Result<std::path::PathBuf> {
+            anyhow::bail!("none")
+        }
+        fn cache_dir(&self) -> anyhow::Result<std::path::PathBuf> {
+            anyhow::bail!("none")
+        }
+        fn emit(&self, _: &str, _: serde_json::Value) {}
+        fn secrets(&self) -> Option<&dyn rmux_app::SecretStore> {
+            None
+        }
+    }
+
+    let ctx = rmux_app::Ctx::new(Arc::new(NoHost));
+    let id = TargetId::Local;
+    ctx.store::<TerminalStore>().insert_for_test(id.clone(), local());
+    ctx.store::<ClaudeStore>().insert_for_test(id.clone(), local());
+    ctx.store::<FsStore>().insert_for_test(id.clone(), Arc::new(rmux_fs::LocalFs::new()));
+    ctx.store::<MetricsStore>().insert_for_test(id.clone(), local()).await;
+    ctx.store::<AgentStore>().insert_for_test(id.clone(), Arc::new(tokio::sync::OnceCell::new()));
+    ctx.store::<ClaudeStatusStore>().insert_for_test(id.clone(), tokio::spawn(async {}));
+
+    let target = rmux_app::TargetRef { host: None, user: None, port: None };
+    let done = rmux_lib::server::disconnect(&ctx, target.clone()).await.unwrap();
+    assert_eq!(done.evicted, 6, "every one of the six caches must let go");
+    assert!(done.closed, "a held target was asked to close");
+
+    let again = rmux_lib::server::disconnect(&ctx, target).await.unwrap();
+    assert_eq!(again.evicted, 0, "a second disconnect evicts nothing");
 }

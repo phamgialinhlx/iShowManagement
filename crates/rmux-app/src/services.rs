@@ -304,13 +304,11 @@ async fn resolved(target: &TargetRef) -> Result<Box<dyn Target>, String> {
     }
 }
 
-#[tauri::command]
 pub async fn docker_containers(target: TargetRef) -> Result<DockerReport, String> {
     let t = resolved(&target).await?;
     docker(t.as_ref()).await.map_err(|e| e.to_string())
 }
 
-#[tauri::command]
 pub async fn docker_action(
     target: TargetRef,
     id: String,
@@ -430,17 +428,41 @@ pub async fn agent_sessions(target: &dyn Target, program: &str) -> anyhow::Resul
     Ok(sessions)
 }
 
-#[tauri::command]
-pub async fn host_sessions<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
+pub async fn host_sessions(
+    ctx: &crate::ctx::Ctx,
     target: TargetRef,
 ) -> Result<Vec<AgentSession>, String> {
     let t = resolved(&target).await?;
     // The agent has to be there to be asked. On a host where it cannot run
     // (Windows), this reports the reason rather than an empty list — which
     // would read as "nothing running".
-    let installed = crate::agent::ensure_agent(&app, t.as_ref()).await?;
+    let installed = crate::agent::ensure_agent(ctx, t.as_ref()).await?;
     agent_sessions(t.as_ref(), &installed.program).await.map_err(|e| e.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetArgs {
+    pub target: TargetRef,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerActionArgs {
+    pub target: TargetRef,
+    pub id: String,
+    pub action: ContainerAction,
+}
+
+pub fn register(r: &mut crate::registry::Registry) {
+    use crate::registry::{Call, Web};
+    r.add("docker_containers", Web::Yes, |_, a: TargetArgs| docker_containers(a.target));
+    r.add("docker_action", Web::Yes, |_, a: DockerActionArgs| {
+        docker_action(a.target, a.id, a.action)
+    });
+    r.add("host_sessions", Web::Yes, |call: Call, a: TargetArgs| async move {
+        host_sessions(call.ctx(), a.target).await
+    });
 }
 
 #[cfg(test)]

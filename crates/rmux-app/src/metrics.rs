@@ -10,8 +10,10 @@ use std::sync::Arc;
 use rmux_metrics::{Collector, Process, Sample, SortBy};
 use rmux_ssh::SshTarget;
 use rmux_transport::{LocalTarget, Target, TargetId};
-use tauri::State;
+use serde::Deserialize;
 use tokio::sync::Mutex;
+
+use crate::registry::{Call, Registry, Web};
 
 use crate::terminal::TargetRef;
 
@@ -99,8 +101,8 @@ async fn warm_master(store: &MetricsStore, id: &TargetId) {
     // A warm ride is tens of ms (a local `ssh -O check`); a revive is hundreds+
     // (a fresh handshake). The duration is the tell, so no warm/cold flag needs
     // threading through the trait.
-    if crate::logs::debug_enabled() {
-        crate::logs::bench(&format!(
+    if crate::bench::debug_enabled() {
+        crate::bench::bench(&format!(
             "warm host={} dur_ms={} ok={}",
             target_label(id),
             t0.elapsed().as_millis(),
@@ -109,25 +111,24 @@ async fn warm_master(store: &MetricsStore, id: &TargetId) {
     }
 }
 
-#[tauri::command]
 pub async fn metrics_sample(
-    store: State<'_, MetricsStore>,
+    store: &MetricsStore,
     target: TargetRef,
 ) -> Result<Sample, String> {
     let id = store.ensure(&target).await?;
-    warm_master(store.inner(), &id).await;
+    warm_master(store, &id).await;
 
     let t0 = std::time::Instant::now();
     let result = {
-        let mut monitored = store.inner().monitored.lock().await;
+        let mut monitored = store.monitored.lock().await;
         let entry = monitored.get_mut(&id).expect("just inserted");
         // Borrow both fields at once: `sample` needs &mut the collector and & the
         // target, which a single `get_mut` on a tuple would not allow cleanly.
         let Monitored { target, collector } = entry;
         collector.sample(target.as_ref()).await.map_err(|e| e.to_string())
     };
-    if crate::logs::debug_enabled() {
-        crate::logs::bench(&format!(
+    if crate::bench::debug_enabled() {
+        crate::bench::bench(&format!(
             "metrics kind=sample host={} dur_ms={} ok={}",
             target_label(&id),
             t0.elapsed().as_millis(),
@@ -141,9 +142,8 @@ pub async fn metrics_sample(
 ///
 /// Polled only while the process widget is open — `ps` over every process is far
 /// more output than the status rows need, and it runs on the operator's server.
-#[tauri::command]
 pub async fn metrics_processes(
-    store: State<'_, MetricsStore>,
+    store: &MetricsStore,
     target: TargetRef,
     by: SortBy,
     // How many to return. The rail's donut labels five without its callouts
@@ -151,18 +151,18 @@ pub async fn metrics_processes(
     limit: Option<usize>,
 ) -> Result<Vec<Process>, String> {
     let id = store.ensure(&target).await?;
-    warm_master(store.inner(), &id).await;
+    warm_master(store, &id).await;
 
     let t0 = std::time::Instant::now();
     let result = {
-        let mut monitored = store.inner().monitored.lock().await;
+        let mut monitored = store.monitored.lock().await;
         let entry = monitored.get_mut(&id).expect("just inserted");
         let Monitored { target, collector } = entry;
         // Five is what the donut can label without the callouts colliding.
         collector.processes(target.as_ref(), by, limit.unwrap_or(5)).await.map_err(|e| e.to_string())
     };
-    if crate::logs::debug_enabled() {
-        crate::logs::bench(&format!(
+    if crate::bench::debug_enabled() {
+        crate::bench::bench(&format!(
             "metrics kind=processes host={} dur_ms={} ok={}",
             target_label(&id),
             t0.elapsed().as_millis(),
@@ -177,17 +177,56 @@ pub async fn metrics_processes(
 /// `hard` picks `KILL` over `TERM`. Separate rather than a retry, because the
 /// difference matters on a dev host: `KILL` gives the process no chance to
 /// flush or clean up, which routinely means a corrupted build or a stale lock.
-#[tauri::command]
 pub async fn metrics_kill(
-    store: State<'_, MetricsStore>,
+    store: &MetricsStore,
     target: TargetRef,
     pid: u32,
     hard: bool,
 ) -> Result<(), String> {
     let id = store.ensure(&target).await?;
-    let mut monitored = store.inner().monitored.lock().await;
+    let mut monitored = store.monitored.lock().await;
 
     let entry = monitored.get_mut(&id).expect("just inserted");
     let Monitored { target, collector } = entry;
     collector.kill(target.as_ref(), pid, hard).await.map_err(|e| e.to_string())
+}
+
+// ── Registration ─────────────────────────────────────────────────────────────
+//
+// Argument objects, keyed exactly as `ui/src/lib/api.ts` sends them.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetArgs {
+    pub target: TargetRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessesArgs {
+    pub target: TargetRef,
+    pub by: SortBy,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KillArgs {
+    pub target: TargetRef,
+    /// A `u32` on the wire, never a string: see `CLAUDE.md`, "Managing the host".
+    pub pid: u32,
+    pub hard: bool,
+}
+
+pub fn register(r: &mut Registry) {
+    r.add("metrics_sample", Web::Yes, |call: Call, a: TargetArgs| async move {
+        metrics_sample(&call.ctx().store::<MetricsStore>(), a.target).await
+    });
+    r.add("metrics_processes", Web::Yes, |call: Call, a: ProcessesArgs| async move {
+        metrics_processes(&call.ctx().store::<MetricsStore>(), a.target, a.by, a.limit).await
+    });
+    r.add("metrics_kill", Web::Yes, |call: Call, a: KillArgs| async move {
+        metrics_kill(&call.ctx().store::<MetricsStore>(), a.target, a.pid, a.hard).await
+    });
 }

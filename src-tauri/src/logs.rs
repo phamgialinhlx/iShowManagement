@@ -23,7 +23,6 @@
 //! assembled here rather than asked for, because the person reporting a bug is
 //! the least able to answer those questions.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
@@ -163,32 +162,11 @@ pub struct LogStatus {
     pub has_previous: bool,
 }
 
-/// Whether benchmark (`BENCH …`) lines are emitted.
-///
-/// Off by default. The file log already runs at `rmux=debug`, so a gated
-/// `tracing::info!` under this crate's target lands in the exportable log the
-/// moment it is switched on — no filter reload, no restart. The switch lives in
-/// Settings › Diagnostics and is synced here from the webview.
-static DEBUG: AtomicBool = AtomicBool::new(false);
-
-pub fn set_debug(on: bool) {
-    DEBUG.store(on, Ordering::Relaxed);
-}
-
-pub fn debug_enabled() -> bool {
-    DEBUG.load(Ordering::Relaxed)
-}
-
-/// Emit one benchmark line, but only while debug logging is on.
-///
-/// The `BENCH ` prefix is the grep handle; the target stays `rmux::logs`, which
-/// the default `rmux=debug` filter already passes, so the line reaches the file
-/// and the export with no other machinery.
-pub fn bench(msg: &str) {
-    if debug_enabled() {
-        tracing::info!("BENCH {msg}");
-    }
-}
+/// The benchmark switch and `bench` itself live in `rmux_app::bench`, beside the
+/// commands that emit `BENCH` lines; re-exported so `crate::logs::bench` keeps
+/// naming the same function. One `AtomicBool`, so the Diagnostics switch below
+/// gates the moved commands too.
+pub use rmux_app::bench::{bench, debug_enabled, set_debug};
 
 /// Turn benchmark logging on or off. Driven by the Diagnostics switch; also
 /// synced from the stored preference at startup.

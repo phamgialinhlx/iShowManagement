@@ -16,6 +16,7 @@ members = [
     "crates/rmux-cowork",
     "crates/rmux-core",
     "crates/rmux-app",
+    "crates/rmux-web",
     "askpass",
     "src-tauri",
 ]

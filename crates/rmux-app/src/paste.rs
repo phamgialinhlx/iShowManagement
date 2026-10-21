@@ -30,10 +30,10 @@
 //! would show up in `git status` and eventually get committed by accident.
 
 use rmux_transport::{CommandSpec, Tty};
-use serde::Serialize;
-use tauri::State;
+use serde::{Deserialize, Serialize};
 
 use crate::claude::ClaudeStore;
+use crate::registry::{Call, Registry, Web};
 use crate::terminal::TargetRef;
 
 /// Where the image ended up, and what to say about it.
@@ -55,9 +55,8 @@ pub struct Pasted {
 const MAX_BYTES: usize = 24 * 1024 * 1024;
 
 /// Write a pasted image to the target and return its path.
-#[tauri::command]
 pub async fn claude_paste_image(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     target: TargetRef,
     // Base64, no data-URI prefix. The webview cannot hand Rust raw bytes.
     data: String,
@@ -92,7 +91,7 @@ pub async fn claude_paste_image(
         _ => "png",
     };
 
-    let resolved = crate::claude::resolve(&store, &target).await?;
+    let resolved = crate::claude::resolve(store, &target).await?;
 
     // One round trip: make the directory, mint a name, swallow stdin into it,
     // then print where it went.
@@ -130,4 +129,18 @@ printf %s "$f""#
     }
 
     Ok(Pasted { path, bytes: bytes.len() })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasteArgs {
+    pub target: TargetRef,
+    pub data: String,
+    pub kind: String,
+}
+
+pub fn register(r: &mut Registry) {
+    r.add("claude_paste_image", Web::Yes, |call: Call, a: PasteArgs| async move {
+        claude_paste_image(&call.ctx().store::<ClaudeStore>(), a.target, a.data, a.kind).await
+    });
 }

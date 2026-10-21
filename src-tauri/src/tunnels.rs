@@ -38,7 +38,7 @@ impl TunnelStore {
 /// key-only host would reject the tunnel with `Permission denied`. This is the
 /// same label the master authenticates with (`SshHostId::label`). `None` for a
 /// local target, which needs no tunnel.
-fn conn(target: &crate::terminal::TargetRef) -> Option<String> {
+fn conn(target: &rmux_app::TargetRef) -> Option<String> {
     match target.id() {
         TargetId::Ssh(host) => Some(host.label()),
         TargetId::Local => None,
@@ -53,10 +53,11 @@ fn conn(target: &crate::terminal::TargetRef) -> Option<String> {
 /// the app the operator just started.
 #[tauri::command]
 pub async fn ports_discover(
-    claude_store: tauri::State<'_, crate::claude::ClaudeStore>,
-    target: crate::terminal::TargetRef,
+    app: tauri::AppHandle,
+    target: rmux_app::TargetRef,
 ) -> Result<Vec<rmux_ssh::forward::ListeningPort>, String> {
-    let resolved = crate::claude::resolve(&claude_store, &target).await?;
+    let claude_store = crate::bridge::store::<rmux_app::claude::ClaudeStore, _>(&app);
+    let resolved = rmux_app::claude::resolve(&claude_store, &target).await?;
 
     let out = resolved
         .exec(
@@ -77,7 +78,7 @@ pub async fn ports_discover(
 #[tauri::command]
 pub async fn port_forward(
     store: tauri::State<'_, TunnelStore>,
-    target: crate::terminal::TargetRef,
+    target: rmux_app::TargetRef,
     port: u16,
 ) -> Result<rmux_ssh::forward::Forward, String> {
     Ok(store.forwards().start(conn(&target).as_deref(), port).await)
@@ -86,7 +87,7 @@ pub async fn port_forward(
 #[tauri::command]
 pub async fn port_unforward(
     store: tauri::State<'_, TunnelStore>,
-    target: crate::terminal::TargetRef,
+    target: rmux_app::TargetRef,
     port: u16,
 ) -> Result<(), String> {
     store.forwards().stop(conn(&target).as_deref(), port).await;
@@ -97,7 +98,7 @@ pub async fn port_unforward(
 #[tauri::command]
 pub async fn ports_forwarded(
     store: tauri::State<'_, TunnelStore>,
-    target: crate::terminal::TargetRef,
+    target: rmux_app::TargetRef,
 ) -> Result<Vec<rmux_ssh::forward::Forward>, String> {
     Ok(store.forwards().list(conn(&target).as_deref()).await)
 }
@@ -111,7 +112,7 @@ pub async fn ports_forwarded(
 #[tauri::command]
 pub async fn port_proxy(
     store: tauri::State<'_, TunnelStore>,
-    target: crate::terminal::TargetRef,
+    target: rmux_app::TargetRef,
 ) -> Result<u16, String> {
     store.forwards().socks(conn(&target).as_deref()).await
 }

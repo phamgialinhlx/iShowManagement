@@ -215,7 +215,7 @@ export function TerminalView({
 
     const output = new Channel<ArrayBuffer>();
     output.onmessage = (chunk) => {
-      // Raw bytes, not JSON — see the note in src-tauri/src/terminal.rs.
+      // Raw bytes, not JSON — see the note in crates/rmux-app/src/terminal.rs.
       xterm.write(new Uint8Array(chunk));
       setReady(true);
     };

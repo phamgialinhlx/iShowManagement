@@ -161,13 +161,13 @@ async fn discover_ports(app: &AppHandle, host: Option<&str>) -> Result<Vec<u16>,
     // Only the host is known here. A client names a *session*, and everything
     // else about how to reach it — user, port, jump hosts — is `~/.ssh/config`'s
     // business, which is where it stays: rmux never resolves that file itself.
-    let target = crate::terminal::TargetRef {
+    let target = rmux_app::TargetRef {
         host: host.map(str::to_owned),
         user: None,
         port: None,
     };
-    let claude_store = app.state::<crate::claude::ClaudeStore>();
-    let resolved = crate::claude::resolve(&claude_store, &target).await?;
+    let claude_store = crate::bridge::store::<rmux_app::claude::ClaudeStore, _>(app);
+    let resolved = rmux_app::claude::resolve(&claude_store, &target).await?;
 
     let out = resolved
         .exec(

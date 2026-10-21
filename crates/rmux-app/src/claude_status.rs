@@ -2,8 +2,8 @@
 //!
 //! `rmux-agent watch-status` (see `crates/rmux-agent/src/status.rs`) streams a
 //! host's Claude session-status changes as NDJSON. This reads that stream — one
-//! watcher per host — and forwards each line to the webview as a `claude-status`
-//! event, so the rail can be driven by *changes* instead of the per-pane
+//! watcher per host — and forwards each line to the UI as a `claude-status`
+//! event (through [`Host::emit`], so every attached UI hears it), so the rail can be driven by *changes* instead of the per-pane
 //! `claude_state` busy-poll that was heating the machine.
 //!
 //! ## How the stream is run
@@ -33,12 +33,15 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use rmux_transport::{CommandSpec, NoConsoleWindow, Platform, Target, TargetId, Tty};
+use serde::Deserialize;
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Runtime, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::claude::{ClaudeStore, resolve};
+use crate::ctx::Ctx;
+use crate::host::Host;
+use crate::registry::{Call, Registry, Web};
 use crate::terminal::TargetRef;
 
 /// The event the UI listens on. Each payload is one line from the agent, with a
@@ -87,32 +90,30 @@ impl ClaudeStatusStore {
 
 /// Start (or confirm) a status watcher for `target`. Idempotent — safe to call
 /// whenever an agent-hosted Claude session opens, and on repeat.
-#[tauri::command]
-pub async fn claude_status_watch<R: Runtime>(
-    app: AppHandle<R>,
-    status_store: State<'_, ClaudeStatusStore>,
-    claude_store: State<'_, ClaudeStore>,
+pub async fn claude_status_watch(
+    ctx: &Ctx,
+    status_store: &ClaudeStatusStore,
+    claude_store: &ClaudeStore,
     target: TargetRef,
 ) -> Result<(), String> {
     let id = target.id();
-    if is_running(&status_store, &id) {
+    if is_running(status_store, &id) {
         return Ok(());
     }
 
-    let resolved = resolve(claude_store.inner(), &target).await?;
+    let resolved = resolve(claude_store, &target).await?;
     // No agent on Windows/macOS → no stream to read; the UI keeps polling there.
     if resolved.platform() == Some(Platform::Windows) {
         return Ok(());
     }
-    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+    let installed = crate::agent::ensure_agent(ctx, resolved.as_ref()).await?;
 
-    ensure_watch(&app, status_store.inner(), resolved, installed.program);
+    ensure_watch(ctx.host_arc(), status_store, resolved, installed.program);
     Ok(())
 }
 
 /// Stop the watcher for `target`, if any.
-#[tauri::command]
-pub fn claude_status_unwatch(status_store: State<'_, ClaudeStatusStore>, target: TargetRef) {
+pub fn claude_status_unwatch(status_store: &ClaudeStatusStore, target: TargetRef) {
     if let Some(handle) = status_store.watchers.lock().remove(&target.id()) {
         handle.abort();
     }
@@ -126,8 +127,8 @@ fn is_running(store: &ClaudeStatusStore, id: &TargetId) -> bool {
 ///
 /// Synchronous and cheap so it can be called from the session-start path with an
 /// already-resolved target, without another connect or round trip.
-pub fn ensure_watch<R: Runtime>(
-    app: &AppHandle<R>,
+pub fn ensure_watch(
+    host: Arc<dyn Host>,
     store: &ClaudeStatusStore,
     target: Arc<dyn Target>,
     program: String,
@@ -137,33 +138,31 @@ pub fn ensure_watch<R: Runtime>(
     if guard.get(&id).map(|h| !h.is_finished()).unwrap_or(false) {
         return;
     }
-    let app = app.clone();
     let label = id.label();
-    // `tokio::spawn` (not `tauri::async_runtime::spawn`) for its `JoinHandle`,
-    // which carries both `is_finished` and `abort`; tauri runs on tokio, so the
-    // runtime is the same one either way.
+    // `tokio::spawn` for its `JoinHandle`, which carries both `is_finished` and
+    // `abort`; the desktop's tauri runtime is tokio, so it is the same runtime.
     let handle = tokio::spawn(async move {
-        run_watcher(app, target, program, label).await;
+        run_watcher(host, target, program, label).await;
     });
     guard.insert(id, handle);
 }
 
 /// Reconnecting read loop for one host.
-async fn run_watcher<R: Runtime>(
-    app: AppHandle<R>,
+async fn run_watcher(
+    host: Arc<dyn Host>,
     target: Arc<dyn Target>,
     program: String,
     target_id: String,
 ) {
     let mut backoff = BACKOFF_START;
     loop {
-        match run_once(&app, target.as_ref(), &program, &target_id).await {
+        match run_once(host.as_ref(), target.as_ref(), &program, &target_id).await {
             Outcome::Unsupported => {
                 // An older agent. Tell the UI once so it falls back to polling,
                 // then stop — respawning a process that will only error again is
                 // waste, and the fingerprinted agent path means an upgrade
                 // reinstalls before this code would run against it anyway.
-                let _ = app.emit(EVENT, json!({ "targetId": target_id, "unsupported": true }));
+                host.emit(EVENT, json!({ "targetId": target_id, "unsupported": true }));
                 return;
             }
             // The stream had been working and closed — reconnect promptly.
@@ -186,8 +185,8 @@ enum Outcome {
     FailedToStart,
 }
 
-async fn run_once<R: Runtime>(
-    app: &AppHandle<R>,
+async fn run_once(
+    host: &dyn Host,
     target: &dyn Target,
     program: &str,
     target_id: &str,
@@ -243,7 +242,7 @@ async fn run_once<R: Runtime>(
         if let Some(obj) = value.as_object_mut() {
             obj.insert("targetId".to_owned(), json!(target_id));
         }
-        let _ = app.emit(EVENT, value);
+        host.emit(EVENT, value);
     }
 
     let _ = child.wait().await;
@@ -257,4 +256,22 @@ async fn run_once<R: Runtime>(
     } else {
         Outcome::Ended
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetArgs {
+    pub target: TargetRef,
+}
+
+pub fn register(r: &mut Registry) {
+    r.add("claude_status_watch", Web::Yes, |call: Call, a: TargetArgs| async move {
+        let status = call.ctx().store::<ClaudeStatusStore>();
+        let claude = call.ctx().store::<ClaudeStore>();
+        claude_status_watch(call.ctx(), &status, &claude, a.target).await
+    });
+    r.add("claude_status_unwatch", Web::Yes, |call: Call, a: TargetArgs| async move {
+        claude_status_unwatch(&call.ctx().store::<ClaudeStatusStore>(), a.target);
+        Ok::<_, String>(())
+    });
 }

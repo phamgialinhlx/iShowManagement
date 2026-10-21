@@ -14,6 +14,10 @@
 //! keychain as one JSON document instead: one slot, atomic to write, and
 //! encrypted at rest by the system.
 //!
+//! On a host with no credential store ([`Host::secrets`] is `None`) there are
+//! no profiles, and saving one says why — a profile is never written somewhere
+//! less safe instead. Sessions there run on whatever login the host already has.
+//!
 //! ## The webview is never given a token
 //!
 //! Same rule as the Claude account: the UI receives a redacted view, so an XSS
@@ -30,24 +34,31 @@
 
 use rmux_claude::profile::{self, ModelProfile};
 use rmux_transport::{CommandSpec, Target, Tty};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::ctx::Ctx;
+use crate::host::{Host, SecretStore};
+use crate::registry::{Call, NoArgs, Registry, Web};
+use crate::secrets::{LEGACY_CLAUDE_SERVICE, NO_STORE, read_migrating};
 
 /// Keychain slot. Separate from the account token — different lifetime, and
 /// deleting every profile must not sign the operator out of Claude.
 const SERVICE: &str = "group.yitec.rmux.claude";
 const ACCOUNT: &str = "model-profiles";
 
-fn entry() -> anyhow::Result<keyring::Entry> {
-    Ok(keyring::Entry::new(SERVICE, ACCOUNT)?)
+fn store(host: &dyn Host) -> Result<&dyn SecretStore, String> {
+    host.secrets().ok_or_else(|| NO_STORE.to_owned())
 }
 
-fn load() -> Vec<ModelProfile> {
+fn load(host: &dyn Host) -> Vec<ModelProfile> {
+    // No store, no profiles: the same answer as an empty keychain.
+    let Some(secrets) = host.secrets() else {
+        return Vec::new();
+    };
     // The legacy fallback matters most here: a session names its profile, and
     // one naming a profile that has vanished *refuses to start* rather than
     // quietly running against Anthropic. Losing this set breaks work.
-    let Some(raw) =
-        crate::keychain::read_migrating(SERVICE, crate::keychain::LEGACY_CLAUDE_SERVICE, ACCOUNT)
-    else {
+    let Some(raw) = read_migrating(secrets, SERVICE, LEGACY_CLAUDE_SERVICE, ACCOUNT) else {
         return Vec::new();
     };
     // A profile set that cannot be parsed is treated as absent rather than
@@ -56,16 +67,16 @@ fn load() -> Vec<ModelProfile> {
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
-fn save(profiles: &[ModelProfile]) -> Result<(), String> {
-    let entry = entry().map_err(|e| e.to_string())?;
+fn save(host: &dyn Host, profiles: &[ModelProfile]) -> Result<(), String> {
+    let secrets = store(host)?;
     if profiles.is_empty() {
         // Leaving an empty array behind would keep a keychain item nothing can
         // reach from the UI — the same litter a stale background file is.
-        let _ = entry.delete_credential();
+        let _ = secrets.delete(SERVICE, ACCOUNT);
         return Ok(());
     }
     let raw = serde_json::to_string(profiles).map_err(|e| e.to_string())?;
-    entry.set_password(&raw).map_err(|e| e.to_string())
+    secrets.set(SERVICE, ACCOUNT, &raw).map_err(|e| e.to_string())
 }
 
 /// What the UI is allowed to see.
@@ -112,9 +123,8 @@ fn view(p: &ModelProfile) -> ProfileView {
     }
 }
 
-#[tauri::command]
-pub fn model_profiles() -> Vec<ProfileView> {
-    load().iter().map(view).collect()
+pub fn model_profiles(host: &dyn Host) -> Vec<ProfileView> {
+    load(host).iter().map(view).collect()
 }
 
 /// Turn a pasted block into variables, without saving anything.
@@ -123,14 +133,13 @@ pub fn model_profiles() -> Vec<ProfileView> {
 /// it took, which it ignored, and what it wants to warn about — *before*
 /// committing. A parser that silently drops half a paste and reports success is
 /// how someone spends an afternoon debugging the wrong provider.
-#[tauri::command]
 pub fn model_profile_parse(text: String) -> profile::Parsed {
     profile::parse(&text)
 }
 
 /// Create or replace a profile from a pasted block.
-#[tauri::command]
 pub fn model_profile_save(
+    host: &dyn Host,
     id: Option<String>,
     name: String,
     text: String,
@@ -145,7 +154,7 @@ pub fn model_profile_save(
         return Err("no ANTHROPIC_ or CLAUDE_CODE_ variables found in that text".to_owned());
     }
 
-    let mut profiles = load();
+    let mut profiles = load(host);
     match id.and_then(|id| profiles.iter_mut().find(|p| p.id == id)) {
         Some(existing) => {
             existing.name = name;
@@ -160,15 +169,14 @@ pub fn model_profile_save(
         }
     }
 
-    save(&profiles)?;
+    save(host, &profiles)?;
     Ok(profiles.iter().map(view).collect())
 }
 
-#[tauri::command]
-pub fn model_profile_delete(id: String) -> Result<Vec<ProfileView>, String> {
-    let mut profiles = load();
+pub fn model_profile_delete(host: &dyn Host, id: String) -> Result<Vec<ProfileView>, String> {
+    let mut profiles = load(host);
     profiles.retain(|p| p.id != id);
-    save(&profiles)?;
+    save(host, &profiles)?;
     Ok(profiles.iter().map(view).collect())
 }
 
@@ -189,12 +197,12 @@ fn next_id(profiles: &[ModelProfile]) -> String {
 ///
 /// The clear-set spans every variable *any* stored profile uses, so switching
 /// also removes something a different profile introduced.
-pub async fn apply_to_target<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
+pub async fn apply_to_target(
+    ctx: &Ctx,
     target: &dyn Target,
     profile_id: Option<&str>,
 ) -> Result<(), String> {
-    let profiles = load();
+    let profiles = load(ctx.host());
 
     // Nothing has ever been configured and nothing is selected: leave the host
     // alone entirely rather than installing an agent to clear an empty set.
@@ -218,7 +226,7 @@ pub async fn apply_to_target<R: tauri::Runtime>(
         None => profile::clearing_set(known.iter().copied()),
     };
 
-    let installed = crate::agent::ensure_agent(app, target).await?;
+    let installed = crate::agent::ensure_agent(ctx, target).await?;
     let spec = CommandSpec::new(&installed.program).arg("setenv").tty(Tty::None);
 
     // Over **stdin**, one `KEY=VALUE` line each. As arguments these would be in
@@ -240,6 +248,46 @@ pub async fn apply_to_target<R: tauri::Runtime>(
         .map_err(|e| format!("could not hand the model profile to the agent: {e}"))?;
 
     Ok(())
+}
+
+// ── Registration ─────────────────────────────────────────────────────────────
+//
+// Argument objects, keyed exactly as `ui/src/lib/api.ts` sends them.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParseArgs {
+    pub text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveArgs {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteArgs {
+    pub id: String,
+}
+
+pub fn register(r: &mut Registry) {
+    r.add("model_profiles", Web::Yes, |call: Call, _: NoArgs| async move {
+        Ok::<_, String>(model_profiles(call.ctx().host()))
+    });
+    r.add("model_profile_parse", Web::Yes, |_, a: ParseArgs| async move {
+        Ok::<_, String>(model_profile_parse(a.text))
+    });
+    r.add("model_profile_save", Web::Yes, |call: Call, a: SaveArgs| async move {
+        model_profile_save(call.ctx().host(), a.id, a.name, a.text)
+    });
+    r.add("model_profile_delete", Web::Yes, |call: Call, a: DeleteArgs| async move {
+        model_profile_delete(call.ctx().host(), a.id)
+    });
 }
 
 #[cfg(test)]

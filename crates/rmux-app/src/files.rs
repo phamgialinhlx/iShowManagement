@@ -10,8 +10,10 @@ use parking_lot::Mutex;
 use rmux_fs::{DirEntry, FileContent, FileSystem, LocalFs, PreviewContent, SearchHit, SearchQuery, TargetFs};
 use rmux_ssh::SshTarget;
 use rmux_transport::TargetId;
-use tauri::State;
+use serde::Deserialize;
 
+use crate::host::Host;
+use crate::registry::{Call, NoArgs, Registry, Web};
 use crate::terminal::TargetRef;
 
 /// Filesystems already built, keyed by target.
@@ -70,65 +72,58 @@ async fn filesystem(
     Ok(fs)
 }
 
-#[tauri::command]
 pub async fn fs_list(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     path: String,
 ) -> Result<Vec<DirEntry>, String> {
-    filesystem(store.inner(), &target).await?.list_dir(&path).await.map_err(err)
+    filesystem(store, &target).await?.list_dir(&path).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn fs_read(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     path: String,
 ) -> Result<FileContent, String> {
-    filesystem(store.inner(), &target).await?.read_file(&path).await.map_err(err)
+    filesystem(store, &target).await?.read_file(&path).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn fs_write(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     path: String,
     contents: String,
 ) -> Result<(), String> {
-    filesystem(store.inner(), &target).await?.write_file(&path, &contents).await.map_err(err)
+    filesystem(store, &target).await?.write_file(&path, &contents).await.map_err(err)
 }
 
 /// Read a file as base64, for formats the text editor cannot show.
-#[tauri::command]
 pub async fn fs_preview(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     path: String,
 ) -> Result<PreviewContent, String> {
-    filesystem(store.inner(), &target).await?.read_preview(&path).await.map_err(err)
+    filesystem(store, &target).await?.read_preview(&path).await.map_err(err)
 }
 
-#[tauri::command]
-pub async fn fs_home(store: State<'_, FsStore>, target: TargetRef) -> Result<String, String> {
-    filesystem(store.inner(), &target).await?.home_dir().await.map_err(err)
+pub async fn fs_home(store: &FsStore, target: TargetRef) -> Result<String, String> {
+    filesystem(store, &target).await?.home_dir().await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn fs_create_file(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     path: String,
 ) -> Result<(), String> {
-    filesystem(store.inner(), &target).await?.create_file(&path).await.map_err(err)
+    filesystem(store, &target).await?.create_file(&path).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn fs_create_dir(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     path: String,
 ) -> Result<(), String> {
-    filesystem(store.inner(), &target).await?.create_dir(&path).await.map_err(err)
+    filesystem(store, &target).await?.create_dir(&path).await.map_err(err)
 }
 
 /// Write dropped or picked bytes into a new file on the target.
@@ -140,9 +135,8 @@ pub async fn fs_create_dir(
 /// The size check happens on the *decoded* length. Checking the base64 instead
 /// would reject files a third smaller than the stated limit, which is a cap that
 /// lies about itself.
-#[tauri::command]
 pub async fn fs_upload(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     path: String,
     base64: String,
@@ -161,7 +155,7 @@ pub async fn fs_upload(
         ));
     }
 
-    filesystem(store.inner(), &target).await?.upload(&path, &bytes).await.map_err(err)
+    filesystem(store, &target).await?.upload(&path, &bytes).await.map_err(err)
 }
 
 /// Where an upload is assembled before it is streamed to the target.
@@ -180,10 +174,8 @@ pub async fn fs_upload(
 /// it is a leak that outlives the upload. The app's own cache directory rather
 /// than `/tmp`: on Linux that is shared, and a predictable name there can be
 /// pre-created by another account.
-fn staging_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    use tauri::Manager as _;
-
-    let dir = app.path().app_cache_dir().map_err(err)?.join("uploads");
+fn staging_dir(host: &dyn Host) -> Result<std::path::PathBuf, String> {
+    let dir = host.cache_dir().map_err(err)?.join("uploads");
     std::fs::create_dir_all(&dir).map_err(err)?;
     #[cfg(unix)]
     {
@@ -199,12 +191,12 @@ fn staging_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 /// [`fs_upload_begin`] issues — hex only — before it is joined onto a path. An
 /// id of `../../.ssh/authorized_keys` would otherwise be an append to any file
 /// this user can write.
-fn staged(app: &tauri::AppHandle, id: &str) -> Result<std::path::PathBuf, String> {
+fn staged(host: &dyn Host, id: &str) -> Result<std::path::PathBuf, String> {
     let well_formed = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit());
     if !well_formed {
         return Err("not an upload this app started".to_owned());
     }
-    Ok(staging_dir(app)?.join(format!("{id}.part")))
+    Ok(staging_dir(host)?.join(format!("{id}.part")))
 }
 
 /// Staged files older than this belong to an upload that never finished — the
@@ -212,9 +204,8 @@ fn staged(app: &tauri::AppHandle, id: &str) -> Result<std::path::PathBuf, String
 const STALE_STAGING: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Start staging an upload; returns the id its chunks are sent under.
-#[tauri::command]
-pub async fn fs_upload_begin(app: tauri::AppHandle) -> Result<String, String> {
-    let dir = staging_dir(&app)?;
+pub async fn fs_upload_begin(host: &dyn Host) -> Result<String, String> {
+    let dir = staging_dir(host)?;
 
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -253,8 +244,7 @@ pub async fn fs_upload_begin(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 /// Append one base64 chunk to a staged upload.
-#[tauri::command]
-pub async fn fs_upload_chunk(app: tauri::AppHandle, id: String, base64: String) -> Result<(), String> {
+pub async fn fs_upload_chunk(host: &dyn Host, id: String, base64: String) -> Result<(), String> {
     use base64::Engine as _;
     use std::io::Write as _;
 
@@ -265,7 +255,7 @@ pub async fn fs_upload_chunk(app: tauri::AppHandle, id: String, base64: String) 
     // already finished, is refused rather than starting a fresh file.
     let mut file = std::fs::OpenOptions::new()
         .append(true)
-        .open(staged(&app, &id)?)
+        .open(staged(host, &id)?)
         .map_err(|_| "this upload is no longer in progress".to_owned())?;
     file.write_all(&bytes).map_err(err)?;
     Ok(())
@@ -290,16 +280,15 @@ struct UploadProgress {
 /// `size` is the length the webview read. A staged file of any other length
 /// means a chunk went missing, and sending it would write a truncated file that
 /// looks complete — so it is refused, the same rule reads follow.
-#[tauri::command]
 pub async fn fs_upload_finish(
-    app: tauri::AppHandle,
-    store: State<'_, FsStore>,
+    host: &dyn Host,
+    store: &FsStore,
     target: TargetRef,
     path: String,
     id: String,
     size: u64,
 ) -> Result<(), String> {
-    let local = staged(&app, &id)?;
+    let local = staged(host, &id)?;
 
     let result = async {
         let staged_len = std::fs::metadata(&local).map_err(err)?.len();
@@ -308,7 +297,7 @@ pub async fn fs_upload_finish(
                 "{path} was not uploaded — only {staged_len} of {size} bytes arrived"
             ));
         }
-        let fs = filesystem(store.inner(), &target).await?;
+        let fs = filesystem(store, &target).await?;
         let sent = std::sync::atomic::AtomicU64::new(0);
         let upload = fs.upload_file(&path, &local, &sent);
         tokio::pin!(upload);
@@ -318,9 +307,11 @@ pub async fn fs_upload_finish(
             tokio::select! {
                 done = &mut upload => break done.map_err(err),
                 _ = tick.tick() => {
-                    use tauri::Emitter as _;
                     let sent = sent.load(std::sync::atomic::Ordering::Relaxed);
-                    let _ = app.emit("fs-upload-progress", UploadProgress { id: id.clone(), sent, size });
+                    let progress = UploadProgress { id: id.clone(), sent, size };
+                    if let Ok(payload) = serde_json::to_value(progress) {
+                        host.emit("fs-upload-progress", payload);
+                    }
                 }
             }
         }
@@ -332,9 +323,8 @@ pub async fn fs_upload_finish(
 }
 
 /// Discard a staged upload that will not be finished.
-#[tauri::command]
-pub async fn fs_upload_abort(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let _ = std::fs::remove_file(staged(&app, &id)?);
+pub async fn fs_upload_abort(host: &dyn Host, id: String) -> Result<(), String> {
+    let _ = std::fs::remove_file(staged(host, &id)?);
     Ok(())
 }
 
@@ -367,9 +357,8 @@ pub struct Downloaded {
 /// by renaming things. So a collision becomes `server (2).log`, the convention
 /// every browser uses. Nothing on disk is ever replaced, and nothing is refused
 /// for a reason the operator did not cause.
-#[tauri::command]
 pub async fn fs_download(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     path: String,
 ) -> Result<Downloaded, String> {
@@ -383,7 +372,7 @@ pub async fn fs_download(
 
     let dest = unique_path(&dir, name);
 
-    let bytes = filesystem(store.inner(), &target)
+    let bytes = filesystem(store, &target)
         .await?
         .download(&path, &dest)
         .await
@@ -419,30 +408,27 @@ fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     unreachable!("an unbounded counter always finds a free name")
 }
 
-#[tauri::command]
 pub async fn fs_rename(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     from: String,
     to: String,
 ) -> Result<(), String> {
-    filesystem(store.inner(), &target).await?.rename(&from, &to).await.map_err(err)
+    filesystem(store, &target).await?.rename(&from, &to).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn fs_delete(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     path: String,
 ) -> Result<(), String> {
-    filesystem(store.inner(), &target).await?.delete(&path).await.map_err(err)
+    filesystem(store, &target).await?.delete(&path).await.map_err(err)
 }
 
 /// Used by the UI to build child paths without duplicating separator rules.
 ///
 /// Done in Rust because the remote host's separator is not necessarily the local
 /// one, and the webview has no way to know which it is talking to.
-#[tauri::command]
 pub fn fs_join(parent: String, name: String) -> String {
     join_path(&parent, &name)
 }
@@ -461,13 +447,11 @@ fn join_path(parent: &str, name: &str) -> String {
 ///
 /// Enumeration only — the alias is handed to `ssh` verbatim when connecting, and
 /// `ssh` resolves everything else.
-#[tauri::command]
 pub fn ssh_config_hosts() -> Vec<rmux_ssh::ConfigHost> {
     rmux_ssh::list_hosts()
 }
 
 /// The parent of a path, or `None` at the root.
-#[tauri::command]
 pub fn fs_parent(path: String) -> Option<String> {
     parent_path(&path)
 }
@@ -517,9 +501,8 @@ mod tests {
 ///
 /// One command for local and remote, like every other filesystem call — the
 /// branch is inside the `FileSystem` impl, never here.
-#[tauri::command]
 pub async fn fs_search(
-    store: State<'_, FsStore>,
+    store: &FsStore,
     target: TargetRef,
     root: String,
     query: SearchQuery,
@@ -529,5 +512,157 @@ pub async fn fs_search(
     if query.text.trim().is_empty() {
         return Ok(Vec::new());
     }
-    filesystem(&store, &target).await?.search(&root, &query).await.map_err(err)
+    filesystem(store, &target).await?.search(&root, &query).await.map_err(err)
+}
+
+// ── Registration ─────────────────────────────────────────────────────────────
+//
+// Argument objects, keyed exactly as `ui/src/lib/api.ts` sends them.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetArgs {
+    pub target: TargetRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetPathArgs {
+    pub target: TargetRef,
+    pub path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsWriteArgs {
+    pub target: TargetRef,
+    pub path: String,
+    pub contents: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsUploadArgs {
+    pub target: TargetRef,
+    pub path: String,
+    pub base64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsUploadChunkArgs {
+    pub id: String,
+    pub base64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsUploadFinishArgs {
+    pub target: TargetRef,
+    pub path: String,
+    pub id: String,
+    pub size: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadIdArgs {
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsRenameArgs {
+    pub target: TargetRef,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsJoinArgs {
+    pub parent: String,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathArgs {
+    pub path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsSearchArgs {
+    pub target: TargetRef,
+    pub root: String,
+    pub query: SearchQuery,
+}
+
+fn store(call: &Call) -> Arc<FsStore> {
+    call.ctx().store::<FsStore>()
+}
+
+pub fn register(r: &mut Registry) {
+    r.add("fs_list", Web::Yes, |call: Call, a: TargetPathArgs| async move {
+        fs_list(&store(&call), a.target, a.path).await
+    });
+    r.add("fs_read", Web::Yes, |call: Call, a: TargetPathArgs| async move {
+        fs_read(&store(&call), a.target, a.path).await
+    });
+    r.add("fs_write", Web::Yes, |call: Call, a: FsWriteArgs| async move {
+        fs_write(&store(&call), a.target, a.path, a.contents).await
+    });
+    r.add("fs_preview", Web::Yes, |call: Call, a: TargetPathArgs| async move {
+        fs_preview(&store(&call), a.target, a.path).await
+    });
+    r.add("fs_home", Web::Yes, |call: Call, a: TargetArgs| async move {
+        fs_home(&store(&call), a.target).await
+    });
+    r.add("fs_create_file", Web::Yes, |call: Call, a: TargetPathArgs| async move {
+        fs_create_file(&store(&call), a.target, a.path).await
+    });
+    r.add("fs_create_dir", Web::Yes, |call: Call, a: TargetPathArgs| async move {
+        fs_create_dir(&store(&call), a.target, a.path).await
+    });
+    r.add("fs_upload", Web::Yes, |call: Call, a: FsUploadArgs| async move {
+        fs_upload(&store(&call), a.target, a.path, a.base64).await
+    });
+    r.add("fs_upload_begin", Web::Yes, |call: Call, _: NoArgs| async move {
+        fs_upload_begin(call.ctx().host()).await
+    });
+    r.add("fs_upload_chunk", Web::Yes, |call: Call, a: FsUploadChunkArgs| async move {
+        fs_upload_chunk(call.ctx().host(), a.id, a.base64).await
+    });
+    r.add("fs_upload_finish", Web::Yes, |call: Call, a: FsUploadFinishArgs| async move {
+        fs_upload_finish(call.ctx().host(), &store(&call), a.target, a.path, a.id, a.size).await
+    });
+    r.add("fs_upload_abort", Web::Yes, |call: Call, a: UploadIdArgs| async move {
+        fs_upload_abort(call.ctx().host(), a.id).await
+    });
+    // **Not on the web.** It writes into the Downloads folder of the machine
+    // rmux runs on — for rmux-web that is the dev host, not the device in the
+    // operator's hand, so it would report a path they cannot open. The web
+    // needs a streamed download to the browser instead, which does not exist yet.
+    r.add("fs_download", Web::No, |call: Call, a: TargetPathArgs| async move {
+        fs_download(&store(&call), a.target, a.path).await
+    });
+    r.add("fs_rename", Web::Yes, |call: Call, a: FsRenameArgs| async move {
+        fs_rename(&store(&call), a.target, a.from, a.to).await
+    });
+    r.add("fs_delete", Web::Yes, |call: Call, a: TargetPathArgs| async move {
+        fs_delete(&store(&call), a.target, a.path).await
+    });
+    r.add("fs_join", Web::Yes, |_, a: FsJoinArgs| async move {
+        Ok::<_, String>(fs_join(a.parent, a.name))
+    });
+    r.add("ssh_config_hosts", Web::Yes, |_, _: NoArgs| async move {
+        Ok::<_, String>(ssh_config_hosts())
+    });
+    r.add("fs_parent", Web::Yes, |_, a: PathArgs| async move {
+        Ok::<_, String>(fs_parent(a.path))
+    });
+    r.add("fs_search", Web::Yes, |call: Call, a: FsSearchArgs| async move {
+        fs_search(&store(&call), a.target, a.root, a.query).await
+    });
 }

@@ -125,9 +125,10 @@ One WebSocket per page carries every stream; commands are plain HTTP.
   strips it from the address bar with `history.replaceState`. HTTP requests send
   `Authorization: Bearer <token>`. A browser **cannot set headers on a WebSocket
   upgrade** or on an `<img>` load, so `/api/ws` and `/api/file` take it as a
-  `?token=` query parameter instead; the server accepts either form on every
-  route. The query form can land in proxy logs, which is the reason it is limited
-  to those two routes and the reason the token is per-run.
+  `?token=` query parameter instead. The query form is accepted **only** on
+  `/api/ws` and `/api/file`; everywhere else it is refused, because a token in a URL
+  ends up in history, proxy logs and `Referer` headers — which is also why the
+  token is per-run.
 - **Which shell.** `bridge.ts` treats a page as rmux-web when it has a token, or when
   the server marks the page with `<meta name="rmux-shell" content="web">` (for when
   the JWT replaces the token). Otherwise a non-Tauri page is a plain browser tab

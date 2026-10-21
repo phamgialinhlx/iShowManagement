@@ -1,7 +1,7 @@
 //! Terminal IPC.
 //!
 //! Output crosses to the webview over a **raw** channel
-//! ([`InvokeResponseBody::Raw`]), not as JSON. That matters: Tauri's default
+//! ([`Sink::send_bytes`] — `InvokeResponseBody::Raw` on desktop), not as JSON. That matters: Tauri's default
 //! serialisation turns a `Vec<u8>` into a JSON array of decimal numbers, roughly
 //! a 4x size increase plus parse cost on every chunk — on the hottest path in the
 //! app, where a `cat` of a large file can push megabytes through in a second.
@@ -21,9 +21,11 @@ use rmux_transport::{
     CommandSpec, LocalTarget, LowLatencyOutcome, Target, TargetId,
     local::terminal_env,
 };
-use serde::Serialize;
-use tauri::State;
-use tauri::ipc::{Channel, InvokeResponseBody, Response};
+use serde::{Deserialize, Serialize};
+
+use crate::ctx::Ctx;
+use crate::host::Sink;
+use crate::registry::{Call, Registry, Web};
 
 /// Live terminals and the targets they run on.
 #[derive(Default)]
@@ -60,10 +62,9 @@ impl TerminalStore {
     }
 }
 
-/// Which machine to open a terminal on. Defined in `rmux-app` so the commands
-/// that moved there can take one; re-exported so `crate::terminal::TargetRef`
-/// keeps naming the same type everywhere in this crate.
-pub use rmux_app::TargetRef;
+/// Which machine to open a terminal on. Defined in [`crate::target`];
+/// re-exported so `crate::terminal::TargetRef` names the same type everywhere.
+pub use crate::target::TargetRef;
 
 /// Terminal lifecycle, sent as JSON on a separate channel from the byte stream.
 #[derive(Debug, Clone, Serialize)]
@@ -124,12 +125,11 @@ async fn resolve_target(
 ///
 /// Resolving the target first is deliberate — the probe runs over the
 /// ControlMaster that is already open, so it costs no handshake of its own.
-#[tauri::command]
 pub async fn low_latency_probe(
-    store: State<'_, TerminalStore>,
+    store: &TerminalStore,
     target: TargetRef,
 ) -> Result<LowLatencyOutcome, String> {
-    let resolved = resolve_target(store.inner(), &target).await?;
+    let resolved = resolve_target(store, &target).await?;
     Ok(resolved.probe_low_latency().await)
 }
 
@@ -152,7 +152,6 @@ pub async fn low_latency_probe(
 /// Nothing here resolves or connects a target: it reads a decision another task
 /// is making, so a host that is slow to install cannot make this slow to answer
 /// for any *other* reason.
-#[tauri::command]
 pub async fn mosh_install_status(target: TargetRef) -> Result<Option<MoshInstallOutcome>, String> {
     match target.id() {
         TargetId::Local => Ok(None),
@@ -183,7 +182,6 @@ pub struct MoshServerStatus {
     minimum: String,
 }
 
-#[tauri::command]
 pub fn mosh_server_status(target: TargetRef) -> MoshServerStatus {
     let version = match target.id() {
         TargetId::Local => None,
@@ -203,7 +201,6 @@ pub fn mosh_server_status(target: TargetRef) -> MoshServerStatus {
 /// as the attempt runs. The panel asks this first, so it draws an in-flight
 /// state only where there is genuinely something in flight rather than assuming
 /// one and taking it back a moment later.
-#[tauri::command]
 pub fn mosh_install_pending(target: TargetRef) -> bool {
     match target.id() {
         TargetId::Local => false,
@@ -221,7 +218,6 @@ pub fn mosh_install_pending(target: TargetRef) -> bool {
 /// Off is off, for an upgrade exactly as for an install — the setting means
 /// "rmux may change this host", and replacing a package on it is squarely that.
 /// No detection, no `sudo`, nothing written to `~/.rmux/mosh-install.json`.
-#[tauri::command]
 pub fn set_mosh_auto_install(on: bool) {
     rmux_ssh::mosh_install::set_enabled(on);
     tracing::info!("automatic mosh-server install {}", if on { "enabled" } else { "disabled" });
@@ -231,10 +227,9 @@ pub fn set_mosh_auto_install(on: bool) {
 // An IPC entry point: every argument is a distinct thing the webview must send,
 // and bundling them into a struct would only move the same list behind a name.
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
-pub async fn terminal_open<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    store: State<'_, TerminalStore>,
+pub async fn terminal_open(
+    ctx: &Ctx,
+    store: &TerminalStore,
     target: TargetRef,
     cwd: Option<String>,
     // `session` is a stable name for the shell on the target. The same name
@@ -248,10 +243,10 @@ pub async fn terminal_open<R: tauri::Runtime>(
     low_latency: Option<bool>,
     cols: u16,
     rows: u16,
-    output: Channel<Response>,
-    lifecycle: Channel<Lifecycle>,
+    output: Arc<dyn Sink>,
+    lifecycle: Arc<dyn Sink>,
 ) -> Result<OpenedTerminal, String> {
-    let resolved = resolve_target(store.inner(), &target).await?;
+    let resolved = resolve_target(store, &target).await?;
 
     // A named terminal runs under the agent so it outlives this connection.
     // Without a name there is nothing to reattach *to*, so a plain login shell
@@ -271,7 +266,7 @@ pub async fn terminal_open<R: tauri::Runtime>(
         // works. What is lost is persistence, so the shell ends with the
         // connection; that is worth saying, but it is not worth withholding the
         // terminal over.
-        Some(name) => match crate::agent::ensure_agent(&app, resolved.as_ref()).await {
+        Some(name) => match crate::agent::ensure_agent(ctx, resolved.as_ref()).await {
             Ok(installed) => installed.attach_spec(name, cwd.as_deref(), cols, rows),
             Err(reason) => {
                 tracing::info!(%reason, "opening a non-persistent terminal");
@@ -314,22 +309,20 @@ pub async fn terminal_open<R: tauri::Runtime>(
     let terminal = Arc::new(Terminal::spawn(&command, local_cwd, size).map_err(err)?);
     let id = terminal.id().to_owned();
 
-    store.inner().terminals.lock().insert(id.clone(), Arc::clone(&terminal));
+    store.terminals.lock().insert(id.clone(), Arc::clone(&terminal));
     stream_to_channel(Arc::clone(&terminal), output, lifecycle);
 
     Ok(OpenedTerminal { id, cols, rows })
 }
 
 /// Reattach a view to a terminal that is already running, catching up first.
-#[tauri::command]
 pub async fn terminal_attach(
-    store: State<'_, TerminalStore>,
+    store: &TerminalStore,
     id: String,
-    output: Channel<Response>,
-    lifecycle: Channel<Lifecycle>,
+    output: Arc<dyn Sink>,
+    lifecycle: Arc<dyn Sink>,
 ) -> Result<(), String> {
     let terminal = store
-        .inner()
         .terminals
         .lock()
         .get(&id)
@@ -341,14 +334,12 @@ pub async fn terminal_attach(
 }
 
 /// Send input.
-#[tauri::command]
 pub async fn terminal_write(
-    store: State<'_, TerminalStore>,
+    store: &TerminalStore,
     id: String,
     data: String,
 ) -> Result<(), String> {
     let terminal = store
-        .inner()
         .terminals
         .lock()
         .get(&id)
@@ -359,15 +350,13 @@ pub async fn terminal_write(
 }
 
 /// Report a new size, so full-screen programs redraw correctly.
-#[tauri::command]
 pub async fn terminal_resize(
-    store: State<'_, TerminalStore>,
+    store: &TerminalStore,
     id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
     let terminal = store
-        .inner()
         .terminals
         .lock()
         .get(&id)
@@ -393,9 +382,8 @@ pub async fn terminal_resize(
 /// Deliberately takes no target and no session name: there is nothing to say to
 /// the far side. That asymmetry with `terminal_close` is the safety property —
 /// this command has no path that can end a shell.
-#[tauri::command]
-pub async fn terminal_detach(store: State<'_, TerminalStore>, id: String) -> Result<(), String> {
-    if let Some(terminal) = store.inner().terminals.lock().remove(&id) {
+pub async fn terminal_detach(store: &TerminalStore, id: String) -> Result<(), String> {
+    if let Some(terminal) = store.terminals.lock().remove(&id) {
         // Already exited is success, not an error: the operator asked to stop
         // watching it, and it has stopped.
         let _ = terminal.kill();
@@ -404,15 +392,14 @@ pub async fn terminal_detach(store: State<'_, TerminalStore>, id: String) -> Res
 }
 
 /// Kill a terminal and forget it — on this machine *and* on the target.
-#[tauri::command]
-pub async fn terminal_close<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    store: State<'_, TerminalStore>,
+pub async fn terminal_close(
+    ctx: &Ctx,
+    store: &TerminalStore,
     id: String,
     target: Option<TargetRef>,
     session: Option<String>,
 ) -> Result<(), String> {
-    let terminal = store.inner().terminals.lock().remove(&id);
+    let terminal = store.terminals.lock().remove(&id);
     if let Some(terminal) = terminal {
         // A child that has already exited cannot be killed; that is success here,
         // not an error to report.
@@ -424,8 +411,8 @@ pub async fn terminal_close<R: tauri::Runtime>(
     // with it — without this, every closed tab leaks a shell that nothing can
     // ever reach again.
     if let (Some(target), Some(session)) = (target, session)
-        && let Ok(resolved) = resolve_target(store.inner(), &target).await
-        && let Ok(installed) = crate::agent::ensure_agent(&app, resolved.as_ref()).await
+        && let Ok(resolved) = resolve_target(store, &target).await
+        && let Ok(installed) = crate::agent::ensure_agent(ctx, resolved.as_ref()).await
     {
         {
             {
@@ -444,38 +431,34 @@ pub async fn terminal_close<R: tauri::Runtime>(
 }
 
 /// Pump a terminal's output into the webview.
-fn stream_to_channel(
-    terminal: Arc<Terminal>,
-    output: Channel<Response>,
-    lifecycle: Channel<Lifecycle>,
-) {
+fn stream_to_channel(terminal: Arc<Terminal>, output: Arc<dyn Sink>, lifecycle: Arc<dyn Sink>) {
     // Catch up and subscribe atomically, so the handover neither drops nor
     // duplicates a chunk. See `Terminal::attach`.
     let (backlog, mut receiver) = terminal.attach();
 
     if !backlog.is_empty() {
-        let _ = output.send(raw(backlog.to_vec()));
+        let _ = output.send_bytes(backlog.to_vec());
     }
 
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(TerminalEvent::Output(chunk)) => {
                     // A send failure means the webview went away (reload, window
                     // closed). Stop forwarding, but leave the PTY running — the
                     // session outlives its view by design.
-                    if output.send(raw(chunk.to_vec())).is_err() {
+                    if output.send_bytes(chunk.to_vec()).is_err() {
                         break;
                     }
                 }
                 Ok(TerminalEvent::Exited { code }) => {
-                    let _ = lifecycle.send(Lifecycle::Exited { code });
+                    let _ = send_lifecycle(lifecycle.as_ref(), &Lifecycle::Exited { code });
                     break;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(chunks)) => {
                     // Report rather than swallow: the screen is now missing bytes.
                     tracing::warn!(chunks, "terminal view fell behind; output dropped");
-                    let _ = lifecycle.send(Lifecycle::Lagged { chunks });
+                    let _ = send_lifecycle(lifecycle.as_ref(), &Lifecycle::Lagged { chunks });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -483,7 +466,140 @@ fn stream_to_channel(
     });
 }
 
-/// Wrap bytes so they cross the IPC boundary unencoded.
-fn raw(bytes: Vec<u8>) -> Response {
-    Response::new(InvokeResponseBody::Raw(bytes))
+/// A lifecycle message, as the JSON a typed `Channel<Lifecycle>` sent.
+fn send_lifecycle(sink: &dyn Sink, message: &Lifecycle) -> anyhow::Result<()> {
+    sink.send_json(serde_json::to_value(message)?)
+}
+
+// ── Registration ─────────────────────────────────────────────────────────────
+//
+// Argument objects, keyed exactly as `ui/src/components/Terminal.tsx`,
+// `ui/src/lib/workspace.ts` and `ui/src/lib/api.ts` send them. Channels arrive
+// as their `"__CHANNEL__:<n>"` id and are resolved on the invoking UI.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetArgs {
+    pub target: TargetRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMoshAutoInstallArgs {
+    pub on: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOpenArgs {
+    pub target: TargetRef,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub low_latency: Option<bool>,
+    pub cols: u16,
+    pub rows: u16,
+    pub output: String,
+    pub lifecycle: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalAttachArgs {
+    pub id: String,
+    pub output: String,
+    pub lifecycle: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalWriteArgs {
+    pub id: String,
+    pub data: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalResizeArgs {
+    pub id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// `terminal_detach` takes the id **and nothing else** — see its doc comment.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalDetachArgs {
+    pub id: String,
+}
+
+/// `terminal_close` takes a target and a session name because it carries an
+/// `agent kill`; both optional, as they were.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCloseArgs {
+    pub id: String,
+    #[serde(default)]
+    pub target: Option<TargetRef>,
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+fn sink(call: &Call, id: &str) -> Result<Arc<dyn Sink>, String> {
+    call.sink(id).map_err(err)
+}
+
+pub fn register(r: &mut Registry) {
+    r.add("low_latency_probe", Web::Yes, |call: Call, a: TargetArgs| async move {
+        low_latency_probe(&call.ctx().store::<TerminalStore>(), a.target).await
+    });
+    r.add("mosh_install_status", Web::Yes, |_, a: TargetArgs| mosh_install_status(a.target));
+    r.add("mosh_server_status", Web::Yes, |_, a: TargetArgs| async move {
+        Ok::<_, String>(mosh_server_status(a.target))
+    });
+    r.add("mosh_install_pending", Web::Yes, |_, a: TargetArgs| async move {
+        Ok::<_, String>(mosh_install_pending(a.target))
+    });
+    r.add("set_mosh_auto_install", Web::Yes, |_, a: SetMoshAutoInstallArgs| async move {
+        set_mosh_auto_install(a.on);
+        Ok::<_, String>(())
+    });
+    r.add("terminal_open", Web::Yes, |call: Call, a: TerminalOpenArgs| async move {
+        let output = sink(&call, &a.output)?;
+        let lifecycle = sink(&call, &a.lifecycle)?;
+        let store = call.ctx().store::<TerminalStore>();
+        terminal_open(
+            call.ctx(),
+            &store,
+            a.target,
+            a.cwd,
+            a.session,
+            a.low_latency,
+            a.cols,
+            a.rows,
+            output,
+            lifecycle,
+        )
+        .await
+    });
+    r.add("terminal_attach", Web::Yes, |call: Call, a: TerminalAttachArgs| async move {
+        let output = sink(&call, &a.output)?;
+        let lifecycle = sink(&call, &a.lifecycle)?;
+        terminal_attach(&call.ctx().store::<TerminalStore>(), a.id, output, lifecycle).await
+    });
+    r.add("terminal_write", Web::Yes, |call: Call, a: TerminalWriteArgs| async move {
+        terminal_write(&call.ctx().store::<TerminalStore>(), a.id, a.data).await
+    });
+    r.add("terminal_resize", Web::Yes, |call: Call, a: TerminalResizeArgs| async move {
+        terminal_resize(&call.ctx().store::<TerminalStore>(), a.id, a.cols, a.rows).await
+    });
+    r.add("terminal_detach", Web::Yes, |call: Call, a: TerminalDetachArgs| async move {
+        terminal_detach(&call.ctx().store::<TerminalStore>(), a.id).await
+    });
+    r.add("terminal_close", Web::Yes, |call: Call, a: TerminalCloseArgs| async move {
+        let store = call.ctx().store::<TerminalStore>();
+        terminal_close(call.ctx(), &store, a.id, a.target, a.session).await
+    });
 }

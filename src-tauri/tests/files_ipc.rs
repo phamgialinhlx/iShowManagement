@@ -14,24 +14,14 @@ use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponseBody};
 use tauri::test::{INVOKE_KEY, mock_builder};
 use tauri::webview::InvokeRequest;
 
+/// The app's real invoke handler: these commands live in `rmux-app`'s registry
+/// now, dispatched by the desktop bridge, with their stores in the shared `Ctx`.
 fn test_app() -> tauri::App<tauri::test::MockRuntime> {
     mock_builder()
-        .manage(rmux_lib::files::FsStore::default())
-        .manage(rmux_lib::metrics::MetricsStore::default())
-        .invoke_handler(tauri::generate_handler![
-            rmux_lib::files::fs_list,
-            rmux_lib::files::fs_read,
-            rmux_lib::files::fs_write,
-            rmux_lib::files::fs_home,
-            rmux_lib::files::fs_join,
-            rmux_lib::files::fs_parent,
-            rmux_lib::files::fs_create_file,
-            rmux_lib::files::fs_create_dir,
-            rmux_lib::files::fs_rename,
-            rmux_lib::files::fs_delete,
-            rmux_lib::files::ssh_config_hosts,
-            rmux_lib::metrics::metrics_sample,
-        ])
+        .invoke_handler(rmux_lib::bridge::invoke_handler(
+            std::sync::Arc::new(rmux_app::registry()),
+            tauri::generate_handler![rmux_lib::logs::log_status],
+        ))
         .build(tauri::generate_context!())
         .expect("failed to build test app")
 }

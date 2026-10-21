@@ -11,10 +11,12 @@ use rmux_claude::{ClaudeSession, ClaudeState, SessionInfo};
 use rmux_ssh::SshTarget;
 use rmux_term::{TermSize, TerminalEvent};
 use rmux_transport::{LocalTarget, Target, TargetId};
-use serde::Serialize;
-use tauri::State;
-use tauri::ipc::{Channel, InvokeResponseBody, Response};
+use serde::{Deserialize, Serialize};
 
+use crate::claude_status::ClaudeStatusStore;
+use crate::ctx::Ctx;
+use crate::host::Sink;
+use crate::registry::{Call, Registry, Web};
 use crate::terminal::TargetRef;
 
 #[derive(Default)]
@@ -58,7 +60,7 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-pub(crate) async fn resolve(store: &ClaudeStore, target: &TargetRef) -> Result<Arc<dyn Target>, String> {
+pub async fn resolve(store: &ClaudeStore, target: &TargetRef) -> Result<Arc<dyn Target>, String> {
     let id = target.id();
     if let Some(existing) = store.targets.lock().get(&id) {
         return Ok(Arc::clone(existing));
@@ -76,13 +78,12 @@ pub(crate) async fn resolve(store: &ClaudeStore, target: &TargetRef) -> Result<A
 }
 
 /// Claude sessions already recorded for a folder, newest first.
-#[tauri::command]
 pub async fn claude_list_sessions(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     target: TargetRef,
     folder: String,
 ) -> Result<Vec<SessionInfo>, String> {
-    let resolved = resolve(store.inner(), &target).await?;
+    let resolved = resolve(store, &target).await?;
     ClaudeSession::list(resolved.as_ref(), &folder).await.map_err(err)
 }
 
@@ -90,12 +91,11 @@ pub async fn claude_list_sessions(
 ///
 /// The folder comes back with each one, read from the transcript's own `cwd`, so
 /// resuming does not require having found the directory first.
-#[tauri::command]
 pub async fn claude_list_all_sessions(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     target: TargetRef,
 ) -> Result<Vec<SessionInfo>, String> {
-    let resolved = resolve(store.inner(), &target).await?;
+    let resolved = resolve(store, &target).await?;
     ClaudeSession::list_all(resolved.as_ref()).await.map_err(err)
 }
 
@@ -104,12 +104,11 @@ pub async fn claude_list_all_sessions(
 /// The pi twin of [`claude_list_all_sessions`]: the folder each one belongs to
 /// comes back on `cwd`, read from the transcript's own header, so a resume
 /// picker does not require the operator to have found the directory first.
-#[tauri::command]
 pub async fn pi_list_all_sessions(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     target: TargetRef,
 ) -> Result<Vec<rmux_claude::pi::Conversation>, String> {
-    let resolved = resolve(store.inner(), &target).await?;
+    let resolved = resolve(store, &target).await?;
     ClaudeSession::pi_list_all(resolved.as_ref()).await.map_err(err)
 }
 
@@ -118,15 +117,14 @@ pub async fn pi_list_all_sessions(
 /// Separate from the live session on purpose: this reads the transcript on disk,
 /// so it works for a conversation that is not running, and it is unaffected by
 /// whatever the TUI happens to be drawing right now.
-#[tauri::command]
 pub async fn claude_transcript(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     target: TargetRef,
     folder: String,
     session: Option<String>,
     tail_bytes: Option<u64>,
 ) -> Result<rmux_claude::transcript::Transcript, String> {
-    let resolved = resolve(store.inner(), &target).await?;
+    let resolved = resolve(store, &target).await?;
     let tail = tail_bytes.unwrap_or(rmux_claude::transcript::DEFAULT_TAIL_BYTES);
 
     let script = rmux_claude::transcript::transcript_script(&folder, session.as_deref(), tail);
@@ -146,15 +144,14 @@ pub async fn claude_transcript(
 /// pi keeps its transcripts in a cwd-encoded directory and names each file
 /// `<ISO-timestamp>_<id>.jsonl`. With no `session`, the newest conversation in
 /// `cwd` is read — "the latest", which is what you want having just talked to it.
-#[tauri::command]
 pub async fn pi_transcript(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     target: TargetRef,
     cwd: String,
     session: Option<String>,
     tail_bytes: Option<u64>,
 ) -> Result<rmux_claude::transcript::Transcript, String> {
-    let resolved = resolve(store.inner(), &target).await?;
+    let resolved = resolve(store, &target).await?;
     let tail = tail_bytes.unwrap_or(rmux_claude::transcript::DEFAULT_TAIL_BYTES);
 
     let script = rmux_claude::pi::transcript_script(&cwd, session.as_deref(), tail);
@@ -190,15 +187,14 @@ pub async fn pi_transcript(
 /// Needed to change rendering mode. The agent reattaches *by name*, so remounting
 /// the view alone would simply find the Claude already running under the old
 /// mode — the environment only applies when the session is created.
-#[tauri::command]
-pub async fn claude_end_session<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    store: State<'_, ClaudeStore>,
+pub async fn claude_end_session(
+    ctx: &Ctx,
+    store: &ClaudeStore,
     target: TargetRef,
     session_name: String,
 ) -> Result<(), String> {
-    let resolved = resolve(store.inner(), &target).await?;
-    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+    let resolved = resolve(store, &target).await?;
+    let installed = crate::agent::ensure_agent(ctx, resolved.as_ref()).await?;
 
     let spec = rmux_transport::CommandSpec::new(&installed.program)
         .arg("kill")
@@ -242,12 +238,11 @@ async fn ask_for_low_latency(
 }
 
 /// Launch `claude` and stream its screen to the UI.
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn claude_start<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    store: State<'_, ClaudeStore>,
-    status_store: State<'_, crate::claude_status::ClaudeStatusStore>,
+pub async fn claude_start(
+    ctx: &Ctx,
+    store: &ClaudeStore,
+    status_store: &ClaudeStatusStore,
     target: TargetRef,
     cwd: Option<String>,
     // `resume` carries the id of a conversation to continue instead of starting
@@ -281,9 +276,9 @@ pub async fn claude_start<R: tauri::Runtime>(
     low_latency: Option<bool>,
     cols: u16,
     rows: u16,
-    output: Channel<Response>,
+    output: Arc<dyn Sink>,
 ) -> Result<StartedSession, String> {
-    let resolved = resolve(store.inner(), &target).await?;
+    let resolved = resolve(store, &target).await?;
     let size = TermSize { cols, rows };
     // Desktop-launched Claude renders fullscreen by default. `None`/unset means
     // the operator never configured this session, so it gets the default; only an
@@ -313,7 +308,7 @@ pub async fn claude_start<R: tauri::Runtime>(
     // pre-agent behaviour and works.
     let agent_available = resolved.platform() != Some(rmux_transport::Platform::Windows);
     if agent_available {
-        crate::claude_account::apply_to_target(&app, resolved.as_ref()).await?;
+        crate::claude_account::apply_to_target(ctx, resolved.as_ref()).await?;
     }
 
     // Then the model profile, which may override the account's variables — a
@@ -323,7 +318,7 @@ pub async fn claude_start<R: tauri::Runtime>(
     // URL is still in its environment, and starting without clearing it would
     // run this session against the old provider while the UI showed Anthropic.
     if agent_available {
-        crate::model_profile::apply_to_target(&app, resolved.as_ref(), model_profile.as_deref())
+        crate::model_profile::apply_to_target(ctx, resolved.as_ref(), model_profile.as_deref())
             .await?;
     } else if model_profile.is_some() {
         // Silently ignoring a chosen provider would run the conversation against
@@ -342,13 +337,13 @@ pub async fn claude_start<R: tauri::Runtime>(
     // so what is lost is the *process* surviving, not the work.
     let session = Arc::new(match session_name.as_ref().filter(|_| agent_available) {
         Some(name) => {
-            let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+            let installed = crate::agent::ensure_agent(ctx, resolved.as_ref()).await?;
             // Push status for this host from now on, so the rail is driven by
             // change events rather than the per-pane screen-scrape poll. Cheap
             // and idempotent — a second session on the same host is a no-op.
             crate::claude_status::ensure_watch(
-                &app,
-                status_store.inner(),
+                ctx.host_arc(),
+                status_store,
                 Arc::clone(&resolved),
                 installed.program.clone(),
             );
@@ -377,7 +372,7 @@ pub async fn claude_start<R: tauri::Runtime>(
     });
 
     let id = session.terminal().id().to_owned();
-    store.inner().sessions.lock().insert(id.clone(), Arc::clone(&session));
+    store.sessions.lock().insert(id.clone(), Arc::clone(&session));
 
     stream_claude(Arc::clone(&session), output);
     Ok(StartedSession { id })
@@ -397,12 +392,11 @@ pub async fn claude_start<R: tauri::Runtime>(
 /// sets `RMUX_AGENT_BIN`/`RMUX_STATUS_KEY` on the launch line so pi publishes
 /// `~/.rmux/status/<name>.json`, and starts the same `ensure_watch` stream that
 /// carries it up to the rail.
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn pi_start<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    store: State<'_, ClaudeStore>,
-    status_store: State<'_, crate::claude_status::ClaudeStatusStore>,
+pub async fn pi_start(
+    ctx: &Ctx,
+    store: &ClaudeStore,
+    status_store: &ClaudeStatusStore,
     target: TargetRef,
     cwd: Option<String>,
     // Carries the id of a pi conversation to continue (`--session-id`); `None`
@@ -416,9 +410,9 @@ pub async fn pi_start<R: tauri::Runtime>(
     low_latency: Option<bool>,
     cols: u16,
     rows: u16,
-    output: Channel<Response>,
+    output: Arc<dyn Sink>,
 ) -> Result<StartedSession, String> {
-    let resolved = resolve(store.inner(), &target).await?;
+    let resolved = resolve(store, &target).await?;
     let size = TermSize { cols, rows };
 
     // pi runs under the agent so the conversation outlives rmux and reattaches
@@ -435,15 +429,15 @@ pub async fn pi_start<R: tauri::Runtime>(
         );
     };
 
-    let installed = crate::agent::ensure_agent(&app, resolved.as_ref()).await?;
+    let installed = crate::agent::ensure_agent(ctx, resolved.as_ref()).await?;
 
     // Push status for this host from now on. pi has no `~/.claude/sessions`
     // file, but its hook writes `~/.rmux/status/<key>.json`, which the agent's
     // `watch-status` stream already carries — so a pi-only host has nothing
     // streaming that directory until this runs. Idempotent per target.
     crate::claude_status::ensure_watch(
-        &app,
-        status_store.inner(),
+        ctx.host_arc(),
+        status_store,
         Arc::clone(&resolved),
         installed.program.clone(),
     );
@@ -520,7 +514,7 @@ pub async fn pi_start<R: tauri::Runtime>(
             .map_err(err)?);
 
     let id = session.terminal().id().to_owned();
-    store.inner().sessions.lock().insert(id.clone(), Arc::clone(&session));
+    store.sessions.lock().insert(id.clone(), Arc::clone(&session));
 
     stream_claude(Arc::clone(&session), output);
     Ok(StartedSession { id })
@@ -530,17 +524,16 @@ pub async fn pi_start<R: tauri::Runtime>(
 ///
 /// The raw screen always goes to an xterm view, so the operator sees exactly
 /// what Claude is showing rather than only our interpretation of it.
-fn stream_claude(session: Arc<ClaudeSession>, output: Channel<Response>) {
+fn stream_claude(session: Arc<ClaudeSession>, output: Arc<dyn Sink>) {
     let (backlog, mut receiver) = session.terminal().attach();
     if !backlog.is_empty() {
-        let _ = output.send(Response::new(InvokeResponseBody::Raw(backlog.to_vec())));
+        let _ = output.send_bytes(backlog.to_vec());
     }
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(TerminalEvent::Output(chunk)) => {
-                    if output.send(Response::new(InvokeResponseBody::Raw(chunk.to_vec()))).is_err()
-                    {
+                    if output.send_bytes(chunk.to_vec()).is_err() {
                         break;
                     }
                 }
@@ -557,13 +550,12 @@ fn stream_claude(session: Arc<ClaudeSession>, output: Channel<Response>) {
 /// A view that remounts must reattach, not start over. Starting over would kill
 /// a conversation mid-task and lose its context — the exact opposite of what a
 /// session is for.
-#[tauri::command]
 pub async fn claude_attach(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     id: String,
-    output: Channel<Response>,
+    output: Arc<dyn Sink>,
 ) -> Result<(), String> {
-    let session = session(store.inner(), &id)?;
+    let session = session(store, &id)?;
     stream_claude(session, output);
     Ok(())
 }
@@ -592,53 +584,256 @@ pub struct PolledState {
 }
 
 /// What Claude is showing. Polled by the UI.
-#[tauri::command]
 pub async fn claude_state(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     id: String,
 ) -> Result<PolledState, String> {
-    let session = session(store.inner(), &id)?;
+    let session = session(store, &id)?;
     Ok(PolledState { state: session.state(), exited: session.terminal().exit_code() })
 }
 
-#[tauri::command]
 pub async fn claude_send(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     id: String,
     text: String,
 ) -> Result<(), String> {
-    session(store.inner(), &id)?.send(&text).await.map_err(err)
+    session(store, &id)?.send(&text).await.map_err(err)
 }
 
-#[tauri::command]
-pub async fn claude_interrupt(store: State<'_, ClaudeStore>, id: String) -> Result<(), String> {
-    session(store.inner(), &id)?.interrupt().map_err(err)
+pub async fn claude_interrupt(store: &ClaudeStore, id: String) -> Result<(), String> {
+    session(store, &id)?.interrupt().map_err(err)
 }
 
-#[tauri::command]
 pub async fn claude_resize(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    session(store.inner(), &id)?.resize(TermSize { cols, rows }).map_err(err)
+    session(store, &id)?.resize(TermSize { cols, rows }).map_err(err)
 }
 
 /// Raw keystrokes, for typing directly into Claude's own TUI.
-#[tauri::command]
 pub async fn claude_write(
-    store: State<'_, ClaudeStore>,
+    store: &ClaudeStore,
     id: String,
     data: String,
 ) -> Result<(), String> {
-    session(store.inner(), &id)?.terminal().write(data.as_bytes()).map_err(err)
+    session(store, &id)?.terminal().write(data.as_bytes()).map_err(err)
 }
 
-#[tauri::command]
-pub async fn claude_stop(store: State<'_, ClaudeStore>, id: String) -> Result<(), String> {
-    if let Some(session) = store.inner().sessions.lock().remove(&id) {
+pub async fn claude_stop(store: &ClaudeStore, id: String) -> Result<(), String> {
+    if let Some(session) = store.sessions.lock().remove(&id) {
         let _ = session.terminal().kill();
     }
     Ok(())
+}
+
+// ── Registration ─────────────────────────────────────────────────────────────
+//
+// Argument objects, keyed exactly as `ui/src/components/ClaudePanel.tsx` and
+// `ui/src/lib/api.ts` send them. The output channel arrives as its
+// `"__CHANNEL__:<n>"` id and is resolved on the invoking UI.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSessionsArgs {
+    pub target: TargetRef,
+    pub folder: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetArgs {
+    pub target: TargetRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptArgs {
+    pub target: TargetRef,
+    pub folder: String,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub tail_bytes: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiTranscriptArgs {
+    pub target: TargetRef,
+    pub cwd: String,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub tail_bytes: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndSessionArgs {
+    pub target: TargetRef,
+    pub session_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeStartArgs {
+    pub target: TargetRef,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub resume: Option<String>,
+    #[serde(default)]
+    pub session_name: Option<String>,
+    #[serde(default)]
+    pub fullscreen: Option<bool>,
+    #[serde(default)]
+    pub skip_permissions: Option<bool>,
+    #[serde(default)]
+    pub model_profile: Option<String>,
+    #[serde(default)]
+    pub low_latency: Option<bool>,
+    pub cols: u16,
+    pub rows: u16,
+    pub output: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiStartArgs {
+    pub target: TargetRef,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub resume: Option<String>,
+    #[serde(default)]
+    pub session_name: Option<String>,
+    #[serde(default)]
+    pub low_latency: Option<bool>,
+    pub cols: u16,
+    pub rows: u16,
+    pub output: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachArgs {
+    pub id: String,
+    pub output: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdArgs {
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendArgs {
+    pub id: String,
+    pub text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteArgs {
+    pub id: String,
+    pub data: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResizeArgs {
+    pub id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+fn store_of(call: &Call) -> Arc<ClaudeStore> {
+    call.ctx().store::<ClaudeStore>()
+}
+
+pub fn register(r: &mut Registry) {
+    r.add("claude_list_sessions", Web::Yes, |call: Call, a: ListSessionsArgs| async move {
+        claude_list_sessions(&store_of(&call), a.target, a.folder).await
+    });
+    r.add("claude_list_all_sessions", Web::Yes, |call: Call, a: TargetArgs| async move {
+        claude_list_all_sessions(&store_of(&call), a.target).await
+    });
+    r.add("pi_list_all_sessions", Web::Yes, |call: Call, a: TargetArgs| async move {
+        pi_list_all_sessions(&store_of(&call), a.target).await
+    });
+    r.add("claude_transcript", Web::Yes, |call: Call, a: TranscriptArgs| async move {
+        claude_transcript(&store_of(&call), a.target, a.folder, a.session, a.tail_bytes).await
+    });
+    r.add("pi_transcript", Web::Yes, |call: Call, a: PiTranscriptArgs| async move {
+        pi_transcript(&store_of(&call), a.target, a.cwd, a.session, a.tail_bytes).await
+    });
+    r.add("claude_end_session", Web::Yes, |call: Call, a: EndSessionArgs| async move {
+        claude_end_session(call.ctx(), &store_of(&call), a.target, a.session_name).await
+    });
+    r.add("claude_start", Web::Yes, |call: Call, a: ClaudeStartArgs| async move {
+        let output = call.sink(&a.output).map_err(err)?;
+        let status = call.ctx().store::<ClaudeStatusStore>();
+        claude_start(
+            call.ctx(),
+            &store_of(&call),
+            &status,
+            a.target,
+            a.cwd,
+            a.resume,
+            a.session_name,
+            a.fullscreen,
+            a.skip_permissions,
+            a.model_profile,
+            a.low_latency,
+            a.cols,
+            a.rows,
+            output,
+        )
+        .await
+    });
+    r.add("pi_start", Web::Yes, |call: Call, a: PiStartArgs| async move {
+        let output = call.sink(&a.output).map_err(err)?;
+        let status = call.ctx().store::<ClaudeStatusStore>();
+        pi_start(
+            call.ctx(),
+            &store_of(&call),
+            &status,
+            a.target,
+            a.cwd,
+            a.resume,
+            a.session_name,
+            a.low_latency,
+            a.cols,
+            a.rows,
+            output,
+        )
+        .await
+    });
+    r.add("claude_attach", Web::Yes, |call: Call, a: AttachArgs| async move {
+        let output = call.sink(&a.output).map_err(err)?;
+        claude_attach(&store_of(&call), a.id, output).await
+    });
+    r.add("claude_state", Web::Yes, |call: Call, a: IdArgs| async move {
+        claude_state(&store_of(&call), a.id).await
+    });
+    r.add("claude_send", Web::Yes, |call: Call, a: SendArgs| async move {
+        claude_send(&store_of(&call), a.id, a.text).await
+    });
+    r.add("claude_interrupt", Web::Yes, |call: Call, a: IdArgs| async move {
+        claude_interrupt(&store_of(&call), a.id).await
+    });
+    r.add("claude_resize", Web::Yes, |call: Call, a: ResizeArgs| async move {
+        claude_resize(&store_of(&call), a.id, a.cols, a.rows).await
+    });
+    r.add("claude_write", Web::Yes, |call: Call, a: WriteArgs| async move {
+        claude_write(&store_of(&call), a.id, a.data).await
+    });
+    r.add("claude_stop", Web::Yes, |call: Call, a: IdArgs| async move {
+        claude_stop(&store_of(&call), a.id).await
+    });
 }

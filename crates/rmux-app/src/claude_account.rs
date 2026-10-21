@@ -5,6 +5,10 @@
 //! agent, so a new server is usable immediately instead of needing its own
 //! browser login.
 //!
+//! On a host with no credential store ([`Host::secrets`] is `None`) nothing is
+//! stored, which is the correct answer: Claude then signs in with whatever login
+//! the host already has, exactly as it does for an operator who never set one.
+//!
 //! **The token is never an argument and never written to a remote disk.** `ps`
 //! shows one user's command line to every account on a machine, and a credential
 //! file outlives the session that needed it. It goes over the agent's `0600`
@@ -13,10 +17,13 @@
 
 use rmux_claude::auth;
 use rmux_transport::{CommandSpec, Target, Tty};
-use serde::Serialize;
-use tauri::State;
+use serde::{Deserialize, Serialize};
 
 use crate::claude::ClaudeStore;
+use crate::ctx::Ctx;
+use crate::host::Host;
+use crate::registry::{Call, NoArgs, Registry, Web};
+use crate::secrets::{LEGACY_CLAUDE_SERVICE, NO_STORE, read_migrating};
 use crate::terminal::TargetRef;
 
 /// Keychain slot. Distinct from the Cowork session entry — different credential,
@@ -48,24 +55,19 @@ pub struct AccountStatus {
     pub usage_available: bool,
 }
 
-fn entry(slot: &str) -> anyhow::Result<keyring::Entry> {
-    Ok(keyring::Entry::new(SERVICE, slot)?)
-}
-
-fn stored(slot: &str) -> Option<String> {
+fn stored(host: &dyn Host, slot: &str) -> Option<String> {
     // Falls back to the pre-rename service name, so an upgrade does not lose
-    // the account the operator already signed in with. See `keychain`.
-    crate::keychain::read_migrating(SERVICE, crate::keychain::LEGACY_CLAUDE_SERVICE, slot)
-        .filter(|t| !t.is_empty())
+    // the account the operator already signed in with. See `secrets`.
+    read_migrating(host.secrets()?, SERVICE, LEGACY_CLAUDE_SERVICE, slot).filter(|t| !t.is_empty())
 }
 
-fn stored_token() -> Option<String> {
-    stored(ACCOUNT)
+fn stored_token(host: &dyn Host) -> Option<String> {
+    stored(host, ACCOUNT)
 }
 
-fn status_now() -> AccountStatus {
-    let usage_available = stored(ADMIN_ACCOUNT).is_some();
-    match stored_token() {
+fn status_now(host: &dyn Host) -> AccountStatus {
+    let usage_available = stored(host, ADMIN_ACCOUNT).is_some();
+    match stored_token(host) {
         Some(token) => AccountStatus {
             connected: true,
             hint: Some(auth::redact(&token)),
@@ -84,14 +86,12 @@ fn status_now() -> AccountStatus {
 }
 
 /// Is an account stored, and which one.
-#[tauri::command]
-pub async fn claude_account_status() -> Result<AccountStatus, String> {
-    Ok(status_now())
+pub async fn claude_account_status(host: &dyn Host) -> Result<AccountStatus, String> {
+    Ok(status_now(host))
 }
 
 /// Store a token captured from the login flow.
-#[tauri::command]
-pub async fn claude_account_save(token: String) -> Result<AccountStatus, String> {
+pub async fn claude_account_save(host: &dyn Host, token: String) -> Result<AccountStatus, String> {
     let token = token.trim().to_owned();
     if token.is_empty() {
         return Err("no credential was provided".to_owned());
@@ -106,35 +106,38 @@ pub async fn claude_account_save(token: String) -> Result<AccountStatus, String>
     // slot that gets shipped to hosts.
     let slot = if kind == auth::CredentialKind::AdminKey { ADMIN_ACCOUNT } else { ACCOUNT };
 
-    entry(slot)
-        .and_then(|e| Ok(e.set_password(&token)?))
+    host.secrets()
+        .ok_or_else(|| anyhow::anyhow!(NO_STORE))
+        .and_then(|secrets| secrets.set(SERVICE, slot, &token))
         .map_err(|e| format!("could not store the credential: {e}"))?;
 
-    Ok(status_now())
+    Ok(status_now(host))
 }
 
 /// Forget the stored account.
-#[tauri::command]
-pub async fn claude_account_forget() -> Result<AccountStatus, String> {
-    for slot in [ACCOUNT, ADMIN_ACCOUNT] {
-        if let Ok(entry) = entry(slot) {
-            // Already absent is the outcome being asked for, not an error.
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => {}
-                Err(e) => return Err(format!("could not remove the credential: {e}")),
+pub async fn claude_account_forget(host: &dyn Host) -> Result<AccountStatus, String> {
+    // No store means nothing is stored, which is the outcome being asked for.
+    if let Some(secrets) = host.secrets() {
+        for slot in [ACCOUNT, ADMIN_ACCOUNT] {
+            // Already absent is the outcome being asked for, not an error —
+            // `SecretStore::delete` reports a missing entry as success.
+            if let Err(e) = secrets.delete(SERVICE, slot) {
+                return Err(format!("could not remove the credential: {e}"));
             }
         }
     }
-    Ok(status_now())
+    Ok(status_now(host))
 }
 
 /// The organisation's real usage, from the Console Admin API.
 ///
 /// On demand, never polled: it is a billing API, and this is a number that
 /// changes on the scale of hours.
-#[tauri::command]
-pub async fn claude_usage_report(days: Option<u32>) -> Result<rmux_claude::usage::UsageReport, String> {
-    let admin_key = stored(ADMIN_ACCOUNT)
+pub async fn claude_usage_report(
+    host: &dyn Host,
+    days: Option<u32>,
+) -> Result<rmux_claude::usage::UsageReport, String> {
+    let admin_key = stored(host, ADMIN_ACCOUNT)
         .ok_or_else(|| "add an admin key (sk-ant-admin…) to read organisation usage".to_owned())?;
 
     let days = days.unwrap_or(7).clamp(1, 31);
@@ -178,11 +181,8 @@ fn rfc3339(unix_seconds: u64) -> String {
 /// Called before a Claude session starts. Silent when no account is stored —
 /// that is the ordinary case for someone already logged in on the host, and
 /// failing there would break a setup that works.
-pub async fn apply_to_target<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    target: &dyn Target,
-) -> Result<(), String> {
-    let Some(token) = stored_token() else {
+pub async fn apply_to_target(ctx: &Ctx, target: &dyn Target) -> Result<(), String> {
+    let Some(token) = stored_token(ctx.host()) else {
         return Ok(());
     };
 
@@ -196,7 +196,7 @@ pub async fn apply_to_target<R: tauri::Runtime>(
         return Err("an admin key cannot be used to run sessions".to_owned());
     };
 
-    let installed = crate::agent::ensure_agent(app, target).await?;
+    let installed = crate::agent::ensure_agent(ctx, target).await?;
     let spec = CommandSpec::new(&installed.program).arg("setenv").tty(Tty::None);
 
     // Over **stdin**. As an argument it would be in this host's `ps` output for
@@ -216,15 +216,52 @@ pub async fn apply_to_target<R: tauri::Runtime>(
 /// then prints the token — so this is driven from the UI as a terminal rather
 /// than captured in one shot. This command exists to *start* it; the UI watches
 /// the stream for the URL and the token using `rmux_claude::auth`.
-#[tauri::command]
-pub async fn claude_login_command(
-    store: State<'_, ClaudeStore>,
-    target: TargetRef,
-) -> Result<String, String> {
+pub async fn claude_login_command(store: &ClaudeStore, target: TargetRef) -> Result<String, String> {
     // Resolving proves the target is reachable before the UI opens a login view
     // that could only fail.
-    let _ = crate::claude::resolve(store.inner(), &target).await?;
+    let _ = crate::claude::resolve(store, &target).await?;
     Ok(auth::setup_token_command())
+}
+
+// ── Registration ─────────────────────────────────────────────────────────────
+//
+// Argument objects, keyed exactly as `ui/src/lib/api.ts` sends them.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveArgs {
+    pub token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageArgs {
+    #[serde(default)]
+    pub days: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetArgs {
+    pub target: TargetRef,
+}
+
+pub fn register(r: &mut Registry) {
+    r.add("claude_account_status", Web::Yes, |call: Call, _: NoArgs| async move {
+        claude_account_status(call.ctx().host()).await
+    });
+    r.add("claude_account_save", Web::Yes, |call: Call, a: SaveArgs| async move {
+        claude_account_save(call.ctx().host(), a.token).await
+    });
+    r.add("claude_account_forget", Web::Yes, |call: Call, _: NoArgs| async move {
+        claude_account_forget(call.ctx().host()).await
+    });
+    r.add("claude_login_command", Web::Yes, |call: Call, a: TargetArgs| async move {
+        claude_login_command(&call.ctx().store::<ClaudeStore>(), a.target).await
+    });
+    r.add("claude_usage_report", Web::Yes, |call: Call, a: UsageArgs| async move {
+        claude_usage_report(call.ctx().host(), a.days).await
+    });
 }
 
 #[cfg(test)]

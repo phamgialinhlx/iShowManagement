@@ -314,7 +314,7 @@ fn forwards_and_the_socks_proxy_spawn_ssh_directly() {
 }
 
 /// **The image paste is the one that cannot be driven from here**, because it
-/// lives in `src-tauri`. It is also the one where a regression would be worst:
+/// lives in `rmux-app` (moved there from `src-tauri`). It is also the one where a regression would be worst:
 /// a screenshot is routinely a megabyte, `ARG_MAX` caps a single argument at
 /// 128 KiB, and mosh has no binary-safe stdin — so the bytes have to keep
 /// going through `exec_with_input` on a `Tty::None` spec, which is the ssh
@@ -322,7 +322,7 @@ fn forwards_and_the_socks_proxy_spawn_ssh_directly() {
 /// place this crate can reach it.
 #[test]
 fn the_image_paste_still_pipes_its_bytes_through_a_one_shot() {
-    let source = include_str!("../../../src-tauri/src/paste.rs");
+    let source = include_str!("../../rmux-app/src/paste.rs");
 
     assert!(source.contains("exec_with_input"), "the paste stopped piping its bytes");
     assert!(source.contains("Tty::None"), "the paste stopped being a one-shot");

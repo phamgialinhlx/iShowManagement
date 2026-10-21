@@ -92,6 +92,20 @@ pub fn ctx<R: Runtime>(app: &AppHandle<R>) -> Arc<Ctx> {
     }
 }
 
+/// One of the shared stores (`TerminalStore`, `ClaudeStore`, …) for
+/// desktop-only code — `server_disconnect`, redstone, tunnels, control.
+///
+/// **Always through the [`Ctx`], never `tauri::State`.** Those stores are what
+/// the registry's commands use; a second, Tauri-managed copy would be a cache
+/// nobody else reads, and a disconnect that evicts it would evict nothing.
+pub fn store<T, R>(app: &AppHandle<R>) -> Arc<T>
+where
+    T: Default + Send + Sync + 'static,
+    R: Runtime,
+{
+    ctx(app).store::<T>()
+}
+
 /// Channel ids resolved on the webview that invoked the command.
 struct WebviewSinks<R: Runtime>(Webview<R>);
 

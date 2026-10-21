@@ -12,8 +12,9 @@
 use rmux_ssh::keys::{self, Installed};
 use rmux_ssh::SshTarget;
 use rmux_transport::{Target, TargetId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::registry::{Registry, Web};
 use crate::terminal::TargetRef;
 
 #[derive(Serialize)]
@@ -32,7 +33,6 @@ fn home() -> Result<std::path::PathBuf, String> {
 }
 
 /// Is there already an rmux key for this host?
-#[tauri::command]
 pub async fn ssh_key_status(target: TargetRef) -> Result<KeyOffer, String> {
     let TargetId::Ssh(host) = target.id() else {
         // The local machine has nothing to authenticate to.
@@ -54,7 +54,6 @@ pub async fn ssh_key_status(target: TargetRef) -> Result<KeyOffer, String> {
 /// Runs over the connection the operator has *already* authenticated, which is
 /// what makes this work at all: the password they just typed is what authorises
 /// writing `authorized_keys`, and it is never asked for again afterwards.
-#[tauri::command]
 pub async fn ssh_key_install(target: TargetRef) -> Result<String, String> {
     let TargetId::Ssh(host) = target.id() else {
         return Err("this machine needs no key".into());
@@ -77,4 +76,17 @@ pub async fn ssh_key_install(target: TargetRef) -> Result<String, String> {
         Installed::Added => format!("key added to {}", host.label()),
         Installed::AlreadyPresent => format!("{} already had this key", host.label()),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetArgs {
+    pub target: TargetRef,
+}
+
+pub fn register(r: &mut Registry) {
+    // On the web, "this machine" is the dev host rmux-web runs on — which is the
+    // ssh client there, so a key it generates is the key its connections offer.
+    r.add("ssh_key_status", Web::Yes, |_, a: TargetArgs| ssh_key_status(a.target));
+    r.add("ssh_key_install", Web::Yes, |_, a: TargetArgs| ssh_key_install(a.target));
 }

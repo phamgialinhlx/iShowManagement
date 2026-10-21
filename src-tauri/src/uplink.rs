@@ -31,8 +31,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio::sync::Mutex;
 
-use crate::claude::ClaudeStore;
-use crate::terminal::TargetRef;
+use rmux_app::TargetRef;
+use rmux_app::claude::ClaudeStore;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,8 +76,8 @@ curl -s -m 4 https://ipinfo.io/json 2>/dev/null || true
 
 #[tauri::command]
 pub async fn host_uplink(
+    app: tauri::AppHandle,
     store: State<'_, UplinkStore>,
-    claude_store: State<'_, ClaudeStore>,
     target: TargetRef,
     // Ignore the cache — the operator pressed refresh.
     refresh: Option<bool>,
@@ -90,7 +90,8 @@ pub async fn host_uplink(
         return Ok(cached.clone());
     }
 
-    let resolved = crate::claude::resolve(&claude_store, &target).await?;
+    let claude_store = crate::bridge::store::<ClaudeStore, _>(&app);
+    let resolved = rmux_app::claude::resolve(&claude_store, &target).await?;
     let out = resolved
         .exec(&CommandSpec::new("sh").arg("-c").arg(SCRIPT).tty(Tty::None))
         .await

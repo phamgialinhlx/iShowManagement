@@ -27,9 +27,22 @@ mod ctx;
 mod host;
 mod registry;
 
+pub mod agent;
+pub mod bench;
+pub mod claude;
+pub mod claude_account;
+pub mod claude_status;
 pub mod commands;
+pub mod files;
 pub mod git;
+pub mod metrics;
+pub mod model_profile;
+pub mod paste;
+pub mod secrets;
+pub mod services;
+pub mod ssh_keys;
 pub mod target;
+pub mod terminal;
 
 pub use ctx::Ctx;
 pub use host::{Host, SecretStore, Sink, SinkResolver};
@@ -45,5 +58,15 @@ pub fn registry() -> Registry {
     let mut r = Registry::new();
     commands::register(&mut r);
     git::register(&mut r);
+    terminal::register(&mut r);
+    files::register(&mut r);
+    ssh_keys::register(&mut r);
+    metrics::register(&mut r);
+    services::register(&mut r);
+    claude::register(&mut r);
+    claude_status::register(&mut r);
+    paste::register(&mut r);
+    model_profile::register(&mut r);
+    claude_account::register(&mut r);
     r
 }

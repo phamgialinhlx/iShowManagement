@@ -192,7 +192,9 @@ fn no_command_is_both_registered_and_in_the_fallback() {
     let fallback = fallback_names();
     // If the parse silently found nothing, an empty intersection proves nothing.
     assert!(fallback.len() > 50, "only {} fallback names parsed — the scan is wrong", fallback.len());
-    assert!(fallback.iter().any(|n| n == "terminal_open"), "{fallback:?}");
+    // A name known to be desktop-only, so a scan that parsed the wrong list
+    // fails here. (`terminal_open` served this role until it moved to rmux-app.)
+    assert!(fallback.iter().any(|n| n == "server_disconnect"), "{fallback:?}");
 
     let registry = rmux_app::registry();
     let both: Vec<_> = fallback.iter().filter(|n| registry.contains(n)).collect();
