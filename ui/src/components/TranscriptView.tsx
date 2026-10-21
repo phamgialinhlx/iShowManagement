@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { api, isTauri, type TargetRef, type Transcript, type TranscriptEntry } from "../lib/api";
+import { api, hasBackend, type TargetRef, type Transcript, type TranscriptEntry } from "../lib/api";
 import { MARKDOWN_COMPONENTS } from "../lib/markdown-code";
 import { useWorkspace } from "../lib/workspace";
 import { bench } from "../lib/debug-log";
@@ -188,8 +188,8 @@ export function TranscriptView({
   const pendingRef = useRef(false);
 
   const load = useCallback(async () => {
-    if (!isTauri()) {
-      setError("Transcripts need the rmux desktop shell.");
+    if (!hasBackend()) {
+      setError("Transcripts need the rmux desktop app or rmux-web.");
       return;
     }
     setLoading(true);

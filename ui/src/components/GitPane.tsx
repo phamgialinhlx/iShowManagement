@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 
-import { api, isTauri, type GitChange, type GitCommit, type GitStatus } from "../lib/api";
+import { api, hasBackend, type GitChange, type GitCommit, type GitStatus } from "../lib/api";
 import { initMonaco, languageForPath, THEME_NAME } from "../lib/monaco";
 import { readMonoStack } from "../lib/fonts";
 import { useWorkspace } from "../lib/workspace";
@@ -118,7 +118,7 @@ export function GitPane({ projectId }: { projectId: string }) {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    if (!isTauri() || !folder) return;
+    if (!hasBackend() || !folder) return;
     setBusy(true);
     setError(null);
     try {

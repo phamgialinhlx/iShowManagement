@@ -15,6 +15,7 @@ members = [
     "crates/rmux-bridge",
     "crates/rmux-cowork",
     "crates/rmux-core",
+    "crates/rmux-app",
     "askpass",
     "src-tauri",
 ]
@@ -42,6 +43,7 @@ rmux-control = { path = "crates/rmux-control" }
 rmux-bridge = { path = "crates/rmux-bridge" }
 rmux-cowork = { path = "crates/rmux-cowork" }
 rmux-core = { path = "crates/rmux-core" }
+rmux-app = { path = "crates/rmux-app" }
 
 # --- async / runtime ---
 tokio = { version = "1", features = ["full"] }

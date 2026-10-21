@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/bridge";
 
 import { useWorkspace } from "../lib/workspace";
 import { isFocusDeck, layoutPanes } from "../lib/grid";

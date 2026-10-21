@@ -1,4 +1,4 @@
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "./bridge";
 
 import { api, isTauri } from "./api";
 import { useWorkspace } from "./workspace";

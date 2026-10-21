@@ -1,0 +1,24 @@
+[package]
+name = "rmux-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "rmux's command implementations, free of any GUI shell — driven by the desktop app and by rmux-web alike"
+
+# **No `tauri`, in any form, ever.** This crate is cross-compiled to
+# linux-musl for a headless server (rmux-web), where there is no webview to
+# link. Anything that needs the shell around it goes through `Host` or `Sink`.
+[dependencies]
+rmux-transport.workspace = true
+rmux-ssh.workspace = true
+rmux-git.workspace = true
+
+anyhow.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

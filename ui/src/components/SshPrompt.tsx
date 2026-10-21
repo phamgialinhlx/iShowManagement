@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, listen } from "../lib/bridge";
 
 import { hostFromPrompt, passwordUsed } from "../lib/ssh-key-offer";
 

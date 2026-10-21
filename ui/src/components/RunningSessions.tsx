@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 
-import { api, isTauri, type AgentSession, type TargetRef } from "../lib/api";
+import { api, hasBackend, type AgentSession, type TargetRef } from "../lib/api";
 import { PanelLoader } from "./PanelLoader";
 import { useWorkspace } from "../lib/workspace";
 import { isClaudeSession, reattachName, type ServerId } from "../lib/workspace-model";
@@ -60,8 +60,8 @@ export function RunningSessions({
   // list that matters is the one in front of you when you choose, and a refresh
   // under the pointer would move the row being aimed at.
   useEffect(() => {
-    if (!isTauri()) {
-      setError("Running sessions need the rmux desktop shell.");
+    if (!hasBackend()) {
+      setError("Running sessions need the rmux desktop app or rmux-web.");
       return;
     }
     let cancelled = false;

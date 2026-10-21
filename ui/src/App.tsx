@@ -5,7 +5,7 @@ import { SshPrompt } from "./components/SshPrompt";
 import { SshKeyOffer } from "./components/SshKeyOffer";
 import { LockScreen } from "./components/LockScreen";
 import { SERVER_KEY } from "./components/SignIn";
-import { api, isTauri, type LockStatus, type SignedIn, type Unlocked } from "./lib/api";
+import { api, hasBackend, isTauri, type LockStatus, type SignedIn, type Unlocked } from "./lib/api";
 import { startControlBridge } from "./lib/control";
 import { startNotifications } from "./lib/notify";
 
@@ -118,8 +118,8 @@ export function App() {
       <Workbench session={session} onSession={setSession} />
       {/* Mounted above everything: ssh can ask for a credential at any moment,
           including while signed out and working locally. */}
-      {isTauri() && <SshPrompt />}
-      {isTauri() && <SshKeyOffer />}
+      {hasBackend() && <SshPrompt />}
+      {hasBackend() && <SshKeyOffer />}
     </>
   );
 }

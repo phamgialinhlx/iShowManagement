@@ -3465,6 +3465,7 @@ dependencies = [
  "portable-pty",
  "reqwest 0.12.28",
  "rmux-agent",
+ "rmux-app",
  "rmux-bridge",
  "rmux-claude",
  "rmux-control",
@@ -3511,6 +3512,21 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rmux-app"
+version = "0.2.25"
+dependencies = [
+ "anyhow",
+ "parking_lot",
+ "rmux-git",
+ "rmux-ssh",
+ "rmux-transport",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

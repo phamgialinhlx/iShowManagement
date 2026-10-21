@@ -13,7 +13,7 @@ import { JiraProgress } from "./widgets/JiraProgress";
 
 import {
   api,
-  isTauri,
+  hasBackend,
   type ClaudeStatus,
   type MetricsSample,
   type TokenUsage,
@@ -201,7 +201,7 @@ function useHostSample(target: TargetRef, enabled: boolean) {
 
   useEffect(() => {
     if (!enabled) return;
-    if (!isTauri()) return;
+    if (!hasBackend()) return;
     let cancelled = false;
 
     const tick = async () => {
@@ -399,7 +399,7 @@ function UsageWidget({
   const sessionStatus = useWorkspace((s) => s.runtime[session.id]?.status ?? "idle");
 
   const tick = useCallback(async () => {
-    if (!isTauri()) return;
+    if (!hasBackend()) return;
     try {
       // A small tail: the widget needs recent turns, not the whole history, and
       // this reads a file that can be hundreds of MB.

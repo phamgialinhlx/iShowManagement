@@ -41,3 +41,31 @@ pub fn read_migrating(service: &str, legacy: &str, slot: &str) -> Option<String>
     }
     Some(value)
 }
+
+/// The OS keychain as `rmux_app`'s [`SecretStore`](rmux_app::SecretStore).
+///
+/// A plain `(service, account)` mapping onto `keyring::Entry`. The legacy
+/// service migration above stays a desktop concern — it exists because *this*
+/// app's identifier was renamed, which a headless host never had.
+pub struct KeyringSecrets;
+
+impl rmux_app::SecretStore for KeyringSecrets {
+    fn get(&self, service: &str, account: &str) -> anyhow::Result<Option<String>> {
+        match keyring::Entry::new(service, account)?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn set(&self, service: &str, account: &str, value: &str) -> anyhow::Result<()> {
+        Ok(keyring::Entry::new(service, account)?.set_password(value)?)
+    }
+
+    fn delete(&self, service: &str, account: &str) -> anyhow::Result<()> {
+        match keyring::Entry::new(service, account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+}

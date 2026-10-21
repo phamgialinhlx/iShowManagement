@@ -5,7 +5,7 @@ import { useWorkspace } from "../lib/workspace";
 import { isClaudeSession, reattachName, type ServerId } from "../lib/workspace-model";
 import {
   api,
-  isTauri,
+  hasBackend,
   type AgentSession,
   type DockerReport,
   type Forward,
@@ -116,7 +116,7 @@ function Processes({ target }: { target: TargetRef }) {
   }, [target, by]);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasBackend()) return;
     void load();
     const timer = setInterval(load, REFRESH_MS);
     return () => clearInterval(timer);
@@ -284,7 +284,7 @@ function Ports({ target }: { target: TargetRef }) {
   }, [target]);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasBackend()) return;
     let cancelled = false;
 
     void api
@@ -506,7 +506,7 @@ function Docker({ target }: { target: TargetRef }) {
    * necessarily the last to arrive, so the list could go backwards.
    */
   const load = useCallback(async () => {
-    if (!isTauri() || inFlight.current) return;
+    if (!hasBackend() || inFlight.current) return;
     inFlight.current = true;
     try {
       setReport(await api.dockerContainers(target));
@@ -674,7 +674,7 @@ function Sessions({ target, serverId }: { target: TargetRef; serverId: ServerId 
   );
 
   const load = useCallback(async () => {
-    if (!isTauri()) return;
+    if (!hasBackend()) return;
     try {
       setRows(await api.hostSessions(target));
       setError(null);

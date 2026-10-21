@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./bridge";
 
 import { isTauri } from "./api";
 import { raiseAlert } from "./alerts";

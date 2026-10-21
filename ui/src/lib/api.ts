@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { hasBackend, invoke, isTauri } from "./bridge";
 
 import type { Theme } from "./theme";
 
@@ -259,16 +259,17 @@ function toApiError(e: unknown): ApiError {
   return new ApiError(String(e), false);
 }
 
-/** True when running inside the Tauri shell rather than a plain browser tab. */
-export const isTauri = (): boolean =>
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/** True when running inside the Tauri shell rather than a browser tab. Lives in
+ *  `bridge.ts`; re-exported here because every feature already imports it from
+ *  this module. Use it only for genuinely desktop-only features — for anything
+ *  that works in the web shell too, use `hasBackend`. */
+export { isTauri, hasBackend };
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  // Outside the Tauri shell there is no IPC bridge, and `invoke` fails deep in
-  // its internals with "Cannot read properties of undefined". Catching it here
-  // turns that into something that names the actual problem — the UI is meant to
-  // be runnable in a plain browser for design work, so this path gets hit often.
-  if (!isTauri()) {
+  // Outside both shells (a plain browser tab, used for design work) there is no
+  // backend, and the call fails with a message naming the actual problem rather
+  // than a network error from a server that is not there.
+  if (!hasBackend()) {
     throw new ApiError(
       `Not running in the rmux desktop shell — "${cmd}" is unavailable. Use \`pnpm tauri dev\`.`,
       false,

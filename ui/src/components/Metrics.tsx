@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { api, isTauri, type MetricsSample, type TargetRef } from "../lib/api";
+import { api, hasBackend, type MetricsSample, type TargetRef } from "../lib/api";
 
 /** Bytes as a compact human figure, e.g. "29.6G". */
 function humanBytes(bytes: number): string {
@@ -27,7 +27,7 @@ export function Metrics({ target }: { target: TargetRef }) {
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasBackend()) return;
 
     let cancelled = false;
     setSample(null);

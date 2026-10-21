@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion, useReducedMotion, useTime, useTransform, type MotionValue } from "motion/react";
 
-import { api, isTauri, type TargetRef, type UplinkInfo } from "../../lib/api";
+import { api, hasBackend, type TargetRef, type UplinkInfo } from "../../lib/api";
 
 /**
  * Where the machine is, and how to reach it.
@@ -26,7 +26,7 @@ export function Uplink({ target }: { target: TargetRef }) {
   const [busy, setBusy] = useState(false);
 
   const load = (refresh = false) => {
-    if (!isTauri()) return;
+    if (!hasBackend()) return;
     setBusy(true);
     api
       .hostUplink(target, refresh)

@@ -1,7 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke, listen, type UnlistenFn } from "./bridge";
 
-import { isTauri } from "./api";
+import { hasBackend } from "./api";
 import { bench } from "./debug-log";
 import { useWorkspace } from "./workspace";
 import { reattachName, type SessionStatus } from "./workspace-model";
@@ -102,7 +101,7 @@ let active = false;
 export function startStatusWatch(): () => void {
   // Guarded so importing/rendering in a non-Tauri context (a test) is inert, and
   // against a double-start (React StrictMode remounts the effect).
-  if (!isTauri() || active) return () => {};
+  if (!hasBackend() || active) return () => {};
   active = true;
 
   // Hosts whose push stream is live, and hosts whose agent cannot push. A

@@ -17,7 +17,7 @@
  * `initTheme`, because the file is always re-read over the cache.
  */
 
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "./bridge";
 
 import { SIGNAL_ROOM, BUILT_INS, deriveTokens, type Theme } from "./theme";
 import { api, isTauri, type ThemeState } from "./api";

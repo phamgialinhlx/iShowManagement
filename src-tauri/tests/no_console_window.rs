@@ -83,6 +83,15 @@ fn every_spawned_command_suppresses_the_console_window() {
         rust_files(&root.join(dir), &mut files);
     }
     assert!(files.len() > 10, "found only {} source files — the walk is wrong", files.len());
+    // **rmux-app is where command implementations now live** (moved out of
+    // `src-tauri/src` so rmux-web can serve them). It is under `crates/`, so the
+    // walk reaches it — pinned here so that narrowing `ROOTS` cannot quietly
+    // drop the code that spawns most of rmux's processes from this check.
+    let app_crate = root.join("crates/rmux-app/src");
+    assert!(
+        files.iter().any(|f| f.starts_with(&app_crate)),
+        "crates/rmux-app/src is not scanned — the moved commands escape this rule"
+    );
 
     let mut offenders: Vec<String> = Vec::new();
     let mut checked = 0usize;

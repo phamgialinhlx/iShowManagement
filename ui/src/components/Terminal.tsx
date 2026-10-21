@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "../lib/bridge";
 import "@xterm/xterm/css/xterm.css";
 
-import { isTauri, type TargetRef } from "../lib/api";
+import { hasBackend, type TargetRef } from "../lib/api";
 import { settleResize } from "../lib/terminal-resize";
 import { record } from "../lib/activity";
 import { attachImeReplace } from "../lib/ime-replace";
@@ -136,10 +136,11 @@ export function TerminalView({
     const host = hostRef.current;
     if (!host) return;
 
-    // A terminal needs the Tauri IPC bridge. Without it `new Channel()` throws,
-    // and an uncaught throw inside an effect unmounts the WHOLE React tree.
-    if (!isTauri()) {
-      setError("Terminals need the rmux desktop shell. Run `pnpm tauri dev`.");
+    // A terminal needs a backend — Tauri IPC or rmux-web (`lib/bridge.ts`). In a
+    // plain browser tab there is none, and an uncaught throw inside an effect
+    // unmounts the WHOLE React tree, so this says so instead of trying.
+    if (!hasBackend()) {
+      setError("Terminals need the rmux desktop app or rmux-web. Run `pnpm tauri dev`.");
       return;
     }
 

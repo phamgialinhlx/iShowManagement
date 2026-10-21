@@ -1,8 +1,8 @@
 import { create } from "zustand";
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./bridge";
 
-import { api, isTauri, type TargetRef } from "./api";
+import { api, hasBackend, type TargetRef } from "./api";
 import { bufferKey, type Buffer, type BufferKey } from "./buffers";
 import { companionKey, companionName, forget as forgetCompanion } from "./companion";
 import { deckId, isFocusDeck, parseDeck, type Deck, type SavedView } from "./grid";
@@ -532,7 +532,7 @@ export const useWorkspace = create<State>((set, get) => ({
   removeSession: (id) => {
     const state = get();
     const session = state.sessions.find((s) => s.id === id);
-    if (session && isTauri()) {
+    if (session && hasBackend()) {
       // The kill is the point — the shell/Claude runs under the agent and would
       // otherwise leak on the host. Reattach name and target are resolved the
       // same way an attach does, so the right session on the right host dies.
@@ -601,7 +601,7 @@ export const useWorkspace = create<State>((set, get) => ({
   detachSession: (id) => {
     const state = get();
     const session = state.sessions.find((s) => s.id === id);
-    if (session && isTauri()) {
+    if (session && hasBackend()) {
       // These take the **live handle**, not the session id: they are dropping a
       // local PTY, not naming something on the host. There is deliberately no
       // target and no session name in either call — a detach has nothing to say
@@ -731,7 +731,7 @@ export const useWorkspace = create<State>((set, get) => ({
     }));
     schedulePersist(get);
 
-    if (session.kind !== "terminal" || !isTauri()) return;
+    if (session.kind !== "terminal" || !hasBackend()) return;
     const target = get().targetOf(id);
     void api
       .serverAlias(target, reattachName(session), clean)

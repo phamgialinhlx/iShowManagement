@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "../lib/bridge";
 
-import { api, isTauri, type ClaudeStatus, type TargetRef } from "../lib/api";
+import { api, hasBackend, type ClaudeStatus, type TargetRef } from "../lib/api";
 import { contextLimit, sniffWindow } from "../lib/context-window";
 import { settleResize } from "../lib/terminal-resize";
 import { useWorkspace } from "../lib/workspace";
@@ -345,8 +345,8 @@ export function ClaudePanel({
     const host = hostRef.current;
     if (!host) return;
 
-    if (!isTauri()) {
-      setError("Claude sessions need the rmux desktop shell. Run `pnpm tauri dev`.");
+    if (!hasBackend()) {
+      setError("Claude sessions need the rmux desktop app or rmux-web. Run `pnpm tauri dev`.");
       return;
     }
 

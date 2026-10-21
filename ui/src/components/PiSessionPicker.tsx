@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 
-import { api, isTauri, type PiConversation, type TargetRef } from "../lib/api";
+import { api, hasBackend, type PiConversation, type TargetRef } from "../lib/api";
 import { PanelLoader } from "./PanelLoader";
 import { basename } from "../lib/workspace-model";
 
@@ -49,10 +49,10 @@ export function PiSessionPicker({
   // Read once, on open. **No poll**: this is a decision, not a monitor — a
   // refresh under the pointer would move the row being aimed at.
   useEffect(() => {
-    if (!isTauri()) {
+    if (!hasBackend()) {
       // Not fatal — a new pi session can still be started, so the list is set to
       // empty rather than left loading forever.
-      setError("Resuming pi needs the rmux desktop shell.");
+      setError("Resuming pi needs the rmux desktop app or rmux-web.");
       setRows([]);
       return;
     }

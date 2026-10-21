@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { PanelLoader } from "../PanelLoader";
 
-import { api, isTauri, type ProcessInfo, type TargetRef } from "../../lib/api";
+import { api, hasBackend, type ProcessInfo, type TargetRef } from "../../lib/api";
 import { accent, paint, textRamp, tokenAlpha } from "../../lib/palette";
 
 /**
@@ -240,7 +240,7 @@ export function TopProcesses({
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasBackend()) return;
     let alive = true;
 
     const load = () => {

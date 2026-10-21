@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc } from "../lib/bridge";
 
 
 import { api, isTauri } from "../lib/api";

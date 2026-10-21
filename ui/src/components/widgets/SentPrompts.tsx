@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { PanelLoader } from "../PanelLoader";
 
-import { api, isTauri, type TargetRef, type TranscriptEntry } from "../../lib/api";
+import { api, hasBackend, type TargetRef, type TranscriptEntry } from "../../lib/api";
 
 /**
  * What you last said to this session.
@@ -45,7 +45,7 @@ export function SentPrompts({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasBackend()) return;
     let cancelled = false;
 
     const tick = async () => {
