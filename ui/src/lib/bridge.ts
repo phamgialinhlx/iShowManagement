@@ -107,8 +107,21 @@ export const hasBackend = (): boolean => isTauri() || isWeb();
 export type BridgeEvent<T> = { event: string; id: number; payload: T };
 export type UnlistenFn = () => void;
 
-/** What a failed invoke throws — the shape `toApiError` in `api.ts` reads. */
+/** What a failed invoke throws when the failure carries more than a message —
+ *  the shape `toApiError` in `api.ts` reads. */
 export type InvokeFailure = { message: string; requiresSignin?: boolean };
+
+/**
+ * What the web path throws: **the same kind of value Tauri throws.** A command
+ * returning `Result<_, String>` rejects with the bare string on the desktop, and
+ * callers that `invoke` directly render it with `String(e)` — so an object here
+ * printed `[object Object]` in place of the reason a terminal could not start.
+ * Only a failure carrying more than its text (`requiresSignin`) stays an object,
+ * which is exactly when Tauri sends one too.
+ */
+function failure(message: string, requiresSignin = false): string | InvokeFailure {
+  return requiresSignin ? { message, requiresSignin } : message;
+}
 
 /* ---------------------------------------------------------------- channels */
 
@@ -274,9 +287,7 @@ function connected(): Promise<string> {
     };
     const timer = setTimeout(() => {
       helloWaiters.delete(done);
-      reject({
-        message: "rmux-web did not answer — the connection to the server is down or still reconnecting.",
-      } satisfies InvokeFailure);
+      reject(failure("rmux-web did not answer — the connection to the server is down or still reconnecting."));
     }, HELLO_TIMEOUT_MS);
     helloWaiters.add(done);
   });
@@ -315,31 +326,91 @@ async function webInvoke<T>(cmd: string, args?: Record<string, unknown>): Promis
       body: JSON.stringify(args ?? {}),
     });
   } catch (e) {
-    throw { message: `rmux-web is unreachable: ${e instanceof Error ? e.message : String(e)}` } satisfies InvokeFailure;
+    throw failure(`rmux-web is unreachable: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   const text = await response.text();
   if (!response.ok) {
-    let failure: InvokeFailure | null = null;
+    let reported: string | InvokeFailure | null = null;
     try {
       const body = JSON.parse(text) as unknown;
       if (typeof body === "object" && body !== null && typeof (body as InvokeFailure).message === "string") {
         const b = body as InvokeFailure;
-        failure = { message: b.message, requiresSignin: b.requiresSignin === true };
+        reported = failure(b.message, b.requiresSignin === true);
       }
     } catch {
       // Not JSON — a proxy's error page, most likely. Reported by status below.
     }
-    throw failure ?? ({ message: `${cmd}: HTTP ${response.status}${text ? ` — ${text.slice(0, 200)}` : ""}` } satisfies InvokeFailure);
+    throw reported ?? failure(`${cmd}: HTTP ${response.status}${text ? ` — ${text.slice(0, 200)}` : ""}`);
   }
   // A command returning `()` may answer with an empty body rather than `null`.
   return (text ? JSON.parse(text) : null) as T;
 }
 
 /** Call a backend command. Desktop: Tauri IPC, unchanged. Web: `POST /api/invoke`. */
+/**
+ * Commands whose calls must reach the far side **in the order they were made**:
+ * keystrokes. On the web each call is its own HTTP request, and concurrent
+ * requests overtake one another — typed `echo $((6*7))` arrived as
+ * `echo $((*67)`, which is not a slow terminal but a wrong one. The desktop's IPC
+ * is a single ordered channel and never needed this.
+ */
+const ORDERED_WRITES = new Set(["terminal_write", "claude_write"]);
+
+type PendingWrite = { data: string; waiters: { resolve: () => void; reject: (e: unknown) => void }[] };
+
+/** Per terminal: whether a write is in flight, and what was typed meanwhile. */
+const writeQueues = new Map<string, { busy: boolean; next: PendingWrite | null }>();
+
+/**
+ * Send keystrokes one request at a time per terminal, **coalescing** what is
+ * typed while a request is in flight into the next one. Serialising alone would
+ * order the bytes but queue a round trip per key; coalescing keeps a fast typist
+ * at one request per round trip, whatever the round trip costs over a phone.
+ */
+function orderedWrite(cmd: string, args: Record<string, unknown>): Promise<void> {
+  const key = `${cmd}:${String(args.id)}`;
+  const queue = writeQueues.get(key) ?? { busy: false, next: null };
+  writeQueues.set(key, queue);
+
+  return new Promise<void>((resolve, reject) => {
+    const next = queue.next ?? { data: "", waiters: [] };
+    next.data += String(args.data ?? "");
+    next.waiters.push({ resolve, reject });
+    queue.next = next;
+    if (!queue.busy) void drain(cmd, args, key, queue);
+  });
+}
+
+async function drain(
+  cmd: string,
+  args: Record<string, unknown>,
+  key: string,
+  queue: { busy: boolean; next: PendingWrite | null },
+): Promise<void> {
+  queue.busy = true;
+  while (queue.next) {
+    const batch = queue.next;
+    queue.next = null;
+    try {
+      await webInvoke<void>(cmd, { ...args, data: batch.data });
+      for (const w of batch.waiters) w.resolve();
+    } catch (e) {
+      for (const w of batch.waiters) w.reject(e);
+    }
+  }
+  queue.busy = false;
+  writeQueues.delete(key);
+}
+
 export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isTauri()) return tauriInvoke<T>(cmd, args);
-  if (isWeb()) return webInvoke<T>(cmd, args);
+  if (isWeb()) {
+    if (args && ORDERED_WRITES.has(cmd) && typeof args.data === "string") {
+      return orderedWrite(cmd, args) as Promise<T>;
+    }
+    return webInvoke<T>(cmd, args);
+  }
   return Promise.reject({
     message: `Not running in the rmux desktop shell — "${cmd}" is unavailable. Use \`pnpm tauri dev\`.`,
   } satisfies InvokeFailure);

@@ -54,8 +54,12 @@ async fn run(cli: cli::Cli) -> anyhow::Result<()> {
     };
     let (router, _state) = rmux_web::build(Options {
         registry: rmux_app::registry(),
-        ui_dir: cli.ui.clone(),
-        resource_dir: cli.resources.clone(),
+        // Absolute, always: a relative `--resources` became a relative program
+        // path for the agent, which the PTY spawner then searched for on `PATH`
+        // — so every terminal failed with "No viable candidates found in PATH"
+        // when the server was started from its own directory.
+        ui_dir: cli.ui.as_deref().map(absolute).transpose()?,
+        resource_dir: cli.resources.as_deref().map(absolute).transpose()?,
         data_dir: host::default_data_dir()?,
         cache_dir: host::default_cache_dir()?,
         token: token.clone(),
@@ -106,4 +110,9 @@ async fn shutdown() {
     }
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// `path` made absolute against the working directory, and checked to exist.
+fn absolute(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    std::fs::canonicalize(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
 }
