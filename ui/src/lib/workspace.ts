@@ -5,7 +5,7 @@ import { invoke } from "./bridge";
 import { api, hasBackend, type TargetRef } from "./api";
 import { bufferKey, type Buffer, type BufferKey } from "./buffers";
 import { companionKey, companionName, forget as forgetCompanion } from "./companion";
-import { deckId, isFocusDeck, parseDeck, type Deck, type SavedView } from "./grid";
+import { clampDeck, deckId, isFocusDeck, parseDeck, type Deck, type SavedView } from "./grid";
 import { isPrimaryWindow, scopedKey } from "./window-scope";
 import {
   autosaveDecision,
@@ -850,7 +850,8 @@ export const useWorkspace = create<State>((set, get) => ({
   },
 
   // ── panes / grid ───────────────────────────────────────────────────────────
-  setDeck: (deck) => {
+  setDeck: (requested) => {
+    const deck = clampDeck(requested);
     storage?.setItem(DECK_KEY, deckId(deck));
     // A cell selected under the old layout may not exist under the new one.
     set({ deck, focusedCell: null });

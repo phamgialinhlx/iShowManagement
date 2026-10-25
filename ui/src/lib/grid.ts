@@ -144,9 +144,35 @@ export const DECKS: readonly { id: string; label: string; deck: Deck; title: str
   { id: "1x4", label: "1\u00d74", deck: { cols: 4, rows: 1 }, title: "Four panes side by side, full height" },
 ];
 
+/**
+ * The largest side a custom deck may have.
+ *
+ * The presets suit common screens; a custom deck is for the ones they do not —
+ * an ultrawide wants 1x5, a portrait monitor 3x1. The ceiling is not a taste
+ * limit, it is what a pane can still be: at 8 a side a 4K screen gives each
+ * terminal roughly 60 columns by 20 rows, and past that a TUI like Claude Code
+ * stops fitting its own prompt. It also bounds the cells allocated for a
+ * corrupted stored value, which is otherwise whatever number was written.
+ */
+export const MAX_DECK_SIDE = 8;
+
+/** A deck pulled into the range a pane can survive: whole, 1..MAX_DECK_SIDE a side. */
+export function clampDeck(deck: Deck): Deck {
+  const side = (n: number) =>
+    Number.isFinite(n) ? Math.min(MAX_DECK_SIDE, Math.max(1, Math.round(n))) : 1;
+  return { cols: side(deck.cols), rows: side(deck.rows) };
+}
+
 /** The id a deck is stored and compared by. */
 export const deckId = (deck: Deck): string =>
   deckCells(deck) === 1 ? "1" : `${deck.rows}x${deck.cols}`;
+
+/** How a deck is written for people: rows × columns, as the preset chips read. */
+export const deckLabel = (deck: Deck): string =>
+  deckCells(deck) === 1 ? "1" : `${deck.rows}\u00d7${deck.cols}`;
+
+/** True when the deck is one of the status bar's presets rather than custom. */
+export const isPresetDeck = (deck: Deck): boolean => DECKS.some((d) => d.id === deckId(deck));
 
 /**
  * Read a stored deck.
@@ -159,6 +185,10 @@ export function parseDeck(raw: string | null | undefined): Deck {
   if (!raw) return { cols: 1, rows: 1 };
   const known = DECKS.find((d) => d.id === raw);
   if (known) return known.deck;
+  // A custom deck is stored as `<rows>x<cols>`, the same spelling `deckId`
+  // writes, so a layout chosen with the picker survives a restart.
+  const custom = /^(\d{1,3})x(\d{1,3})$/.exec(raw);
+  if (custom) return clampDeck({ rows: Number(custom[1]), cols: Number(custom[2]) });
   const n = Number(raw);
   if (Number.isFinite(n) && n >= 1 && n <= 4) return { cols: n, rows: n };
   return { cols: 1, rows: 1 };

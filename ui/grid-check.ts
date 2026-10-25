@@ -1,4 +1,4 @@
-import { DECKS, deckCells, deckId, gridLayout, layoutPanes, parseDeck } from "./src/lib/grid";
+import { DECKS, MAX_DECK_SIDE, clampDeck, deckCells, deckId, gridLayout, isPresetDeck, layoutPanes, parseDeck } from "./src/lib/grid";
 
 /** Square decks, so the existing cases read as they did when `grid` was a number. */
 const SQ1 = { cols: 1, rows: 1 };
@@ -162,5 +162,27 @@ check(
 // existing install to focus mode on upgrade, which reads as losing your layout.
 check("the old bare number still parses as a square", deckCells(parseDeck("3")) === 9);
 check("an unknown stored value falls back to focus rather than throwing", deckCells(parseDeck("nonsense")) === 1);
+
+// Custom decks: any rows x cols the picker can produce must survive a restart.
+const custom = { rows: 2, cols: 3 };
+check("a custom deck round-trips through storage", (() => {
+  const back = parseDeck(deckId(custom));
+  return back.rows === 2 && back.cols === 3;
+})());
+check("a custom deck is not mistaken for a preset", !isPresetDeck(custom) && isPresetDeck({ rows: 2, cols: 2 }));
+check("rows and columns are not swapped (2x3 is two rows of three)", parseDeck("2x3").cols === 3);
+check("an oversized stored deck is clamped, not allocated", deckCells(parseDeck("999x999")) === MAX_DECK_SIDE * MAX_DECK_SIDE);
+check("a zero or garbage side clamps to one", (() => {
+  const d = clampDeck({ rows: 0, cols: Number.NaN });
+  return d.rows === 1 && d.cols === 1;
+})());
+check("every side the picker offers round-trips", (() => {
+  for (let r = 1; r <= MAX_DECK_SIDE; r++)
+    for (let c = 1; c <= MAX_DECK_SIDE; c++) {
+      const back = parseDeck(deckId({ rows: r, cols: c }));
+      if (deckCells(back) !== r * c || (r * c > 1 && (back.rows !== r || back.cols !== c))) return false;
+    }
+  return true;
+})());
 
 console.log(failures === 0 ? "\nall grid checks passed" : `\n${failures} grid check(s) FAILED`);
