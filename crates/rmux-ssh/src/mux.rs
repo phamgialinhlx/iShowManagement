@@ -115,6 +115,12 @@ const MAX_MASTERS_PER_HOST: usize = 6;
 /// connection is full" instead of hanging.
 const ONE_SHOT_WAIT: Duration = Duration::from_secs(5);
 
+/// How long any ssh this module starts may spend connecting, in seconds.
+///
+/// Fifteen: a slow WARP or DERP path takes a few seconds to answer, and
+/// anything past this is a dead route, not a slow one.
+const CONNECT_TIMEOUT_SECS: u32 = 15;
+
 /// How often that wait re-checks for a freed slot.
 const SLOT_POLL: Duration = Duration::from_millis(100);
 
@@ -316,7 +322,30 @@ impl ControlMaster {
             // race several terminals opened at once into competing masters.
             "-o".to_owned(),
             "ControlMaster=no".to_owned(),
+            // **Bounded, because a hung connect holds a pool slot.** When the
+            // master is gone a client dials its own connection, and with no
+            // timeout a flaky link leaves it in TCP connect for the kernel's
+            // ~75s — eight of those and every one-shot to the host is refused
+            // as "full", which is the failure this module exists to prevent.
+            // It bounds the connect and the banner, never authentication, so a
+            // 2FA prompt still has all the time it needs.
+            "-o".to_owned(),
+            format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"),
         ]
+    }
+
+    /// Whether the master's socket is there to ride.
+    ///
+    /// A master that dies — a dropped link, a `ServerAlive` timeout, WARP
+    /// reconnecting — removes its socket on the way out while `state` still
+    /// reads `Running`, so the file is the honest signal and the state is not.
+    fn socket_present(&self) -> bool {
+        #[cfg(test)]
+        if self.fake_spawns.lock().is_some() {
+            // A fake start creates no file; its state is the stand-in.
+            return self.state() == MasterState::Running;
+        }
+        self.socket.exists()
     }
 
     /// Start the master if it is not already up.
@@ -423,7 +452,9 @@ impl ControlMaster {
             .arg("-o")
             .arg("ServerAliveInterval=15")
             .arg("-o")
-            .arg("ServerAliveCountMax=6");
+            .arg("ServerAliveCountMax=6")
+            .arg("-o")
+            .arg(format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"));
 
         // **The key rmux installed, offered to the connection that authenticates.**
         //
@@ -807,7 +838,28 @@ impl MasterPool {
             };
 
             match decision {
-                Decision::Took(slot) => return Ok(slot),
+                Decision::Took(slot) => {
+                    // **A slot on a dead master is a slot on nothing.** The
+                    // command would dial its own connection — a full handshake
+                    // per call, which is what piles calls up until the pool
+                    // reads "full". Only the metrics widget used to revive the
+                    // master, and only for the host it was polling, so a master
+                    // that died stayed dead for every other caller. One revival
+                    // here serves everyone waiting: `ensure_started` admits a
+                    // single starter and hands its answer to the rest.
+                    if !slot.master().socket_present()
+                        && let Err(e) = slot.master().ensure_alive().await
+                    {
+                        tracing::warn!(
+                            host = %self.host.alias,
+                            member = slot.master().index,
+                            error = %e,
+                            "could not revive the control master; this channel dials \
+                             its own connection"
+                        );
+                    }
+                    return Ok(slot);
+                }
                 Decision::Opened(slot) => {
                     // Started here rather than left to the client command,
                     // which would connect directly and unmultiplexed. A failure
@@ -1145,6 +1197,50 @@ mod tests {
     /// this is the ordinary case rather than a corner. It used to be *two* bugs
     /// at once: each caller had its own state lock, and a caller that did manage
     /// to observe `Starting` was failed with an error.
+    #[tokio::test]
+    async fn a_dead_master_is_revived_by_the_next_channel_once() {
+        // The bug: a master died, nothing but the metrics widget ever revived
+        // one, and every call dialled its own connection until the pool read
+        // "full". Now the next acquire revives it — and a full connection's worth
+        // of callers at once revive it exactly once.
+        let pool = Arc::new(MasterPool::new(SshHostId::new("revive-host")));
+        let starts = Arc::new(AtomicU64::new(0));
+        *pool.primary().fake_spawns.lock() = Some(Arc::clone(&starts));
+        // Dead: what a dropped link leaves behind once its socket is gone.
+        *pool.primary().state.lock() = MasterState::Stopped;
+
+        let mut tasks = Vec::new();
+        for _ in 0..MAX_CHANNELS_PER_MASTER {
+            let pool = Arc::clone(&pool);
+            tasks.push(tokio::spawn(async move { pool.acquire(ChannelKind::OneShot).await }));
+        }
+        let mut slots = Vec::new();
+        for t in tasks {
+            slots.push(t.await.unwrap().expect("a one-shot on a revivable host is not refused"));
+        }
+        assert_eq!(starts.load(Ordering::SeqCst), 1, "a full connection of callers, one revival");
+        assert_eq!(pool.primary().state(), MasterState::Running);
+        drop(slots);
+
+        // Alive: nothing is started again.
+        let _slot = pool.acquire(ChannelKind::OneShot).await.unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1, "a live master is not restarted");
+    }
+
+    #[test]
+    fn every_client_bounds_its_connect() {
+        // A hung connect holds a pool slot; eight of them refused every
+        // one-shot to the host.
+        let master = ControlMaster::new(SshHostId::new("devbox"));
+        if ControlMaster::is_supported() {
+            assert!(
+                master.client_options().iter().any(|o| o.starts_with("ConnectTimeout=")),
+                "{:?}",
+                master.client_options()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn concurrent_starts_spawn_once() {
         if !ControlMaster::is_supported() {
