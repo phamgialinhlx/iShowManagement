@@ -557,6 +557,10 @@ export function ClaudePanel({
           id = started.id;
           setClaudeId(started.id);
           setPhase("starting");
+          // A failure from an earlier attempt describes a session that is now
+          // running. Left up, it sat over a working Claude until a particular
+          // button was pressed — an alarm for a problem that had already passed.
+          setError(null);
           if (!existing) setClaudeSession(sessionId, started.id);
           void invoke("claude_resize", { id: started.id, cols: xterm.cols, rows: xterm.rows });
           // Focus straight away: this view is a terminal, and it should accept

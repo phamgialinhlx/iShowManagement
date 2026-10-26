@@ -101,7 +101,7 @@ pub const MAX_CHANNELS_PER_MASTER: usize = 8;
 /// budget anyone should reach. At the cap a **session is still never refused**
 /// — it is put on the least-loaded master and may push it past
 /// [`MAX_CHANNELS_PER_MASTER`], because losing a shell is worse than a channel
-/// that has to queue. One-shots never open a member at all; see
+/// that has to queue. One-shots open members too, after a short wait; see
 /// [`MasterPool::acquire`].
 const MAX_MASTERS_PER_HOST: usize = 6;
 
@@ -114,6 +114,21 @@ const MAX_MASTERS_PER_HOST: usize = 6;
 /// session opens — and short enough that a metrics widget reports "the
 /// connection is full" instead of hanging.
 const ONE_SHOT_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a one-shot waits on full masters before it opens another.
+///
+/// **One-shots may open a member, after a moment.** They used to be forbidden
+/// to, on the theory that a poll would then pay a handshake per tick — but a
+/// member, once open, stays up and is reused, so the handshake is paid once.
+/// Forbidding it made the pool's own cap the failure: six Claude panes on one
+/// host each poll a transcript every few seconds, plus status, metrics and
+/// session lists, and at WARP's half-second-to-two-second round trip eight in
+/// flight is an ordinary moment — every call past it waited five seconds and
+/// failed with "every multiplexed connection to this host is full", which is
+/// how a model profile failed to reach the agent with a live master right
+/// there. The wait is short because it only has to absorb the burst a session
+/// open makes (six subsystems resolve a host at once), not to ration anything.
+const ONE_SHOT_GROW_AFTER: Duration = Duration::from_millis(500);
 
 /// How long any ssh this module starts may spend connecting, in seconds.
 ///
@@ -783,9 +798,10 @@ impl MasterPool {
     /// 2. **A session opens a member rather than waiting.** It is never
     ///    refused: a terminal lost because a metrics poller filled the
     ///    connection is unacceptable.
-    /// 3. **A one-shot waits, briefly, and then fails with a reason.** It never
-    ///    opens a member — one-shots are what *fill* a connection, and letting
-    ///    a poll open connections would spend a handshake per tick.
+    /// 3. **A one-shot waits half a second, then opens a member** — see
+    ///    [`ONE_SHOT_GROW_AFTER`] for why it may. Only at
+    ///    [`MAX_MASTERS_PER_HOST`] does it wait out [`ONE_SHOT_WAIT`] and fail
+    ///    with a reason.
     pub async fn acquire(&self, kind: ChannelKind) -> anyhow::Result<ChannelSlot> {
         // Nothing is multiplexed here, so there is no per-connection counter to
         // run into and nothing to account. Never waits, never refuses.
@@ -804,13 +820,18 @@ impl MasterPool {
             Full(usize),
         }
 
-        let deadline = tokio::time::Instant::now() + ONE_SHOT_WAIT;
+        let started = tokio::time::Instant::now();
+        let deadline = started + ONE_SHOT_WAIT;
+        let grow_after = started + ONE_SHOT_GROW_AFTER;
         loop {
             let decision = {
                 let mut members = self.members.lock();
                 if let Some(slot) = members.iter().find_map(ControlMaster::try_reserve) {
                     Decision::Took(slot)
-                } else if kind == ChannelKind::OneShot {
+                } else if kind == ChannelKind::OneShot
+                    && (members.len() >= MAX_MASTERS_PER_HOST
+                        || tokio::time::Instant::now() < grow_after)
+                {
                     Decision::Full(members.len())
                 } else if members.len() < MAX_MASTERS_PER_HOST {
                     let member = Arc::new(ControlMaster::new_member(
@@ -1227,7 +1248,29 @@ mod tests {
         assert_eq!(starts.load(Ordering::SeqCst), 1, "a live master is not restarted");
     }
 
-    #[test]
+#[tokio::test]
+    async fn a_busy_host_grows_a_member_instead_of_refusing_a_one_shot() {
+        // Eight one-shots in flight is an ordinary moment on a host with six
+        // Claude panes over WARP. The ninth used to wait five seconds and fail
+        // as "full"; it now opens another master after a short wait.
+        let pool = Arc::new(MasterPool::new(SshHostId::new("busy-host")));
+        let starts = Arc::new(AtomicU64::new(0));
+        *pool.fake.lock() = Some(Arc::clone(&starts));
+        *pool.primary().fake_spawns.lock() = Some(Arc::clone(&starts));
+        *pool.primary().state.lock() = MasterState::Running;
+
+        let mut held = Vec::new();
+        for _ in 0..MAX_CHANNELS_PER_MASTER {
+            held.push(pool.acquire(ChannelKind::OneShot).await.unwrap());
+        }
+        let begun = tokio::time::Instant::now();
+        let ninth = pool.acquire(ChannelKind::OneShot).await.expect("a busy host is not 'full'");
+        assert_eq!(ninth.master().index, 1, "the ninth rides a new member");
+        assert!(begun.elapsed() < ONE_SHOT_WAIT, "it grew rather than timing out");
+        assert_eq!(pool.members().len(), 2);
+    }
+
+        #[test]
     fn every_client_bounds_its_connect() {
         // A hung connect holds a pool slot; eight of them refused every
         // one-shot to the host.
