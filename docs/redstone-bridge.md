@@ -10,7 +10,7 @@ the agent dials out, authenticates by header token, keeps the socket alive, and
 answers every method in [§3](#3-the-protocol) for both Claude and pi.
 
 **The Redstone side is not built yet.** Measured against the current deployment
-(`cowork.chatredstone.com`, 2026-08-31): `GET /api/v1/rmux/config`, `/hosts` and
+(the dev deployment, 2026-08-31): `GET /api/v1/rmux/config`, `/hosts` and
 `/bridge` all return **404** — there is no endpoint for the agent to dial, and no
 Redstone repo references `rmux`. So **all of [§2](#2-what-redstone-must-build)
 remains to build**: the bridge WebSocket endpoint ([§2.1](#21-the-bridge-endpoint)),

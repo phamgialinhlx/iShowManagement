@@ -52,6 +52,22 @@ async fn run(cli: cli::Cli) -> anyhow::Result<()> {
         Some(path) => cli::read_token_file(path)?,
         None => cli::generate_token()?,
     };
+    // Before binding: a verifier with no keys would refuse every Access
+    // request, and nothing on screen would say why.
+    let access = match (&cli.access_team, &cli.access_aud) {
+        (Some(team), Some(aud)) => {
+            let access = rmux_web::access::Access::connect(team, aud, &cli.access_emails).await?;
+            access.spawn_periodic_refresh();
+            let who = if access.emails().is_empty() {
+                "any identity Access admits".to_owned()
+            } else {
+                access.emails().join(", ")
+            };
+            tracing::info!(team = access.team(), keys = access.key_count(), admits = %who, "Cloudflare Access verification on");
+            Some(access)
+        }
+        _ => None,
+    };
     let (router, _state) = rmux_web::build(Options {
         registry: rmux_app::registry(),
         // Absolute, always: a relative `--resources` became a relative program
@@ -63,6 +79,7 @@ async fn run(cli: cli::Cli) -> anyhow::Result<()> {
         data_dir: host::default_data_dir()?,
         cache_dir: host::default_cache_dir()?,
         token: token.clone(),
+        access,
         queue_capacity: conns::DEFAULT_QUEUE_CAPACITY,
     })?;
 
@@ -73,8 +90,14 @@ async fn run(cli: cli::Cli) -> anyhow::Result<()> {
     if cli.ui.is_none() {
         tracing::warn!("no --ui given: serving /api only");
     }
-    // The one and only time the token is printed.
-    eprintln!("rmux-web: open http://{}/#token={token}", display_addr(bound));
+    // A generated token is printed once, because nothing else knows it. A token
+    // read from a file is never printed: whoever wrote the file already has it,
+    // and stderr under a service manager lands in a log other accounts may read.
+    if cli.token_file.is_some() {
+        eprintln!("rmux-web: listening on http://{}/ (token from file)", display_addr(bound));
+    } else {
+        eprintln!("rmux-web: open http://{}/#token={token}", display_addr(bound));
+    }
     drop(token);
 
     rmux_web::serve(listener, router, shutdown()).await?;

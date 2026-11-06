@@ -7,7 +7,7 @@ UI is the same bundle with a different bridge underneath.
 
 ## Where it runs and who can reach it
 
-- **On the dev host** (first deployment: yitec-pcloud), not on the operator's Mac. The
+- **On the dev host** (the first deployment is a Linux dev box), not on the operator's Mac. The
   Mac is frequently closed; the host is not, and its sessions are already local there.
   This is the reasoning that put the Redstone bridge on the host.
 - **Bound to `127.0.0.1` only.** It is reached through the host's existing cloudflared
@@ -15,9 +15,8 @@ UI is the same bundle with a different bridge underneath.
 - **The server verifies the Access JWT itself** (`Cf-Access-Jwt-Assertion`, checked
   against the team's certs, audience pinned) on every request *and* every WebSocket
   upgrade. Access in front is not enough on its own: anything on the host or the LAN
-  that reaches the port would otherwise be a shell with no login. Until the JWT check
-  exists, the prototype requires a per-run token and is reachable only through an SSH
-  tunnel.
+  that reaches the port would otherwise be a shell with no login. The per-run token
+  stays valid beside it, for the host itself and an SSH tunnel.
 - **WebSocket upgrades check `Origin`.** A page on another site must not be able to
   open a terminal in the operator's browser session.
 
@@ -73,9 +72,10 @@ is a **move**, not a rewrite: behaviour must be byte-for-byte what it was.
 ## Phases
 
 1. Prototype: rmux-app + registry + Tauri bridge; terminals, files, Claude, pi, git
-   moved; rmux-web serving them on yitec-pcloud behind a token, via SSH tunnel.
+   moved; rmux-web serving them on a dev host behind a token, via SSH tunnel.
 2. Classification test; the remaining portable commands moved.
-3. Cloudflare Access hostname + JWT verification + Origin check.
+3. Cloudflare Access hostname + JWT verification + Origin check. (JWT verification
+   and the Origin check: done. Seeding a new browser's workspace from the host: done.)
 4. Phone/iPad layout: one pane, drawer rail, a key bar (Esc, Tab, Ctrl, arrows).
 5. Provisioned/upgraded from the desktop; workspace stored on the host and shared.
 
@@ -114,24 +114,69 @@ One WebSocket per page carries every stream; commands are plain HTTP.
   frame must not take the socket and every terminal on it down. The decoder is
   `ui/src/lib/bridge-frames.ts`, pinned by
   `node --experimental-strip-types ui/bridge-frames-check.ts`.
-- **Files.** `GET /api/file?path=<url-encoded absolute path>&token=<token>` serves a
+- **Files.** `GET /api/file?path=<url-encoded absolute path>[&token=<token>]` serves a
   file the UI needs as a URL — today, a background picture (`convertFileSrc`, which
   is the Tauri asset protocol on the desktop). It must be scoped exactly as the
   desktop asset protocol is (the app's backgrounds directory), never an arbitrary
   path: an unscoped file endpoint is a read of the whole host.
-- **Auth.** Until Access JWT verification lands, every request carries the token.
-  The page reads it once from `#token=` (a fragment is never sent to a server, so
-  it cannot reach an access log on the way in), keeps it in `sessionStorage`, and
-  strips it from the address bar with `history.replaceState`. HTTP requests send
-  `Authorization: Bearer <token>`. A browser **cannot set headers on a WebSocket
-  upgrade** or on an `<img>` load, so `/api/ws` and `/api/file` take it as a
-  `?token=` query parameter instead. The query form is accepted **only** on
-  `/api/ws` and `/api/file`; everywhere else it is refused, because a token in a URL
-  ends up in history, proxy logs and `Referer` headers — which is also why the
-  token is per-run.
+- **Auth.** `crates/rmux-web/src/auth.rs` › `authorize` is the only function that
+  decides, and every `/api/*` route goes through it. Two credentials:
+  - **Cloudflare Access**, when started with `--access-team <domain>` and
+    `--access-aud <AUD tag>` (and optionally one or more `--access-email <email>`).
+    The assertion is read from `Cf-Access-Jwt-Assertion` — Cloudflare injects it on
+    every proxied request, WebSocket upgrades included — or, failing the header,
+    the `CF_Authorization` cookie the browser sends. It is verified in
+    `access.rs`: **`alg` must be `RS256`** (`none` and `HS*` are refused before any
+    key is looked at), the signature against the team's JWKS
+    (`https://<team>/cdn-cgi/access/certs`, by `kid`), `iss == https://<team>`,
+    `aud` containing the pinned tag, `exp`/`nbf` with 60s of skew, an `email`
+    claim (so service tokens are refused), and the allowlist when one is given
+    (case-insensitive). Success is `Principal::Access { email, sub }`.
+    **A present-but-invalid assertion is refused and never falls through to the
+    token** — otherwise a forged header costs nothing, and a revoked identity keeps
+    working for whoever also holds the token. Without `--access-*`, an assertion
+    header is ignored.
+  - Keys are fetched at startup, and **a failed first fetch stops the server**: a
+    verifier with no keys refuses everyone and nothing on screen would say why.
+    They are refreshed hourly, and on an unknown `kid` at most once a minute (so
+    random `kid`s cannot turn the server into a fetch loop); a failed refresh keeps
+    the keys already held.
+  - Each refusal logs one line — the path, `Missing`/`Invalid` and a fixed reason
+    (`jwt expired`, `wrong token`, …), never the token, the JWT or its claims. An
+    admitted Access email is logged at `debug`.
+  - In Access mode the page has no `#token=`; it knows it is rmux-web from the
+    `rmux-shell` meta, and `bridge.ts` sends no `Authorization` header and no
+    `?token=` — every request is same-origin, so the cookie (and Cloudflare's
+    header) ride along on invokes, `/api/ws` and `/api/file` by themselves. The
+    `Origin` check on the upgrade is unchanged.
+  - **The token**, when a request carries no assertion. The page reads it once
+    from `#token=` (a fragment is never sent to a server, so it cannot reach an
+    access log on the way in), keeps it in `sessionStorage`, and strips it from the
+    address bar with `history.replaceState`. HTTP requests send
+    `Authorization: Bearer <token>`. A browser **cannot set headers on a WebSocket
+    upgrade** or on an `<img>` load, so `/api/ws` and `/api/file` take it as a
+    `?token=` query parameter instead. The query form is accepted **only** on
+    `/api/ws` and `/api/file`; everywhere else it is refused, because a token in a
+    URL ends up in history, proxy logs and `Referer` headers — which is also why the
+    token is per-run.
 - **Which shell.** `bridge.ts` treats a page as rmux-web when it has a token, or when
-  the server marks the page with `<meta name="rmux-shell" content="web">` (for when
-  the JWT replaces the token). Otherwise a non-Tauri page is a plain browser tab
-  (design work, the check harnesses) and stays inert rather than calling `/api`.
+  the server marks the page with `<meta name="rmux-shell" content="web">` (which it
+  always does — that is how an Access page with no token knows). Otherwise a
+  non-Tauri page is a plain browser tab (design work, the check harnesses) and
+  stays inert rather than calling `/api`.
+- **Seed.** A browser's session list lives in its own `localStorage`, so a new
+  browser opens to an empty rail. `GET /api/seed` (authenticated like every `/api`
+  route) returns `<data dir>/seed.json` — `~/.local/share/rmux-web/seed.json` by
+  default — or `404 {"message"}` when there is none. Format:
+  `{"keys": {"<localStorage key>": "<string value>", ...}}`; a value that is not a
+  string, or a file over 8 MB, is a 500 that says so rather than junk in someone's
+  storage. Read per request, so replacing the file needs no restart.
+  On boot, **web only and only when `rmux.workspace.v3` is absent**,
+  `ui/src/main.tsx` calls `seedWebStorage()` (in `bridge.ts`), which writes every key
+  the browser does not already have — never overwriting one, the workspace key
+  last so a part-written seed retries next boot — and only then imports the app
+  (`ui/src/boot.tsx`), because the workspace store reads `localStorage` the moment
+  its module loads. Bounded at 5s; any failure is a console warning and the app
+  renders anyway. The desktop never fetches it.
 - **Guard.** `node ui/bridge-imports-check.mjs` fails if anything under `ui/src`
   other than `lib/bridge.ts` imports `@tauri-apps/api`.

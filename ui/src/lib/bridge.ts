@@ -446,3 +446,64 @@ export function convertFileSrc(path: string): string {
   if (token) params.set("token", token);
   return `/api/file?${params.toString()}`;
 }
+
+/* ---------------------------------------------------------------- seed */
+
+/** The workspace snapshot key. Its absence is what makes a browser "new". */
+export const WORKSPACE_KEY = "rmux.workspace.v3";
+/** How long boot waits for the seed before rendering without it. */
+export const SEED_TIMEOUT_MS = 5_000;
+
+/**
+ * Give a new browser a starting workspace: `GET /api/seed` (the server's
+ * `seed.json`), and write every key this browser does not already have.
+ *
+ * Web only, and only when there is no workspace at all — a browser that has one
+ * is never touched, and an existing key is never overwritten. Must finish
+ * **before** the app module graph is imported, because the workspace store
+ * reads `localStorage` synchronously when it loads. Never throws and never
+ * waits past `timeoutMs`: a server without a seed, or a slow one, costs a
+ * console line, not a blank page.
+ */
+export async function seedWebStorage(timeoutMs: number = SEED_TIMEOUT_MS): Promise<void> {
+  if (!isWeb()) return;
+  let storage: Storage;
+  try {
+    storage = window.localStorage;
+    if (storage.getItem(WORKSPACE_KEY) !== null) return;
+  } catch {
+    return; // No usable storage: nothing to seed into.
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers: Record<string, string> = {};
+    // Behind Cloudflare Access there is no token: the assertion header and the
+    // CF_Authorization cookie ride on this same-origin request by themselves.
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch("/api/seed", { headers, cache: "no-store", signal: controller.signal });
+    if (response.status === 404) return; // No seed configured: an ordinary first run.
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = (await response.json()) as { keys?: unknown };
+    const keys = body?.keys;
+    if (typeof keys !== "object" || keys === null || Array.isArray(keys)) throw new Error("no `keys` object");
+
+    // The workspace key last: if storage fills part-way, the browser still
+    // reads as new and the next boot tries again.
+    const entries = Object.entries(keys as Record<string, unknown>).sort(
+      ([a], [b]) => Number(a === WORKSPACE_KEY) - Number(b === WORKSPACE_KEY),
+    );
+    let wrote = 0;
+    for (const [key, value] of entries) {
+      if (typeof value !== "string" || storage.getItem(key) !== null) continue;
+      storage.setItem(key, value);
+      wrote += 1;
+    }
+    console.info(`rmux: seeded ${wrote} storage key(s) from the server`);
+  } catch (e) {
+    console.warn("rmux: could not seed the workspace from the server — starting empty.", e);
+  } finally {
+    clearTimeout(timer);
+  }
+}

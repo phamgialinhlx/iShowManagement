@@ -17,6 +17,11 @@ path = "src/main.rs"
 rmux-app.workspace = true
 
 anyhow.workspace = true
+# Cloudflare Access: the JWKS fetch, and RS256 verification with `ring` (already
+# in the tree through rustls, and it cross-compiles to musl under zig).
+base64.workspace = true
+reqwest.workspace = true
+ring = "0.17"
 axum = { version = "0.8", default-features = false, features = [
     "http1",
     "json",
@@ -38,6 +43,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-reqwest.workspace = true
 tempfile = "3"
 tokio-tungstenite = { workspace = true }

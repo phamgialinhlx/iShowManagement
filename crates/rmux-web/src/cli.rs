@@ -19,11 +19,24 @@ OPTIONS:
     --allow-non-loopback     Permit --listen on an address other than loopback.
     --token-file <FILE>      Read the access token from FILE (must not be group- or
                              world-readable). Without it a random token is made per run.
+    --access-team <DOMAIN>   Cloudflare Access team domain, e.g. myteam.cloudflareaccess.com.
+                             Verify the Access JWT (Cf-Access-Jwt-Assertion header or
+                             CF_Authorization cookie) on every /api request. Needs
+                             --access-aud. The team's keys are fetched at startup; if
+                             that fails, rmux-web does not start.
+    --access-aud <TAG>       The Access application's AUD tag (pinned audience).
+    --access-email <EMAIL>   Admit only this Access identity (case-insensitive).
+                             Repeatable. Without it, anyone Access lets through is admitted.
     -h, --help               Print this help.
+
+With Access configured, a request carrying an Access assertion is decided by it
+alone: an invalid one is refused even if a valid token is also present. A request
+with no assertion falls back to the token, which stays valid on loopback and
+through an SSH tunnel.
 
 The access URL, token included, is printed to stderr once at startup.
 There is deliberately no --token: a secret in argv is visible to every account
-on the host through `ps`.";
+on the host through `ps`. The --access-* values are not secrets.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cli {
@@ -32,6 +45,10 @@ pub struct Cli {
     pub token_file: Option<PathBuf>,
     pub ui: Option<PathBuf>,
     pub resources: Option<PathBuf>,
+    /// Cloudflare Access team domain, normalised. `Some` iff `access_aud` is.
+    pub access_team: Option<String>,
+    pub access_aud: Option<String>,
+    pub access_emails: Vec<String>,
     pub help: bool,
 }
 
@@ -44,6 +61,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
         token_file: None,
         ui: None,
         resources: None,
+        access_team: None,
+        access_aud: None,
+        access_emails: Vec::new(),
         help: false,
     };
     let mut args = args.into_iter();
@@ -65,6 +85,21 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
             "--token-file" => cli.token_file = Some(value("--token-file")?.into()),
             "--ui" => cli.ui = Some(value("--ui")?.into()),
             "--resources" => cli.resources = Some(value("--resources")?.into()),
+            "--access-team" => cli.access_team = Some(crate::access::normalise_team(&value("--access-team")?)?),
+            "--access-aud" => {
+                let v = value("--access-aud")?.trim().to_owned();
+                if v.is_empty() || !v.bytes().all(|b| b.is_ascii_graphic()) {
+                    return Err("--access-aud must be the Access application's AUD tag".into());
+                }
+                cli.access_aud = Some(v);
+            }
+            "--access-email" => {
+                let v = value("--access-email")?.trim().to_owned();
+                if !v.contains('@') || v.chars().any(char::is_whitespace) {
+                    return Err(format!("--access-email: `{v}` is not an email address"));
+                }
+                cli.access_emails.push(v);
+            }
             "--token" => {
                 return Err("--token is not accepted: a secret in argv is visible to every account on the \
                             host through `ps`. Put it in a 0600 file and pass --token-file."
@@ -72,6 +107,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
             }
             other => return Err(format!("unknown argument `{other}` (see --help)")),
         }
+    }
+    match (&cli.access_team, &cli.access_aud) {
+        (Some(_), None) => return Err("--access-team needs --access-aud (the application's AUD tag)".into()),
+        (None, Some(_)) => return Err("--access-aud needs --access-team".into()),
+        (None, None) if !cli.access_emails.is_empty() => {
+            return Err("--access-email needs --access-team and --access-aud".into());
+        }
+        _ => {}
     }
     Ok(cli)
 }
@@ -158,6 +201,29 @@ mod tests {
     fn a_token_in_argv_is_refused() {
         assert!(parse(args(&["--token", "abc"])).unwrap_err().contains("ps"));
         assert!(parse(args(&["--token=abc"])).unwrap_err().contains("ps"));
+    }
+
+    #[test]
+    fn access_flags_parse_and_go_together() {
+        let cli = parse(args(&[
+            "--access-team",
+            "https://MYTEAM.cloudflareaccess.com/",
+            "--access-aud=abc123",
+            "--access-email",
+            "a@b.c",
+            "--access-email=d@e.f",
+        ]))
+        .unwrap();
+        assert_eq!(cli.access_team.as_deref(), Some("myteam.cloudflareaccess.com"));
+        assert_eq!(cli.access_aud.as_deref(), Some("abc123"));
+        assert_eq!(cli.access_emails, vec!["a@b.c".to_owned(), "d@e.f".to_owned()]);
+
+        assert!(parse(args(&["--access-team", "t.cloudflareaccess.com"])).is_err());
+        assert!(parse(args(&["--access-aud", "abc"])).is_err());
+        assert!(parse(args(&["--access-email", "a@b.c"])).is_err());
+        assert!(parse(args(&["--access-team", "a.com/path", "--access-aud", "x"])).is_err());
+        assert!(parse(args(&["--access-team", "t.c", "--access-aud", "x", "--access-email", "nope"])).is_err());
+        assert!(parse(args(&[])).unwrap().access_team.is_none());
     }
 
     #[test]

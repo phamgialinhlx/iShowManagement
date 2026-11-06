@@ -13,11 +13,11 @@
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// The window label. The UI reads it to decide which screen to render, so it is
-/// part of the contract with `ui/src/main.tsx`, not just a handle.
+/// part of the contract with `ui/src/boot.tsx`, not just a handle.
 pub const LABEL: &str = "settings";
 
 /// What the settings window loads. The query parameter is how the UI knows which
-/// screen to render — see `ui/src/main.tsx`.
+/// screen to render — see `ui/src/boot.tsx`.
 const WINDOW_URL: &str = "index.html?window=settings";
 
 /// Open Settings, or focus it if it is already open.
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn the_label_matches_what_the_ui_switches_on() {
-        // `ui/src/main.tsx` renders Settings when the window label is this
+        // `ui/src/boot.tsx` renders Settings when the window label is this
         // string. They are two halves of one contract, and a rename on either
         // side alone would show the workbench in the settings window — twice the
         // terminals, and no settings.

@@ -65,6 +65,7 @@ async fn start() -> Server {
         data_dir: data.path().join("data"),
         cache_dir: cache.path().join("cache"),
         token: TOKEN.into(),
+        access: None,
         queue_capacity: DEFAULT_QUEUE_CAPACITY,
     })
     .unwrap();
@@ -363,4 +364,39 @@ fn the_binary_refuses_a_token_in_argv() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_rmux-web")).args(["--token", "x"]).output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--token-file"));
+}
+
+#[tokio::test]
+async fn seed_is_authenticated_read_per_request_and_validated() {
+    let s = start().await;
+    let url = format!("{}/api/seed", s.base);
+    let get = |auth: bool| {
+        let mut r = client().get(&url);
+        if auth {
+            r = r.bearer_auth(TOKEN);
+        }
+        r.send()
+    };
+
+    assert_eq!(get(false).await.unwrap().status(), 401);
+    let absent = get(true).await.unwrap();
+    assert_eq!(absent.status(), 404);
+    assert!(absent.json::<Value>().await.unwrap()["message"].is_string());
+
+    let path = s.data.path().join("data").join("seed.json");
+    std::fs::write(&path, r#"{"keys": {"rmux.workspace.v3": "{\"servers\":[]}", "rmux.grid": "2x2"}}"#).unwrap();
+    let ok = get(true).await.unwrap();
+    assert_eq!(ok.status(), 200);
+    let body: Value = ok.json().await.unwrap();
+    assert_eq!(body["keys"]["rmux.grid"], "2x2");
+    assert_eq!(body["keys"]["rmux.workspace.v3"], "{\"servers\":[]}");
+
+    // Replaced on disk: the next request sees it, no restart.
+    std::fs::write(&path, r#"{"keys": {"rmux.grid": "3x3"}}"#).unwrap();
+    let body: Value = get(true).await.unwrap().json().await.unwrap();
+    assert_eq!(body["keys"]["rmux.grid"], "3x3");
+
+    // A value that is not a string is refused, not served.
+    std::fs::write(&path, r#"{"keys": {"rmux.grid": 3}}"#).unwrap();
+    assert_eq!(get(true).await.unwrap().status(), 500);
 }

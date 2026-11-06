@@ -8,28 +8,32 @@
 //!
 //! Routes:
 //!
-//! | route                     | auth                  | |
-//! |---------------------------|-----------------------|-|
-//! | `GET  /api/ws`            | bearer or `?token=`   | upgrade, same-origin only |
-//! | `POST /api/invoke/{cmd}`  | bearer                | `Web::Yes` commands only |
-//! | `GET  /api/file?path=`    | bearer or `?token=`   | the backgrounds dir only |
-//! | anything else under /api  | bearer                | 404 |
-//! | everything else           | none                  | the static UI |
+//! | route                     | auth                       | |
+//! |---------------------------|----------------------------|-|
+//! | `GET  /api/ws`            | Access, bearer or `?token=`| upgrade, same-origin only |
+//! | `POST /api/invoke/{cmd}`  | Access or bearer           | `Web::Yes` commands only |
+//! | `GET  /api/file?path=`    | Access, bearer or `?token=`| the backgrounds dir only |
+//! | `GET  /api/seed`          | Access or bearer           | `<data dir>/seed.json` |
+//! | anything else under /api  | Access or bearer           | 404 |
+//! | everything else           | none                       | the static UI |
 //!
-//! The UI bundle is not secret — the page must load before it can read its
-//! token out of the fragment — so it is served without auth. Everything that
-//! *does* something is under `/api`, behind [`auth::authorize`].
+//! "Access" is a verified Cloudflare Access assertion ([`access`]). The UI
+//! bundle is not secret — the page must load before it can read its token out
+//! of the fragment — so it is served without auth. Everything that *does*
+//! something is under `/api`, behind [`auth::authorize`].
 //!
 //! **Nothing here logs a request body, a query string or the token.** Bodies
 //! carry file contents; query strings carry the token on two routes. That is
 //! also why there is no generic HTTP trace layer: it would log the URI.
 
+pub mod access;
 pub mod auth;
 pub mod cli;
 pub mod conns;
 pub mod host;
 
 mod files;
+mod seed;
 mod ui;
 
 use std::net::SocketAddr;
@@ -74,6 +78,9 @@ pub struct Options {
     pub data_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub token: String,
+    /// Cloudflare Access verification, when configured. The token stays valid
+    /// beside it for requests that carry no assertion.
+    pub access: Option<Arc<access::Access>>,
     /// Per-connection outbound queue, in frames. See [`conns`].
     pub queue_capacity: usize,
 }
@@ -86,6 +93,7 @@ pub struct AppState {
     conns: Arc<Conns>,
     ui_dir: Option<PathBuf>,
     backgrounds: PathBuf,
+    seed: PathBuf,
 }
 
 impl AppState {
@@ -108,20 +116,23 @@ pub fn build(options: Options) -> anyhow::Result<(Router, Arc<AppState>)> {
 
     let conns = Arc::new(Conns::new(options.queue_capacity));
     let backgrounds = options.data_dir.join("backgrounds");
+    let seed = options.data_dir.join(seed::FILE_NAME);
     let host = WebHost::new(options.resource_dir, options.data_dir, options.cache_dir, conns.clone());
     let state = Arc::new(AppState {
         ctx: Arc::new(Ctx::new(Arc::new(host))),
         registry: Arc::new(options.registry),
-        auth: Auth::token(&options.token),
+        auth: Auth::token(&options.token).with_access(options.access),
         conns,
         ui_dir: options.ui_dir,
         backgrounds,
+        seed,
     });
 
     let api = Router::new()
         .route("/api/ws", get(ws_upgrade))
         .route("/api/invoke/{cmd}", post(invoke))
         .route("/api/file", get(files::serve))
+        .route("/api/seed", get(seed::serve))
         .route("/api", any(api_not_found))
         .route("/api/{*rest}", any(api_not_found))
         .layer(DefaultBodyLimit::max(MAX_INVOKE_BODY))
@@ -161,15 +172,20 @@ async fn require_auth(State(state): State<Arc<AppState>>, mut req: Request, next
     let query_allowed = path == "/api/ws" || path == "/api/file";
     let query_token = Query::<TokenQuery>::try_from_uri(req.uri()).ok().and_then(|q| q.0.token);
 
-    match auth::authorize(&state.auth, req.headers(), query_token.as_deref(), query_allowed) {
+    match auth::authorize(&state.auth, req.headers(), query_token.as_deref(), query_allowed).await {
         Ok(principal) => {
             req.extensions_mut().insert(principal);
             next.run(req).await
         }
-        Err(denied) => {
-            // The path, never the query: the query may hold a (wrong) token.
-            tracing::info!(path = %req.uri().path(), ?denied, "refused an unauthenticated request");
-            error(StatusCode::UNAUTHORIZED, "not authorised — open the URL rmux-web printed at startup")
+        Err(denial) => {
+            // One line per refusal. The path, never the query (it may hold a
+            // wrong token), and a fixed reason — never the token or the JWT.
+            tracing::info!(path = %req.uri().path(), denied = ?denial.kind, reason = denial.reason, "refused a request");
+            error(
+                StatusCode::UNAUTHORIZED,
+                "not authorised — sign in through Cloudflare Access (reload the page), \
+                 or open the URL rmux-web printed at startup",
+            )
         }
     }
 }
@@ -295,4 +311,66 @@ async fn run_socket(state: Arc<AppState>, socket: WebSocket) {
     // Bounded: closing a socket whose peer stopped reading must not hang the task.
     let _ = tokio::time::timeout(Duration::from_secs(2), tx.close()).await;
     tracing::info!(conn = %id, "page disconnected");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::access::testkit::*;
+    use axum::body::Body;
+    use tower::ServiceExt as _;
+
+    const TOKEN: &str = "lib-test-token-0123456789";
+
+    fn router(dir: &std::path::Path) -> Router {
+        build(Options {
+            registry: Registry::default(),
+            ui_dir: None,
+            resource_dir: None,
+            data_dir: dir.join("data"),
+            cache_dir: dir.join("cache"),
+            token: TOKEN.into(),
+            access: Some(verifier(&["alice@example.com"])),
+            queue_capacity: 8,
+        })
+        .unwrap()
+        .0
+    }
+
+    async fn status(router: &Router, uri: &str, headers: &[(&str, String)]) -> u16 {
+        let mut req = axum::http::Request::get(uri);
+        for (k, v) in headers {
+            req = req.header(*k, v);
+        }
+        router.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap().status().as_u16()
+    }
+
+    /// Every `/api` route goes through the Access check — header and cookie —
+    /// and a bad assertion is refused there even beside a good token.
+    #[tokio::test]
+    async fn access_assertions_gate_every_api_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = router(dir.path());
+        let good = sign(KEY_A, "kid-a", &claims("alice@example.com"));
+        let forged = sign(KEY_B, "kid-a", &claims("alice@example.com"));
+        let stranger = sign(KEY_A, "kid-a", &claims("someone@else.com"));
+        let hdr = |j: &str| ("cf-access-jwt-assertion", j.to_owned());
+        let cookie = |j: &str| ("cookie", format!("CF_Authorization={j}"));
+        let bearer = ("authorization", format!("Bearer {TOKEN}"));
+
+        // Authorised → past the gate: /api/seed is 404 (no file), /api/file 400 (no path).
+        assert_eq!(status(&r, "/api/seed", &[hdr(&good)]).await, 404);
+        assert_eq!(status(&r, "/api/seed", &[cookie(&good)]).await, 404);
+        assert_eq!(status(&r, "/api/file", &[cookie(&good)]).await, 400);
+        assert_eq!(status(&r, "/api/nope", &[hdr(&good)]).await, 404);
+        assert_eq!(status(&r, "/api/seed", std::slice::from_ref(&bearer)).await, 404);
+
+        for bad in [&forged, &stranger] {
+            assert_eq!(status(&r, "/api/seed", &[hdr(bad)]).await, 401);
+            assert_eq!(status(&r, "/api/seed", &[cookie(bad)]).await, 401);
+            assert_eq!(status(&r, "/api/seed", &[hdr(bad), bearer.clone()]).await, 401);
+            assert_eq!(status(&r, &format!("/api/file?token={TOKEN}"), &[cookie(bad)]).await, 401);
+        }
+        assert_eq!(status(&r, "/api/seed", &[]).await, 401);
+    }
 }

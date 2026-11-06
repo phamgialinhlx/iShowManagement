@@ -105,7 +105,7 @@ function ingest(state: ThemeState): void {
 
 /**
  * Apply the cached theme *synchronously*, before the first paint. Called from
- * `main.tsx` alongside `applyAppearance`, so a launch shows the last theme with
+ * `boot.tsx` alongside `applyAppearance`, so a launch shows the last theme with
  * no flash; `initTheme` reconciles against the file immediately after.
  */
 export function applyCachedThemeEarly(): void {

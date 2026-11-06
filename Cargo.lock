@@ -3531,7 +3531,7 @@ dependencies = [
 
 [[package]]
 name = "rmux"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-agent"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3598,7 +3598,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-app"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3621,7 +3621,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-askpass"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "rmux-ssh",
  "serde_json",
@@ -3630,7 +3630,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-bridge"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -3641,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-claude"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -3660,7 +3660,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-claude-core"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "rmux-transport",
  "serde",
@@ -3669,7 +3669,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-control"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3684,11 +3684,11 @@ dependencies = [
 
 [[package]]
 name = "rmux-core"
-version = "0.2.25"
+version = "0.2.26"
 
 [[package]]
 name = "rmux-cowork"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3706,7 +3706,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-fs"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3723,7 +3723,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-git"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "rmux-ssh",
@@ -3735,7 +3735,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-metrics"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "rmux-transport",
@@ -3746,11 +3746,11 @@ dependencies = [
 
 [[package]]
 name = "rmux-proto"
-version = "0.2.25"
+version = "0.2.26"
 
 [[package]]
 name = "rmux-ssh"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3772,7 +3772,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-term"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3789,7 +3789,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-transport"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3802,14 +3802,16 @@ dependencies = [
 
 [[package]]
 name = "rmux-web"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "futures",
  "parking_lot",
  "rand 0.9.5",
  "reqwest 0.12.28",
+ "ring",
  "rmux-app",
  "serde",
  "serde_json",
