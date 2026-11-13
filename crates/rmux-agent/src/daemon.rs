@@ -8,21 +8,63 @@
 //! exactly as the shell wrote them. That is what makes scrolling, selection and
 //! the cursor behave like a normal terminal instead of like a multiplexer's
 //! reimplementation of one.
+//!
+//! ## Credentials are named per session
+//!
+//! A session is **bound** to one named credential set at creation
+//! ([`Frame::HelloBound`]) and gets exactly that set at spawn. The per-kind set
+//! ([`Frame::SetKindEnv`]) survives only for clients that do not bind. For a
+//! fallback chain the binding also carries the chain, and the daemon's monitor
+//! ([`monitor`]) moves the session to the next member on a usage limit — on the
+//! host, so it works with the app closed.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
+use rmux_claude_core::env_kind;
+use rmux_claude_core::fallback::{self as policy, Decision, FallbackRecord};
 use rmux_term::{TermSize, Terminal, TerminalEvent};
 use rmux_transport::{CommandSpec, LocalTarget, Target, Tty, local::terminal_env};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::fallback;
 use crate::ipc::{self, Endpoint};
-use crate::protocol::{Frame, Hello, encode_data_into};
+use crate::protocol::{Binding, BindingReport, Frame, Hello, encode_data_into};
+use crate::session_env;
 
 /// Where the daemon listens, on whichever platform this is.
 pub fn endpoint() -> anyhow::Result<Endpoint> {
     Endpoint::current(env!("CARGO_PKG_VERSION"))
+}
+
+/// The terminal a session is running **now**.
+///
+/// A slot rather than a bare terminal because a fallback switch relaunches the
+/// process under the same name, and every attached client must follow it to the
+/// new one instead of being told the session exited. `respawning` is raised
+/// before the old process is killed, so a client that sees its `Exited` knows to
+/// wait for `generation` to move rather than to hang up.
+struct TermSlot {
+    current: Mutex<Arc<Terminal>>,
+    generation: tokio::sync::watch::Sender<u64>,
+    respawning: AtomicBool,
+}
+
+impl TermSlot {
+    fn new(terminal: Arc<Terminal>) -> Arc<Self> {
+        Arc::new(Self {
+            current: Mutex::new(terminal),
+            generation: tokio::sync::watch::channel(0u64).0,
+            respawning: AtomicBool::new(false),
+        })
+    }
+
+    fn current(&self) -> Arc<Terminal> {
+        Arc::clone(&self.current.lock())
+    }
 }
 
 /// A session, plus what the daemon knows about it that the terminal does not.
@@ -32,7 +74,7 @@ pub fn endpoint() -> anyhow::Result<Endpoint> {
 /// anyone still wants it — which is the actual question when a shell has been
 /// alive for six weeks and its tab is long gone.
 struct Session {
-    terminal: Arc<Terminal>,
+    slot: Arc<TermSlot>,
     started: std::time::Instant,
     /// What it was launched to run, when the client said. Distinguishes a plain
     /// shell from a Claude conversation without parsing the session name, which
@@ -45,6 +87,33 @@ struct Session {
     /// departing client after the arriving one set it — leaving a live session
     /// reported as abandoned.
     attached: Arc<std::sync::atomic::AtomicUsize>,
+    /// The request it was started from — what a fallback relaunch repeats.
+    hello: Hello,
+    /// The credential set it runs on. `None` for a client that did not bind,
+    /// which gets the per-kind set as before.
+    binding: Option<Binding>,
+    /// When the current set was bound (unix seconds) — the debounce's floor.
+    bound_since: u64,
+    last_switch: Option<u64>,
+    /// A switch is in progress; the monitor leaves it alone.
+    switching: bool,
+    /// The chain ran out. Nothing more is detected until the operator moves it,
+    /// or the same limit would be logged every cooldown for ever.
+    parked: bool,
+}
+
+impl Session {
+    fn terminal(&self) -> Arc<Terminal> {
+        self.slot.current()
+    }
+}
+
+/// One named credential set.
+#[derive(Clone, Debug, Default)]
+struct NamedSet {
+    label: Option<String>,
+    /// An empty value is a removal.
+    env: BTreeMap<String, String>,
 }
 
 #[derive(Default)]
@@ -56,7 +125,78 @@ struct Sessions {
     /// point of delivering them over the socket is that they are never written
     /// anywhere a later reader could find them. They are re-sent on the next
     /// connection, which costs one round trip and no persistence.
-    env: std::collections::BTreeMap<String, String>,
+    env: BTreeMap<String, String>,
+    /// Credential environment **per agent kind** (`claude`, `deepseek`,
+    /// `openai`), applied at spawn only to an *unbound* session of that kind —
+    /// see `rmux_claude_core::env_kind`. Same in-memory-only rule as `env`.
+    ///
+    /// Kept for clients that do not bind. A bound session never sees it: the
+    /// per-daemon set is exactly what could not express two accounts on one
+    /// host.
+    kind_env: BTreeMap<String, BTreeMap<String, String>>,
+    /// Named credential sets, keyed `(kind, name)`. Same in-memory-only rule.
+    named: BTreeMap<(String, String), NamedSet>,
+    /// Where Claude's files and `~/.rmux/fallback.json` live. `None` means the
+    /// real home; tests point it at a sandbox.
+    home: Option<PathBuf>,
+}
+
+impl Sessions {
+    fn home(&self) -> Option<PathBuf> {
+        self.home.clone().or_else(fallback::home)
+    }
+
+    fn label(&self, kind: &str, set: &str) -> Option<String> {
+        self.named.get(&(kind.to_owned(), set.to_owned())).and_then(|s| s.label.clone())
+    }
+}
+
+/// Replace one kind's credential environment.
+///
+/// **Replace, not merge.** A per-kind set has exactly one writer — the profile
+/// apply for that kind — so whatever it sends is the whole truth for that kind,
+/// and anything a previous profile set that this one does not is gone. That is
+/// strictly stronger than merge-with-empty-means-remove: no clear-list can be
+/// incomplete. Empty values are still dropped, so a client that sends the
+/// clear-set the old way gets the same answer. Refused (`false`) for a kind
+/// the daemon does not know, so a typo is an error rather than an unused set.
+fn set_kind_env(
+    into: &mut BTreeMap<String, BTreeMap<String, String>>,
+    kind: &str,
+    env: BTreeMap<String, String>,
+) -> bool {
+    if !env_kind::is_known(kind) {
+        return false;
+    }
+    let env: BTreeMap<String, String> = env.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+    if env.is_empty() {
+        into.remove(kind);
+    } else {
+        into.insert(kind.to_owned(), env);
+    }
+    true
+}
+
+/// Store one named set, replacing any of that name. Refused for an unknown
+/// kind, a malformed name, or the reserved [`env_kind::NO_PROFILE`].
+fn set_named_env(
+    into: &mut BTreeMap<(String, String), NamedSet>,
+    kind: &str,
+    set: &str,
+    label: Option<String>,
+    env: BTreeMap<String, String>,
+) -> Result<(), String> {
+    if !env_kind::is_known(kind) {
+        return Err(format!("unknown agent kind {kind:?}"));
+    }
+    if !env_kind::valid_set_name(set) {
+        return Err(format!("{set:?} is not a valid credential set name"));
+    }
+    if set == env_kind::NO_PROFILE {
+        return Err(format!("{:?} is reserved for \"no profile\" and cannot carry variables", env_kind::NO_PROFILE));
+    }
+    into.insert((kind.to_owned(), set.to_owned()), NamedSet { label, env });
+    Ok(())
 }
 
 /// Merge a `SetEnv` frame, treating an empty value as a **removal**.
@@ -68,10 +208,7 @@ struct Sessions {
 /// is no legitimate empty value among the variables sent this way — an empty
 /// base URL or token is indistinguishable from an unset one to Claude Code — so
 /// empty is free to mean "unset", and it keeps the wire format unchanged.
-fn merge_env(
-    into: &mut std::collections::BTreeMap<String, String>,
-    from: std::collections::BTreeMap<String, String>,
-) {
+fn merge_env(into: &mut BTreeMap<String, String>, from: BTreeMap<String, String>) {
     for (key, value) in from {
         if value.is_empty() {
             into.remove(&key);
@@ -81,6 +218,185 @@ fn merge_env(
     }
 }
 
+/// The kind-scoped variables an *unbound* session named `session` is spawned with.
+fn kind_env_for<'a>(
+    kind_env: &'a BTreeMap<String, BTreeMap<String, String>>,
+    session: &str,
+) -> impl Iterator<Item = (&'a String, &'a String)> {
+    env_kind::for_session(session).and_then(|kind| kind_env.get(kind)).into_iter().flatten()
+}
+
+/// The named set a binding resolves to, or why it cannot run.
+///
+/// **A missing set refuses, it never falls back.** After a daemon restart the
+/// sets are gone (they are memory-only) and the app re-delivers them before it
+/// attaches; a session that reached here without its set would otherwise start
+/// on the shared account or the host's own login while the UI named another
+/// provider.
+fn resolve_set<'a>(g: &'a Sessions, session: &str, binding: &Binding) -> Result<Option<&'a NamedSet>, String> {
+    match env_kind::for_session(session) {
+        Some(kind) if kind == binding.kind => {}
+        Some(kind) => {
+            return Err(format!(
+                "{session} is a {kind} session and cannot run on a {} credential set",
+                binding.kind
+            ));
+        }
+        None => {
+            return Err(format!(
+                "{session} is not an agent session; only claude-, codex- and dsh- sessions take a credential set"
+            ));
+        }
+    }
+    if let Some(chain) = &binding.chain
+        && chain.active != binding.set
+    {
+        return Err(format!("the chain's active member is {}, not {}", chain.active, binding.set));
+    }
+    if binding.set == env_kind::NO_PROFILE {
+        return Ok(None);
+    }
+    g.named.get(&(binding.kind.clone(), binding.set.clone())).map(Some).ok_or_else(|| {
+        format!(
+            "the {} credential set {:?} is not loaded in this host's rmux agent, so the session was \
+             not started (it would have run on another provider). Start it from rmux, which \
+             delivers the set first, or run `rmux-agent setenv --kind {} --set {}` with the \
+             variables on stdin.",
+            binding.kind, binding.set, binding.kind, binding.set
+        )
+    })
+}
+
+/// The environment a session is spawned with, and the keys its set removes.
+///
+/// Order: terminal env, the shared env, then **either** the bound set **or**
+/// (unbound) the per-kind set, then `Hello.env`, then rmux's own session env.
+/// A bound set therefore always wins over the shared account — the precedence
+/// rule — and its removals take keys back out of everything before it.
+fn compose_env(
+    g: &Sessions,
+    hello: &Hello,
+    binding: Option<&Binding>,
+) -> Result<(BTreeMap<String, String>, Vec<String>), String> {
+    let mut env: BTreeMap<String, String> = terminal_env().into_iter().collect();
+    for (k, v) in &g.env {
+        env.insert(k.clone(), v.clone());
+    }
+    let mut removals = Vec::new();
+    match binding {
+        Some(binding) => {
+            if let Some(set) = resolve_set(g, &hello.session, binding)? {
+                for (k, v) in &set.env {
+                    if v.is_empty() {
+                        env.remove(k);
+                        removals.push(k.clone());
+                    } else {
+                        env.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        None => {
+            for (k, v) in kind_env_for(&g.kind_env, &hello.session) {
+                env.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    for (k, v) in &hello.env {
+        env.insert(k.clone(), v.clone());
+    }
+    // Last, so neither a socket-delivered env nor a Hello can make a session
+    // claim to be another one: `RMUX_SESSION` is what `rmux close` ownership and
+    // children.json parentage key on.
+    for (k, v) in session_env::session_env(&hello.session) {
+        env.insert(k, v);
+    }
+    Ok((env, removals))
+}
+
+/// The launch line a session runs, wherever the client put it: the login
+/// command, or the `-c` argument of a program that is a shell.
+fn launch_line_of(hello: &Hello) -> Option<&str> {
+    if let Some(line) = &hello.login_command {
+        return Some(line);
+    }
+    match hello.args.as_slice() {
+        [flag, line] if flag == "-c" => Some(line),
+        _ => None,
+    }
+}
+
+fn with_launch_line(mut hello: Hello, line: String) -> Hello {
+    if hello.login_command.is_some() {
+        hello.login_command = Some(line);
+    } else if let [flag, old] = hello.args.as_mut_slice()
+        && flag == "-c"
+    {
+        *old = line;
+    } else {
+        hello.login_command = Some(line);
+    }
+    hello
+}
+
+/// Spawn the process for `hello`. The caller holds the lock.
+fn spawn_terminal(
+    g: &Sessions,
+    hello: &Hello,
+    binding: Option<&Binding>,
+    size: TermSize,
+) -> Result<Arc<Terminal>, String> {
+    let (env, removals) = compose_env(g, hello, binding)?;
+
+    // Everything a session needs to drive rmux from inside: the `rmux` shim on
+    // disk, and — for an agent — the skill that teaches it the CLI. Best-effort
+    // both: a session that cannot have them still runs, it just cannot
+    // orchestrate. See `session_env`.
+    if let Err(e) = session_env::ensure_shim() {
+        tracing::debug!(error = %e, "could not write the rmux shim");
+    }
+    let first_word = hello.login_command.as_deref().and_then(session_env::first_command_word);
+    if first_word == Some("claude")
+        && let Some(home) = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned))
+        && let Err(e) = rmux_claude_core::skill::install_claude_skill(&home)
+    {
+        tracing::debug!(error = %e, "could not install the rmux skill for Claude");
+    }
+
+    let mut spec = match (&hello.program, &hello.login_command) {
+        (Some(program), _) => CommandSpec::new(program).args(hello.args.clone()),
+        // `-l -c` and not plain `-c`: the point is the login shell's PATH. The
+        // shim directory goes on the line as an assignment prefix, because the
+        // profiles a login shell reads can reset an env-only PATH — see
+        // `session_env::with_rmux_path`. The *recorded* command stays the line
+        // the client sent, so `list` and the app see what they asked for.
+        //
+        // A set's removals go on the line too, as `unset` before an `exec`: the
+        // login shell reads profiles that can export `ANTHROPIC_API_KEY` *after*
+        // the daemon built the environment, and a subscription-token session
+        // that inherited one would silently bill the API key instead.
+        (None, Some(line)) => {
+            let line = match session_env::bin_dir() {
+                Some(bin) if cfg!(unix) => session_env::with_rmux_path(line, &bin),
+                _ => line.clone(),
+            };
+            let line = session_env::with_unset(&line, &removals);
+            CommandSpec::login_shell().arg("-c").arg(line)
+        }
+        (None, None) => CommandSpec::login_shell(),
+    }
+    .tty(Tty::Allocate);
+    // The daemon spawns locally, so these become real `envp` entries and never
+    // appear in an argument list.
+    for (key, value) in env {
+        spec = spec.env(key, value);
+    }
+
+    let command = LocalTarget::new().build_command(&spec).map_err(|e| e.to_string())?;
+    let cwd = hello.cwd.as_deref().map(camino::Utf8Path::new);
+    Terminal::spawn(&command, cwd, size).map(Arc::new).map_err(|e| e.to_string())
+}
+
 /// Run the daemon until the socket is closed.
 pub async fn serve() -> anyhow::Result<()> {
     let endpoint = endpoint()?;
@@ -88,6 +404,7 @@ pub async fn serve() -> anyhow::Result<()> {
 
     let sessions = Arc::new(Mutex::new(Sessions::default()));
     tracing::info!(address = %endpoint.address, "rmux agent listening");
+    tokio::spawn(monitor(Arc::clone(&sessions)));
 
     loop {
         let stream = listener.accept().await?;
@@ -105,15 +422,21 @@ struct AttachGuard(Arc<std::sync::atomic::AtomicUsize>);
 
 impl AttachGuard {
     fn hold(count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        count.fetch_add(1, Ordering::Relaxed);
         Self(count)
     }
 }
 
 impl Drop for AttachGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+async fn reply<W: AsyncWrite + Unpin>(writer: &mut W, frame: Frame) -> anyhow::Result<()> {
+    writer.write_all(&frame.encode()).await?;
+    writer.flush().await?;
+    Ok(())
 }
 
 /// Serve one attached client.
@@ -128,7 +451,7 @@ where
 
     // --- handshake ----------------------------------------------------------
     let mut buf = Vec::new();
-    let hello = loop {
+    let (hello, binding) = loop {
         let mut chunk = [0u8; 4096];
         let n = reader.read(&mut chunk).await?;
         anyhow::ensure!(n > 0, "client closed before saying hello");
@@ -137,20 +460,49 @@ where
         if let Some((frame, used)) = Frame::decode(&buf)? {
             buf.drain(..used);
             match frame {
-                Frame::Hello(hello) => break hello,
+                Frame::Hello(hello) => break (hello, None),
+                Frame::HelloBound { hello, binding } => break (hello, Some(binding)),
                 // A client that only delivers environment never opens a session.
                 Frame::SetEnv(env) => {
                     merge_env(&mut sessions.lock().env, env);
                     return Ok(());
                 }
+                // Answered, unlike `SetEnv`: see `Frame::SetKindEnv`. The client
+                // waits for this, so a daemon that cannot honour it is loud.
+                Frame::SetKindEnv { kind, env } => {
+                    let ok = set_kind_env(&mut sessions.lock().kind_env, &kind, env);
+                    if !ok {
+                        tracing::warn!(%kind, "refused credentials for an unknown agent kind");
+                    }
+                    return reply(&mut writer, Frame::Ack { ok }).await;
+                }
+                Frame::SetNamedEnv { kind, set, label, env } => {
+                    let result = set_named_env(&mut sessions.lock().named, &kind, &set, label, env);
+                    return reply(
+                        &mut writer,
+                        match result {
+                            Ok(()) => Frame::Ack { ok: true },
+                            Err(reason) => Frame::Refused { reason },
+                        },
+                    )
+                    .await;
+                }
+                Frame::GetBinding { session } => {
+                    let report = binding_report(&sessions, &session);
+                    return reply(&mut writer, Frame::BindingIs(report)).await;
+                }
+                Frame::Switch { session, member } => {
+                    let frame = match switch_to(&sessions, &session, &member).await {
+                        Ok(()) => Frame::Ack { ok: true },
+                        Err(reason) => Frame::Refused { reason },
+                    };
+                    return reply(&mut writer, frame).await;
+                }
                 // Answered here, during the handshake, because listing must not
                 // *create* anything. Going through the Hello path to ask what
                 // exists would spawn a shell named after the question.
                 Frame::List => {
-                    let reply = Frame::Sessions(summarise(&sessions)).encode();
-                    writer.write_all(&reply).await?;
-                    writer.flush().await?;
-                    return Ok(());
+                    return reply(&mut writer, Frame::Sessions(summarise(&sessions))).await;
                 }
                 // **Also during the handshake, and this one was a real bug.**
                 //
@@ -168,7 +520,7 @@ where
                 // just to destroy it.
                 Frame::Kill { session } => {
                     if let Some(dead) = sessions.lock().by_name.remove(&session) {
-                        let _ = dead.terminal.kill();
+                        let _ = dead.terminal().kill();
                     }
                     return Ok(());
                 }
@@ -184,14 +536,12 @@ where
                 // answering it by spawning a shell nobody asked for would leak
                 // one on every stale send.
                 Frame::Write { session, data } => {
-                    let target = sessions.lock().by_name.get(&session).map(|s| s.terminal.clone());
+                    let target = sessions.lock().by_name.get(&session).map(Session::terminal);
                     let ok = match target {
                         Some(terminal) => terminal.write(&data).is_ok(),
                         None => false,
                     };
-                    writer.write_all(&Frame::Ack { ok }.encode()).await?;
-                    writer.flush().await?;
-                    return Ok(());
+                    return reply(&mut writer, Frame::Ack { ok }).await;
                 }
                 // The read twin of `Write`, answered here for the same reason:
                 // the caller reads one reply and hangs up, so anything that
@@ -205,11 +555,9 @@ where
                         .lock()
                         .by_name
                         .get(&session)
-                        .map(|s| s.terminal.replay().to_vec())
+                        .map(|s| s.terminal().replay().to_vec())
                         .unwrap_or_default();
-                    writer.write_all(&Frame::Scrollback(scrollback).encode()).await?;
-                    writer.flush().await?;
-                    return Ok(());
+                    return reply(&mut writer, Frame::Scrollback(scrollback)).await;
                 }
                 other => anyhow::bail!("expected Hello, got {other:?}"),
             }
@@ -217,7 +565,22 @@ where
     };
 
     let size = TermSize { cols: hello.cols, rows: hello.rows };
-    let (terminal, created) = open_or_attach(&sessions, &hello, size)?;
+    let bound = binding.is_some();
+    let (slot, created) = match open_slot(&sessions, &hello, binding, size) {
+        Ok(found) => found,
+        // A bound attach is told why, in its own terminal; an unbound one
+        // fails the way it always has.
+        Err(reason) if bound => {
+            tracing::warn!(session = %hello.session, %reason, "refused a bound session");
+            return reply(&mut writer, Frame::Refused { reason }).await;
+        }
+        Err(reason) => anyhow::bail!(reason),
+    };
+    if bound {
+        // Before the replay: the client reads this first, and a daemon that
+        // never sends it is one that could not have applied the binding.
+        writer.write_all(&Frame::Ack { ok: true }.encode()).await?;
+    }
 
     // Counted for exactly as long as this client is here. `AttachGuard` releases
     // it on every exit path — including the error ones, which is the whole
@@ -232,62 +595,100 @@ where
     // The terminal is resized to *this* client's window. With one client that is
     // simply correct; with several the last to attach wins, which is the same
     // rule every multiplexer uses.
-    let _ = terminal.resize(size);
-
-    // Replay then stream, atomically — see `Terminal::attach`. Split apart, a
-    // reattaching client would miss or duplicate whatever arrived in between.
-    let (backlog, mut events) = terminal.attach();
-    if !backlog.is_empty() {
-        let mut frame = Vec::new();
-        encode_data_into(&mut frame, &backlog);
-        writer.write_all(&frame).await?;
-    }
+    let _ = slot.current().resize(size);
 
     // --- shell output → client ---------------------------------------------
+    let out_slot = Arc::clone(&slot);
     let out = tokio::spawn(async move {
         // Reused across every chunk: this is the path every byte of shell output
         // takes, so allocating per chunk would be the app's busiest allocation.
         let mut frame = Vec::with_capacity(16 * 1024);
+        let mut generations = out_slot.generation.subscribe();
 
-        loop {
-            match events.recv().await {
-                Ok(TerminalEvent::Output(chunk)) => {
-                    encode_data_into(&mut frame, &chunk);
-                    if writer.write_all(&frame).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(TerminalEvent::Exited { code }) => {
-                    let _ = writer.write_all(&Frame::Exited { code }.encode()).await;
+        'follow: loop {
+            let terminal = out_slot.current();
+            generations.borrow_and_update();
+            // Replay then stream, atomically — see `Terminal::attach`. Split
+            // apart, a reattaching client would miss or duplicate whatever
+            // arrived in between.
+            let (backlog, mut events) = terminal.attach();
+            if !backlog.is_empty() {
+                encode_data_into(&mut frame, &backlog);
+                if writer.write_all(&frame).await.is_err() {
                     break;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(chunks = n, "client fell behind; output dropped");
+            }
+            if let Some(code) = terminal.exit_code()
+                && !out_slot.respawning.load(Ordering::SeqCst)
+            {
+                let _ = writer.write_all(&Frame::Exited { code }.encode()).await;
+                break;
+            }
+
+            loop {
+                match events.recv().await {
+                    Ok(TerminalEvent::Output(chunk)) => {
+                        encode_data_into(&mut frame, &chunk);
+                        if writer.write_all(&frame).await.is_err() {
+                            break 'follow;
+                        }
+                    }
+                    Ok(TerminalEvent::Exited { code }) => {
+                        // A fallback relaunch: follow the session to its new
+                        // process instead of telling the client it ended.
+                        if out_slot.respawning.load(Ordering::SeqCst)
+                            || generations.has_changed().unwrap_or(false)
+                        {
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(15),
+                                generations.changed(),
+                            )
+                            .await;
+                            continue 'follow;
+                        }
+                        let _ = writer.write_all(&Frame::Exited { code }.encode()).await;
+                        break 'follow;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(chunks = n, "client fell behind; output dropped");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        if out_slot.respawning.load(Ordering::SeqCst) {
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(15),
+                                generations.changed(),
+                            )
+                            .await;
+                            continue 'follow;
+                        }
+                        break 'follow;
+                    }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
 
     // --- client input → shell ----------------------------------------------
-    let input = Arc::clone(&terminal);
     let result: anyhow::Result<()> = async {
         loop {
             // Drain everything buffered before reading again: terminal input
             // arrives coalesced, and one frame per read would add latency to
-            // every keystroke burst.
+            // every keystroke burst. The slot is read per frame so input follows
+            // a relaunch too.
             while let Some((frame, used)) = Frame::decode(&buf)? {
                 buf.drain(..used);
                 match frame {
-                    Frame::Data(bytes) => input.write(&bytes)?,
+                    Frame::Data(bytes) => {
+                        let _ = slot.current().write(&bytes);
+                    }
                     Frame::Resize { cols, rows } => {
-                        let _ = input.resize(TermSize { cols, rows });
+                        let _ = slot.current().resize(TermSize { cols, rows });
                     }
                     Frame::Kill { session } => {
                         // Explicit end-of-life: the tab was closed, so the shell
                         // should die rather than linger unreachable.
                         if let Some(dead) = sessions.lock().by_name.remove(&session) {
-                            let _ = dead.terminal.kill();
+                            let _ = dead.terminal().kill();
                         }
                         return Ok(());
                     }
@@ -296,19 +697,25 @@ where
                     }
                     // A client has no business announcing these.
                     Frame::Hello(_)
+                    | Frame::HelloBound { .. }
                     | Frame::Exited { .. }
                     | Frame::Sessions(_)
-                    | Frame::Ack { .. } => {}
+                    | Frame::Ack { .. }
+                    | Frame::Refused { .. }
+                    | Frame::BindingIs(_) => {}
+                    // Handshake-only: answered, and an answer has no place in an
+                    // attached session's stream.
+                    Frame::SetKindEnv { .. }
+                    | Frame::SetNamedEnv { .. }
+                    | Frame::GetBinding { .. }
+                    | Frame::Switch { .. } => {}
                     // Answered only during the handshake, where they cannot be
                     // confused with traffic for an open session. `Write` in
                     // particular: an attached client already has a `Data` path to
                     // its own session, so honouring a one-shot write here would
                     // be a second way to do the same thing — pointed at a session
                     // that need not be the one this connection holds.
-                    Frame::List
-                    | Frame::Write { .. }
-                    | Frame::Read { .. }
-                    | Frame::Scrollback(_) => {}
+                    Frame::List | Frame::Write { .. } | Frame::Read { .. } | Frame::Scrollback(_) => {}
                 }
             }
 
@@ -332,63 +739,388 @@ where
     result
 }
 
-/// Find the named session, or start it.
+/// Find the named session, or start it (unbound).
+#[cfg(test)]
 fn open_or_attach(
     sessions: &Arc<Mutex<Sessions>>,
     hello: &Hello,
     size: TermSize,
 ) -> anyhow::Result<(Arc<Terminal>, bool)> {
+    let (slot, created) = open_slot(sessions, hello, None, size).map_err(anyhow::Error::msg)?;
+    Ok((slot.current(), created))
+}
+
+/// Find the named session, or start it bound to `binding`.
+///
+/// **A live session keeps the binding it was created with.** Reattaching is not
+/// the moment to change provider — a conversation that moved account because a
+/// pane reconnected would be the silent switch this design forbids. Moving a
+/// session is an explicit act ([`Frame::Switch`], or the fallback monitor).
+fn open_slot(
+    sessions: &Arc<Mutex<Sessions>>,
+    hello: &Hello,
+    binding: Option<Binding>,
+    size: TermSize,
+) -> Result<(Arc<TermSlot>, bool), String> {
     let mut guard = sessions.lock();
 
     if let Some(existing) = guard.by_name.get(&hello.session) {
         // A shell that has exited should not be reattached to — start a new one
         // under the same name rather than handing back a dead terminal.
-        if existing.terminal.exit_code().is_none() {
-            return Ok((Arc::clone(&existing.terminal), false));
+        if existing.terminal().exit_code().is_none() {
+            return Ok((Arc::clone(&existing.slot), false));
         }
         guard.by_name.remove(&hello.session);
     }
 
-    let mut spec = match (&hello.program, &hello.login_command) {
-        (Some(program), _) => CommandSpec::new(program).args(hello.args.clone()),
-        // `-l -c` and not plain `-c`: the point is the login shell's PATH.
-        (None, Some(line)) => CommandSpec::login_shell().arg("-c").arg(line.clone()),
-        (None, None) => CommandSpec::login_shell(),
-    }
-    .tty(Tty::Allocate);
-
-    for (key, value) in terminal_env() {
-        spec = spec.env(key, value);
-    }
-    // Then anything delivered over the socket, then anything this Hello carries.
-    // The daemon spawns locally, so these become real `envp` entries and never
-    // appear in an argument list.
-    for (key, value) in &guard.env {
-        spec = spec.env(key.clone(), value.clone());
-    }
-    for (key, value) in &hello.env {
-        spec = spec.env(key.clone(), value.clone());
-    }
-
-    let command = LocalTarget::new().build_command(&spec)?;
-    let cwd = hello.cwd.as_deref().map(camino::Utf8Path::new);
-    let terminal = Arc::new(Terminal::spawn(&command, cwd, size)?);
-
+    let terminal = spawn_terminal(&guard, hello, binding.as_ref(), size)?;
+    let slot = TermSlot::new(terminal);
     guard.by_name.insert(
         hello.session.clone(),
         Session {
-            terminal: Arc::clone(&terminal),
+            slot: Arc::clone(&slot),
             started: std::time::Instant::now(),
             // The login command is the informative one — it is what carries
             // `claude --resume …`. A bare program name says only "a shell".
-            command: hello
-                .login_command
-                .clone()
-                .or_else(|| hello.program.clone()),
+            command: hello.login_command.clone().or_else(|| hello.program.clone()),
             attached: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            hello: hello.clone(),
+            binding,
+            bound_since: fallback::now(),
+            last_switch: None,
+            switching: false,
+            parked: false,
         },
     );
-    Ok((terminal, true))
+    Ok((slot, true))
+}
+
+/// Which set a session is on, with labels. Names only.
+fn binding_report(sessions: &Arc<Mutex<Sessions>>, session: &str) -> BindingReport {
+    let g = sessions.lock();
+    let Some(s) = g.by_name.get(session) else {
+        return BindingReport { session: session.to_owned(), ..Default::default() };
+    };
+    let mut labels = BTreeMap::new();
+    if let Some(b) = &s.binding {
+        let names = std::iter::once(b.set.clone())
+            .chain(b.chain.iter().flat_map(|c| c.members.clone()));
+        for name in names {
+            if let Some(l) = g.label(&b.kind, &name) {
+                labels.insert(name, l);
+            }
+        }
+    }
+    BindingReport { session: session.to_owned(), binding: s.binding.clone(), labels, since: s.bound_since }
+}
+
+// ── Fallback ─────────────────────────────────────────────────────────────────
+
+/// How often chained sessions are checked for a limit.
+const MONITOR_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Watch every chained Claude session for a usage limit, for the life of the
+/// daemon. On the host, so a chain keeps working with the app closed.
+async fn monitor(sessions: Arc<Mutex<Sessions>>) {
+    let mut tick = tokio::time::interval(MONITOR_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        check_chains(&sessions).await;
+    }
+}
+
+/// One pass of the monitor. Separate so a test can drive it.
+async fn check_chains(sessions: &Arc<Mutex<Sessions>>) {
+    struct Candidate {
+        name: String,
+        pid: Option<u32>,
+        line: Option<String>,
+        scrollback: Vec<u8>,
+        bound_since: u64,
+        last_switch: Option<u64>,
+    }
+    let (home, candidates) = {
+        let g = sessions.lock();
+        let candidates: Vec<Candidate> = g
+            .by_name
+            .iter()
+            .filter(|(_, s)| {
+                !s.switching
+                    && !s.parked
+                    && s.binding.as_ref().is_some_and(|b| b.kind == "claude" && b.chain.is_some())
+                    && s.terminal().exit_code().is_none()
+            })
+            .map(|(name, s)| {
+                let t = s.terminal();
+                Candidate {
+                    name: name.clone(),
+                    pid: t.pid(),
+                    line: launch_line_of(&s.hello).map(str::to_owned),
+                    scrollback: t.replay().to_vec(),
+                    bound_since: s.bound_since,
+                    last_switch: s.last_switch,
+                }
+            })
+            .collect();
+        (g.home(), candidates)
+    };
+    let Some(home) = home else { return };
+    let offset = fallback::utc_offset();
+    for c in candidates {
+        let now = fallback::now();
+        let Some(d) =
+            fallback::detect(&home, c.pid, c.line.as_deref(), &c.scrollback, c.bound_since, now, offset)
+        else {
+            continue;
+        };
+        if policy::should_act(d.seen_at, c.bound_since, c.last_switch, now) {
+            switch_chain(sessions, &c.name, d).await;
+        }
+    }
+}
+
+/// Wait for a freshly launched TUI to draw and go quiet, so typed input lands
+/// in a composer that exists.
+async fn wait_settled(terminal: &Terminal) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+    let mut last_len = 0usize;
+    let mut quiet_since = tokio::time::Instant::now();
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if terminal.exit_code().is_some() {
+            return;
+        }
+        let len = terminal.replay().len();
+        if len != last_len {
+            last_len = len;
+            quiet_since = tokio::time::Instant::now();
+        } else if len > 0 && quiet_since.elapsed() >= std::time::Duration::from_millis(1500) {
+            return;
+        }
+    }
+}
+
+/// Type a message into a session with the one shared definition of how a
+/// message is submitted — text, a settle, then Enter, as separate writes.
+async fn submit(terminal: &Terminal, text: &str) {
+    for chunk in rmux_claude_core::keys::send_message(text) {
+        let _ = terminal.write(&chunk);
+        tokio::time::sleep(rmux_claude_core::keys::SUBMIT_SETTLE).await;
+    }
+}
+
+/// Relaunch a session's process under the same name with a new binding and
+/// launch line. Attached clients follow it (see `TermSlot`).
+async fn relaunch(
+    sessions: &Arc<Mutex<Sessions>>,
+    name: &str,
+    binding: Binding,
+    line: String,
+) -> Result<Arc<Terminal>, String> {
+    let (slot, old, hello) = {
+        let g = sessions.lock();
+        let s = g.by_name.get(name).ok_or_else(|| format!("{name} has ended"))?;
+        let hello = with_launch_line(s.hello.clone(), line);
+        // The new set must resolve *before* anything is killed: a switch that
+        // cannot start the new process must not end the old one.
+        compose_env(&g, &hello, Some(&binding))?;
+        (Arc::clone(&s.slot), s.terminal(), hello)
+    };
+    let size = old.size();
+    slot.respawning.store(true, Ordering::SeqCst);
+    let _ = old.kill();
+    for _ in 0..150 {
+        if old.exit_code().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let spawned = {
+        let mut g = sessions.lock();
+        let spawned = spawn_terminal(&g, &hello, Some(&binding), size);
+        if let Ok(terminal) = &spawned {
+            *slot.current.lock() = Arc::clone(terminal);
+            if let Some(s) = g.by_name.get_mut(name) {
+                s.command = launch_line_of(&hello).map(str::to_owned).or(s.command.take());
+                s.hello = hello;
+                s.binding = Some(binding);
+                s.bound_since = fallback::now();
+                s.parked = false;
+            }
+        }
+        spawned
+    };
+    slot.generation.send_modify(|g| *g += 1);
+    slot.respawning.store(false, Ordering::SeqCst);
+    spawned
+}
+
+/// A chained session hit a limit: move it to the next member, or park it at the
+/// end of the chain. Every outcome is logged to `~/.rmux/fallback.json`.
+async fn switch_chain(
+    sessions: &Arc<Mutex<Sessions>>,
+    name: &str,
+    detection: fallback::Detection,
+) -> Option<FallbackRecord> {
+    let now = fallback::now();
+    let (home, binding, line) = {
+        let mut g = sessions.lock();
+        let home = g.home();
+        let s = g.by_name.get_mut(name)?;
+        if s.switching {
+            return None;
+        }
+        let binding = s.binding.clone()?;
+        binding.chain.as_ref()?;
+        s.switching = true;
+        (home, binding, launch_line_of(&s.hello).map(str::to_owned))
+    };
+    let mut chain = binding.chain.clone().unwrap_or_default();
+    let from = chain.active.clone();
+    let hit = &detection.hit;
+    let mut decision = chain.on_limit(hit.class, now, hit.resets_at);
+    // A member whose set was never delivered is skipped, and the record says so.
+    let mut missing = Vec::new();
+    for _ in 0..chain.members.len() {
+        let Decision::SwitchTo(next) = &decision else { break };
+        let loaded = sessions.lock().named.contains_key(&(binding.kind.clone(), next.clone()));
+        if loaded || next == env_kind::NO_PROFILE {
+            break;
+        }
+        missing.push(next.clone());
+        decision = chain.on_limit(hit.class, now, None);
+    }
+
+    let label = |set: &str| sessions.lock().label(&binding.kind, set);
+    let mut record = FallbackRecord {
+        session: name.to_owned(),
+        chain: chain.id.clone(),
+        from: from.clone(),
+        from_label: label(&from),
+        to: None,
+        to_label: None,
+        reason: hit.class.as_str().to_owned(),
+        pattern: hit.pattern.to_owned(),
+        line: hit.line.clone(),
+        source: detection.source.to_owned(),
+        outcome: String::new(),
+        at: now,
+        resets_at: hit.resets_at,
+    };
+
+    match decision {
+        Decision::Ignore => {
+            if let Some(s) = sessions.lock().by_name.get_mut(name) {
+                s.switching = false;
+            }
+            return None;
+        }
+        Decision::EndOfChain => {
+            record.outcome = if missing.is_empty() {
+                "end_of_chain".to_owned()
+            } else {
+                format!("end_of_chain (not loaded on this host: {})", missing.join(", "))
+            };
+            if let Some(s) = sessions.lock().by_name.get_mut(name) {
+                s.binding = Some(Binding { chain: Some(chain), ..binding.clone() });
+                s.last_switch = Some(now);
+                s.parked = true;
+                s.switching = false;
+            }
+            tracing::warn!(session = %name, "fallback chain exhausted; the session is waiting");
+        }
+        Decision::SwitchTo(next) => {
+            record.to = Some(next.clone());
+            record.to_label = label(&next);
+            let new_binding = Binding { kind: binding.kind.clone(), set: next.clone(), chain: Some(chain) };
+            let relaunched = match line.as_deref().and_then(|l| policy::resume_line(l, detection.conversation.as_deref())) {
+                None => Err("the launch line is not one rmux can resume".to_owned()),
+                Some(new_line) => relaunch(sessions, name, new_binding, new_line).await,
+            };
+            match relaunched {
+                Ok(terminal) => {
+                    record.outcome = "switched".to_owned();
+                    if let Some(s) = sessions.lock().by_name.get_mut(name) {
+                        s.last_switch = Some(now);
+                    }
+                    wait_settled(&terminal).await;
+                    submit(&terminal, policy::CONTINUE_MESSAGE).await;
+                    tracing::warn!(session = %name, %from, to = %next, "switched account after a limit");
+                }
+                Err(e) => {
+                    record.outcome = format!("failed: {e}");
+                    if let Some(s) = sessions.lock().by_name.get_mut(name) {
+                        s.last_switch = Some(now);
+                        s.parked = true;
+                    }
+                }
+            }
+            if let Some(s) = sessions.lock().by_name.get_mut(name) {
+                s.switching = false;
+            }
+        }
+    }
+
+    if let Some(home) = home
+        && let Err(e) = fallback::append_log(&home, record.clone())
+    {
+        tracing::warn!(error = %e, "could not record the fallback switch");
+    }
+    Some(record)
+}
+
+/// The operator's "switch back" (or any manual move within the chain): rebind
+/// to `member` and relaunch on the same conversation. No message is typed — the
+/// operator is there, and decides what the session does next.
+async fn switch_to(sessions: &Arc<Mutex<Sessions>>, name: &str, member: &str) -> Result<(), String> {
+    let (home, binding, line, pid) = {
+        let g = sessions.lock();
+        let s = g.by_name.get(name).ok_or_else(|| format!("no session called {name}"))?;
+        let binding = s.binding.clone().ok_or_else(|| format!("{name} is not bound to a credential set"))?;
+        if s.switching {
+            return Err(format!("{name} is already switching"));
+        }
+        (g.home(), binding, launch_line_of(&s.hello).map(str::to_owned), s.terminal().pid())
+    };
+    let mut chain = binding.chain.clone().ok_or_else(|| format!("{name} is not on a fallback chain"))?;
+    let from = chain.active.clone();
+    if !chain.switch_back(member) {
+        return Err(format!("{member} is not a member of this session's chain"));
+    }
+    let conversation = home
+        .as_deref()
+        .and_then(|h| pid.and_then(|p| fallback::conversation_of_pid(h, p)))
+        .or_else(|| line.as_deref().and_then(fallback::conversation_of_line));
+    let new_line = line
+        .as_deref()
+        .and_then(|l| policy::resume_line(l, conversation.as_deref()))
+        .ok_or_else(|| "the launch line is not one rmux can resume".to_owned())?;
+    let new_binding = Binding { kind: binding.kind.clone(), set: member.to_owned(), chain: Some(chain) };
+    relaunch(sessions, name, new_binding, new_line).await?;
+    let now = fallback::now();
+    if let Some(s) = sessions.lock().by_name.get_mut(name) {
+        s.last_switch = Some(now);
+    }
+    let label = |set: &str| sessions.lock().label(&binding.kind, set);
+    let record = FallbackRecord {
+        session: name.to_owned(),
+        chain: binding.chain.as_ref().map(|c| c.id.clone()).unwrap_or_default(),
+        from: from.clone(),
+        from_label: label(&from),
+        to: Some(member.to_owned()),
+        to_label: label(member),
+        reason: "operator".to_owned(),
+        source: "operator".to_owned(),
+        outcome: "switched_back".to_owned(),
+        at: now,
+        ..Default::default()
+    };
+    if let Some(home) = home {
+        let _ = fallback::append_log(&home, record);
+    }
+    Ok(())
 }
 
 /// Everything the daemon is running, newest last.
@@ -396,8 +1128,6 @@ fn open_or_attach(
 /// Sorted oldest-first on purpose: age is what identifies a leak, so the ones
 /// worth looking at are the ones at the top.
 fn summarise(sessions: &Arc<Mutex<Sessions>>) -> Vec<crate::protocol::SessionSummary> {
-    use std::sync::atomic::Ordering;
-
     let guard = sessions.lock();
     let mut out: Vec<_> = guard
         .by_name
@@ -405,10 +1135,10 @@ fn summarise(sessions: &Arc<Mutex<Sessions>>) -> Vec<crate::protocol::SessionSum
         // A session whose shell has exited is not running, whatever the map
         // still says — reporting it would send the operator to kill a pid that
         // the OS may have reused.
-        .filter(|(_, session)| session.terminal.exit_code().is_none())
+        .filter(|(_, session)| session.terminal().exit_code().is_none())
         .map(|(name, session)| crate::protocol::SessionSummary {
             name: name.clone(),
-            pid: session.terminal.pid(),
+            pid: session.terminal().pid(),
             age_seconds: session.started.elapsed().as_secs(),
             attached: session.attached.load(Ordering::Relaxed) > 0,
             command: session.command.clone(),
@@ -448,6 +1178,137 @@ mod tests {
         assert!(!env.contains_key("ANTHROPIC_BASE_URL"), "{env:?}");
         assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN"), "{env:?}");
         assert_eq!(env.get("ANTHROPIC_MODEL").map(String::as_str), Some("opus"));
+    }
+
+    #[test]
+    fn each_kind_s_credentials_reach_only_that_kind_s_sessions() {
+        use std::collections::BTreeMap;
+        let pairs = |v: &[(&str, &str)]| -> BTreeMap<String, String> {
+            v.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        };
+        let mut sets = BTreeMap::new();
+        assert!(set_kind_env(&mut sets, "deepseek", pairs(&[("DEEPSEEK_API_KEY", "ds")])));
+        assert!(set_kind_env(&mut sets, "openai", pairs(&[("OPENAI_API_KEY", "oa")])));
+        assert!(set_kind_env(&mut sets, "claude", pairs(&[("ANTHROPIC_BASE_URL", "https://gw")])));
+
+        let keys = |session: &str| -> Vec<String> {
+            kind_env_for(&sets, session).map(|(k, _)| k.clone()).collect()
+        };
+        // The failure this exists to prevent: provider routing leaking across agents.
+        assert_eq!(keys("claude-session-1"), ["ANTHROPIC_BASE_URL"]);
+        assert_eq!(keys("codex-codexsession-1"), ["OPENAI_API_KEY"]);
+        assert_eq!(keys("dsh-dshsession-1"), ["DEEPSEEK_API_KEY"]);
+        assert!(keys("term-1").is_empty(), "a shell got a provider credential");
+        assert!(keys("pi-pisession-1").is_empty());
+    }
+
+    #[test]
+    fn switching_a_kind_s_profile_clears_what_the_last_one_set() {
+        use std::collections::BTreeMap;
+        let mut sets = BTreeMap::new();
+        let gw: BTreeMap<String, String> = [
+            ("ANTHROPIC_BASE_URL".to_owned(), "https://gw".to_owned()),
+            ("ANTHROPIC_AUTH_TOKEN".to_owned(), "tok".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        set_kind_env(&mut sets, "claude", gw);
+        // Back to Anthropic: the client sends the clear-set (every managed key
+        // empty) and the set must end up empty, not keep the old base URL.
+        let clear: BTreeMap<String, String> =
+            [("ANTHROPIC_BASE_URL".to_owned(), String::new())].into_iter().collect();
+        set_kind_env(&mut sets, "claude", clear);
+        assert!(kind_env_for(&sets, "claude-x").next().is_none(), "{sets:?}");
+        // A different profile with a different key set replaces, never merges.
+        set_kind_env(&mut sets, "claude", [("ANTHROPIC_MODEL".to_owned(), "m".to_owned())].into_iter().collect());
+        set_kind_env(&mut sets, "claude", [("ANTHROPIC_API_KEY".to_owned(), "k".to_owned())].into_iter().collect());
+        let keys: Vec<&String> = kind_env_for(&sets, "claude-x").map(|(k, _)| k).collect();
+        assert_eq!(keys, ["ANTHROPIC_API_KEY"]);
+    }
+
+    #[test]
+    fn an_unknown_kind_is_refused() {
+        let mut sets = std::collections::BTreeMap::new();
+        assert!(!set_kind_env(&mut sets, "anthropic", Default::default()));
+        assert!(sets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_kind_env_frame_is_acknowledged_during_the_handshake() {
+        // The client waits for this Ack; without it a daemon that dropped the
+        // frame would be indistinguishable from one that applied it.
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        for (kind, expect) in [("openai", true), ("bogus", false)] {
+            let (mut client, server) = tokio::io::duplex(4096);
+            client
+                .write_all(
+                    &Frame::SetKindEnv {
+                        kind: kind.into(),
+                        env: [("OPENAI_API_KEY".to_owned(), "k".to_owned())].into_iter().collect(),
+                    }
+                    .encode(),
+                )
+                .await
+                .unwrap();
+            handle(server, Arc::clone(&sessions)).await.unwrap();
+            let mut reply = Vec::new();
+            client.read_to_end(&mut reply).await.unwrap();
+            let (frame, _) = Frame::decode(&reply).unwrap().unwrap();
+            assert_eq!(frame, Frame::Ack { ok: expect }, "{kind}");
+        }
+        let guard = sessions.lock();
+        assert_eq!(guard.kind_env.get("openai").and_then(|e| e.get("OPENAI_API_KEY")).map(String::as_str), Some("k"));
+        assert!(guard.env.is_empty(), "a kind-scoped credential leaked into the shared env");
+    }
+
+    #[tokio::test]
+    async fn a_spawned_session_sees_only_its_own_kind_s_credentials() {
+        // End to end through the real spawn path: a process's actual
+        // environment, not the selection helper's opinion of it.
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        {
+            let mut g = sessions.lock();
+            set_kind_env(&mut g.kind_env, "deepseek", [("DEEPSEEK_API_KEY".to_owned(), "ds-secret".to_owned())].into_iter().collect());
+            set_kind_env(&mut g.kind_env, "openai", [("OPENAI_API_KEY".to_owned(), "oa-secret".to_owned())].into_iter().collect());
+            set_kind_env(&mut g.kind_env, "claude", [("ANTHROPIC_BASE_URL".to_owned(), "https://gw.test".to_owned())].into_iter().collect());
+        }
+        let size = TermSize { cols: 200, rows: 24 };
+        let probe = "echo ENV:${DEEPSEEK_API_KEY:-none}:${OPENAI_API_KEY:-none}:${ANTHROPIC_BASE_URL:-none}:END";
+        let mut seen = Vec::new();
+        for name in ["claude-kind-probe", "codex-kind-probe", "dsh-kind-probe", "term-kind-probe"] {
+            let hello = Hello {
+                session: name.into(),
+                cwd: None,
+                program: Some("sh".into()),
+                args: vec!["-c".into(), probe.into()],
+                login_command: None,
+                env: Default::default(),
+                cols: 200,
+                rows: 24,
+            };
+            let (terminal, _) = open_or_attach(&sessions, &hello, size).unwrap();
+            let mut line = String::new();
+            for _ in 0..100 {
+                let out = String::from_utf8_lossy(&terminal.replay()).into_owned();
+                if let Some(at) = out.find("ENV:")
+                    && let Some(end) = out[at..].find(":END")
+                {
+                    line = out[at..at + end].to_owned();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            seen.push(line);
+        }
+        assert_eq!(
+            seen,
+            [
+                "ENV:none:none:https://gw.test",
+                "ENV:none:oa-secret:none",
+                "ENV:ds-secret:none:none",
+                "ENV:none:none:none",
+            ]
+        );
     }
 
     #[test]
@@ -732,7 +1593,7 @@ mod tests {
         assert!(summary.iter().all(|s| !s.attached), "{summary:?}");
 
         // A session that exits leaves the listing.
-        sessions.lock().by_name.get("young").unwrap().terminal.kill().unwrap();
+        sessions.lock().by_name.get("young").unwrap().terminal().kill().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
         let after = summarise(&sessions);
         assert!(
@@ -820,5 +1681,242 @@ mod tests {
         assert_ne!(a.id(), b.id());
         let _ = a.kill();
         let _ = b.kill();
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> BTreeMap<String, String> {
+        v.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+    }
+
+    fn probe_hello(name: &str, probe: &str) -> Hello {
+        Hello {
+            session: name.into(),
+            cwd: None,
+            program: Some("sh".into()),
+            args: vec!["-c".into(), probe.into()],
+            login_command: None,
+            env: Default::default(),
+            cols: 200,
+            rows: 24,
+        }
+    }
+
+    async fn read_marker(terminal: &Terminal, start: &str, end: &str) -> String {
+        for _ in 0..150 {
+            let out = String::from_utf8_lossy(&terminal.replay()).into_owned();
+            if let Some(at) = out.find(start)
+                && let Some(stop) = out[at..].find(end)
+            {
+                return out[at..at + stop].to_owned();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        String::new()
+    }
+
+    #[tokio::test]
+    async fn two_claude_sessions_on_one_daemon_run_on_different_sets() {
+        // The thing the per-kind set could not express: two accounts, one host.
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        {
+            let mut g = sessions.lock();
+            set_named_env(&mut g.named, "claude", "1", Some("Work".into()), pairs(&[("CLAUDE_CODE_OAUTH_TOKEN", "tok-work")])).unwrap();
+            set_named_env(&mut g.named, "claude", "2", Some("GLM".into()), pairs(&[("ANTHROPIC_BASE_URL", "https://glm.test"), ("ANTHROPIC_AUTH_TOKEN", "glm")])).unwrap();
+            // A per-kind set an older client left behind: a bound session must not see it.
+            set_kind_env(&mut g.kind_env, "claude", pairs(&[("ANTHROPIC_MODEL", "stale")]));
+        }
+        let probe = "echo ENV:${CLAUDE_CODE_OAUTH_TOKEN:-none}:${ANTHROPIC_BASE_URL:-none}:${ANTHROPIC_MODEL:-none}:END";
+        let size = TermSize { cols: 200, rows: 24 };
+        let mut seen = Vec::new();
+        for (name, set) in [("claude-one", "1"), ("claude-two", "2"), ("claude-three", "none")] {
+            let binding = Binding { kind: "claude".into(), set: set.into(), chain: None };
+            let (slot, _) = open_slot(&sessions, &probe_hello(name, probe), Some(binding), size).unwrap();
+            seen.push(read_marker(&slot.current(), "ENV:", ":END").await);
+        }
+        assert_eq!(seen, ["ENV:tok-work:none:none", "ENV:none:https://glm.test:none", "ENV:none:none:none"]);
+    }
+
+    #[tokio::test]
+    async fn a_set_s_empty_value_removes_the_shared_account_s_key() {
+        // A subscription-token profile must really use the subscription: the
+        // stored API-key account (shared env) is taken out, not merely outranked.
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        {
+            let mut g = sessions.lock();
+            merge_env(&mut g.env, pairs(&[("ANTHROPIC_API_KEY", "sk-ant-api-shared")]));
+            set_named_env(
+                &mut g.named,
+                "claude",
+                "5",
+                None,
+                pairs(&[("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-x"), ("ANTHROPIC_API_KEY", ""), ("ANTHROPIC_BASE_URL", "")]),
+            )
+            .unwrap();
+        }
+        let probe = "echo ENV:${ANTHROPIC_API_KEY:-gone}:${CLAUDE_CODE_OAUTH_TOKEN:-none}:END";
+        let binding = Binding { kind: "claude".into(), set: "5".into(), chain: None };
+        let (slot, _) = open_slot(&sessions, &probe_hello("claude-tok", probe), Some(binding), TermSize { cols: 200, rows: 24 }).unwrap();
+        assert_eq!(read_marker(&slot.current(), "ENV:", ":END").await, "ENV:gone:sk-ant-oat-x");
+        // An unbound session still gets the shared account — nothing else changed.
+        let (t, _) = open_or_attach(&sessions, &probe_hello("claude-plain", probe), TermSize { cols: 200, rows: 24 }).unwrap();
+        assert_eq!(read_marker(&t, "ENV:", ":END").await, "ENV:sk-ant-api-shared:none");
+    }
+
+    #[tokio::test]
+    async fn a_bound_hello_is_refused_loudly_and_never_spawns_on_another_provider() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        set_named_env(&mut sessions.lock().named, "openai", "3", None, pairs(&[("OPENAI_API_KEY", "k")])).unwrap();
+        for (session, binding, expect) in [
+            ("claude-x", Binding { kind: "claude".into(), set: "9".into(), chain: None }, "not loaded"),
+            ("claude-y", Binding { kind: "openai".into(), set: "3".into(), chain: None }, "cannot run on a openai"),
+            ("term-z", Binding { kind: "claude".into(), set: "none".into(), chain: None }, "not an agent session"),
+        ] {
+            let (mut client, server) = tokio::io::duplex(1 << 16);
+            client
+                .write_all(&Frame::HelloBound { hello: probe_hello(session, "sleep 5"), binding }.encode())
+                .await
+                .unwrap();
+            handle(server, Arc::clone(&sessions)).await.unwrap();
+            let mut reply = Vec::new();
+            client.read_to_end(&mut reply).await.unwrap();
+            match Frame::decode(&reply).unwrap().unwrap().0 {
+                Frame::Refused { reason } => assert!(reason.contains(expect), "{session}: {reason}"),
+                other => panic!("{session}: expected a refusal, got {other:?}"),
+            }
+            assert!(!sessions.lock().by_name.contains_key(session), "{session} was started anyway");
+        }
+        // Reserved names are refused at delivery.
+        assert!(set_named_env(&mut sessions.lock().named, "claude", "none", None, pairs(&[("A", "b")])).is_err());
+        assert!(set_named_env(&mut sessions.lock().named, "claude", "a b", None, pairs(&[("A", "b")])).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_bound_hello_is_acknowledged_before_the_replay() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        set_named_env(&mut sessions.lock().named, "claude", "1", None, pairs(&[("X", "y")])).unwrap();
+        let (mut client, server) = tokio::io::duplex(1 << 16);
+        let binding = Binding { kind: "claude".into(), set: "1".into(), chain: None };
+        client
+            .write_all(&Frame::HelloBound { hello: probe_hello("claude-ack", "echo hi; sleep 5"), binding }.encode())
+            .await
+            .unwrap();
+        let task = tokio::spawn(handle(server, Arc::clone(&sessions)));
+        let mut buf = vec![0u8; 64];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await.unwrap().unwrap();
+        assert_eq!(Frame::decode(&buf[..n]).unwrap().unwrap().0, Frame::Ack { ok: true });
+        drop(client);
+        let _ = task.await;
+        let _ = sessions.lock().by_name.get("claude-ack").unwrap().terminal().kill();
+    }
+
+    #[tokio::test]
+    async fn a_named_set_is_acknowledged_and_an_old_daemon_s_silence_is_an_error() {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        let (mut client, server) = tokio::io::duplex(4096);
+        client
+            .write_all(&Frame::SetNamedEnv { kind: "claude".into(), set: "4".into(), label: Some("L".into()), env: pairs(&[("A", "b")]) }.encode())
+            .await
+            .unwrap();
+        handle(server, Arc::clone(&sessions)).await.unwrap();
+        let mut reply = Vec::new();
+        client.read_to_end(&mut reply).await.unwrap();
+        assert_eq!(Frame::decode(&reply).unwrap().unwrap().0, Frame::Ack { ok: true });
+        assert_eq!(sessions.lock().label("claude", "4").as_deref(), Some("L"));
+    }
+
+    /// End to end, in a sandbox: a fake `claude` prints a usage limit and
+    /// records it in its transcript; the monitor moves the session to the next
+    /// member, relaunches it with `--resume <conversation>` and the new set's
+    /// environment, types the continue message, and logs the switch `0600`.
+    #[tokio::test]
+    async fn a_usage_limit_moves_a_chained_session_to_the_next_member() {
+        let home = std::path::PathBuf::from(format!("/tmp/rmux-switch-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        let claude = home.join("bin/claude");
+        std::fs::write(
+            &claude,
+            r#"#!/bin/sh
+mkdir -p "$SANDBOX/.claude/sessions" "$SANDBOX/.claude/projects/-tmp"
+printf '{"pid":%s,"sessionId":"conv-e2e"}' $$ > "$SANDBOX/.claude/sessions/$$.json"
+echo "LAUNCH:$*:TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-none}:KEY=${ANTHROPIC_API_KEY:-none}:END"
+if [ "$1" != "--resume" ]; then
+  sleep 2
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf '{"type":"assistant","isApiErrorMessage":true,"timestamp":"%s","message":{"content":[{"type":"text","text":"Claude AI usage limit reached|1999999999"}]}}\n' "$ts" >> "$SANDBOX/.claude/projects/-tmp/conv-e2e.jsonl"
+  echo "Claude AI usage limit reached|1999999999"
+fi
+while read line; do echo "GOT:$line"; done
+"#,
+        )
+        .unwrap();
+        std::process::Command::new("chmod").arg("755").arg(&claude).status().unwrap();
+
+        let sessions = Arc::new(Mutex::new(Sessions { home: Some(home.clone()), ..Default::default() }));
+        {
+            let mut g = sessions.lock();
+            merge_env(&mut g.env, pairs(&[("ANTHROPIC_API_KEY", "shared-key")]));
+            set_named_env(&mut g.named, "claude", "a", Some("Personal".into()), pairs(&[("CLAUDE_CODE_OAUTH_TOKEN", "tok-a")])).unwrap();
+            set_named_env(&mut g.named, "claude", "b", Some("Work".into()), pairs(&[("CLAUDE_CODE_OAUTH_TOKEN", "tok-b"), ("ANTHROPIC_API_KEY", "")])).unwrap();
+        }
+        let mut hello = probe_hello("claude-e2e", claude.to_str().unwrap());
+        hello.env.insert("SANDBOX".into(), home.to_str().unwrap().into());
+        let chain = policy::ChainState {
+            id: "chain-1".into(),
+            members: vec!["a".into(), "b".into()],
+            active: "a".into(),
+            ..Default::default()
+        };
+        let binding = Binding { kind: "claude".into(), set: "a".into(), chain: Some(chain) };
+        let (slot, _) = open_slot(&sessions, &hello, Some(binding), TermSize { cols: 200, rows: 24 }).unwrap();
+        let first = slot.current();
+        assert_eq!(read_marker(&first, "LAUNCH:", ":END").await, "LAUNCH::TOKEN=tok-a:KEY=shared-key");
+
+        // Drive the monitor until it acts (the fake waits 2s before the limit).
+        let mut switched = false;
+        for _ in 0..40 {
+            check_chains(&sessions).await;
+            if !Arc::ptr_eq(&slot.current(), &first) {
+                switched = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(switched, "the monitor never switched: {}", String::from_utf8_lossy(&first.replay()));
+        let second = slot.current();
+        assert_eq!(
+            read_marker(&second, "LAUNCH:", ":END").await,
+            "LAUNCH:--resume conv-e2e:TOKEN=tok-b:KEY=none",
+            "relaunched on the next member, resuming the same conversation"
+        );
+        assert!(!read_marker(&second, "GOT:Continue", "account").await.is_empty(), "the continue message was not typed");
+
+        let report = binding_report(&sessions, "claude-e2e");
+        let b = report.binding.unwrap();
+        assert_eq!(b.set, "b");
+        assert!(b.chain.as_ref().unwrap().exhausted.contains_key("a"));
+        assert_eq!(b.chain.unwrap().exhausted["a"].resets_at, Some(1_999_999_999));
+
+        let log = fallback::read_log(&home);
+        assert_eq!(log.switches.len(), 1, "{log:?}");
+        let r = &log.switches[0];
+        assert_eq!((r.from.as_str(), r.to.as_deref(), r.outcome.as_str()), ("a", Some("b"), "switched"));
+        assert_eq!((r.from_label.as_deref(), r.to_label.as_deref()), (Some("Personal"), Some("Work")));
+        assert_eq!(r.source, "transcript");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(fallback::log_path(&home)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        // Debounce: the same limit record must not cause a second switch.
+        for _ in 0..3 {
+            check_chains(&sessions).await;
+        }
+        assert!(Arc::ptr_eq(&slot.current(), &second), "one limit caused two switches");
+        assert_eq!(fallback::read_log(&home).switches.len(), 1);
+
+        let _ = second.kill();
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

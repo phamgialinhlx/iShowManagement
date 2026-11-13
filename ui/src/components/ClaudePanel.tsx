@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel, invoke } from "../lib/bridge";
 
 import { api, hasBackend, type ClaudeStatus, type TargetRef } from "../lib/api";
@@ -9,7 +8,7 @@ import { contextLimit, sniffWindow } from "../lib/context-window";
 import { settleResize } from "../lib/terminal-resize";
 import { useWorkspace } from "../lib/workspace";
 import { basename } from "../lib/workspace-model";
-import { claudeTheme, gpuRendering } from "../lib/terminal-theme";
+import { claudeTheme } from "../lib/terminal-theme";
 import { readMonoStack } from "../lib/fonts";
 import { scaledFontSize, remeasureOnFontLoad } from "../lib/terminal-font";
 
@@ -25,14 +24,17 @@ const TERM_FONT_BASE = 12;
 const DROP_RETRY_DELAY_MS = 1200;
 import { imagesFrom, promptFor, uploadImage } from "../lib/paste-image";
 import { FOCUS_EVENT } from "../lib/shortcuts";
+import { registerPrefixTarget } from "../lib/prefix-runtime";
 import { ContextMeter } from "./ContextMeter";
 import { BrowserReports } from "./BrowserReports";
 import { record } from "../lib/activity";
 import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
 import { AGENT_MOUSE_MODES, MouseModeTracker } from "../lib/mouse-modes";
+import { replayMouseRepair } from "../lib/replay-modes";
 import { PanelLoader } from "./PanelLoader";
 import { Icon, IconButton, RELOAD_PATH } from "./SessionPaneChrome";
+import { loadGpuRenderer } from "../lib/gpu-renderer";
 
 /**
  * A Claude Code session.
@@ -123,6 +125,9 @@ function ClaudeStatusStrip({
   );
 }
 
+/** How long after an attach's first byte the replay-mode repair stays armed. */
+const REPLAY_REPAIR_MS = 5000;
+
 type Choice = { key: string; label: string; selected: boolean };
 type Prompt = { question: string; choices: Choice[]; fingerprint: string };
 type ClaudeState = { prompt: Prompt | null; working: boolean };
@@ -135,6 +140,9 @@ export function ClaudePanel({
   fullscreen,
   skipPermissions,
   modelProfile,
+  activeProfile,
+  bypassApprovals,
+  codexSandbox,
   lowLatency,
   agentSession,
   headerActions,
@@ -157,7 +165,14 @@ export function ClaudePanel({
    * neither, so calling them would error. A pi session's rail dot not updating
    * is a known, deferred gap, not a reason to invent a pi status call.
    */
-  provider?: "claude" | "pi";
+  provider?: "claude" | "pi" | "codex";
+  /**
+   * Codex only: `--dangerously-bypass-approvals-and-sandbox`, decided when the
+   * session was created — the `skipPermissions` rule, for Codex.
+   */
+  bypassApprovals?: boolean;
+  /** Codex only: `--sandbox`. Absent is Codex's own default. */
+  codexSandbox?: "read-only" | "workspace-write";
   /** Conversation to continue instead of starting a new one. */
   resume?: string;
   /** Let Claude use its fullscreen TUI. Off by default — see `Rendering`. */
@@ -181,6 +196,11 @@ export function ClaudePanel({
    * selected would leave a session talking to the last provider used.
    */
   modelProfile?: string;
+  /**
+   * For a fallback chain, the member the host last ran this session on, so a
+   * restart resumes there rather than on the first (possibly spent) member.
+   */
+  activeProfile?: string;
   /**
    * The daemon session name to start (or reattach) under.
    *
@@ -251,6 +271,11 @@ export function ClaudePanel({
   // instead of being sent to Claude. See lib/mouse-modes.ts.
   const mouseModes = useRef(new MouseModeTracker());
   const [selectMode, setSelectMode] = useState(false);
+  // Read by the terminal effect, which outlives renders (it reruns only on
+  // `generation`) — the state value it closed over would go stale the moment
+  // SELECT is toggled.
+  const selectModeRef = useRef(false);
+  selectModeRef.current = selectMode;
   // A black rectangle is indistinguishable from a crash, so the pane says what
   // it is doing until Claude's first byte arrives.
   const [ready, setReady] = useState(false);
@@ -294,7 +319,9 @@ export function ClaudePanel({
   const sendImages = async (images: File[]) => {
     const id = runningRef.current;
     if (!id) {
-      setError(`${provider === "pi" ? "pi" : "Claude"} is not running in this session yet.`);
+      setError(
+        `${provider === "pi" ? "pi" : provider === "codex" ? "Codex" : "Claude"} is not running in this session yet.`,
+      );
       return;
     }
 
@@ -338,7 +365,13 @@ export function ClaudePanel({
       requestAnimationFrame(() => requestAnimationFrame(() => xtermRef.current?.focus()));
     };
     window.addEventListener(FOCUS_EVENT, onFocus);
-    return () => window.removeEventListener(FOCUS_EVENT, onFocus);
+    // A literal prefix sent while focus is outside every terminal lands here —
+    // see `registerPrefixTarget`.
+    const unregister = registerPrefixTarget(sessionId, (d) => xtermRef.current?.input(d, true));
+    return () => {
+      window.removeEventListener(FOCUS_EVENT, onFocus);
+      unregister();
+    };
   }, [sessionId]);
 
   useEffect(() => {
@@ -393,14 +426,9 @@ export function ClaudePanel({
     // Skipped entirely when the operator has turned GPU rendering off — see
     // `gpuRendering`. Loading the addon and disposing it still creates and
     // loses a WebGL context, which is worse than never loading it.
-    try {
-      if (!gpuRendering()) throw new Error("gpu rendering is off");
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      xterm.loadAddon(webgl);
-    } catch {
-      // Canvas/DOM fallback is automatic; slower, but it renders.
-    }
+    // See `lib/gpu-renderer.ts`: also repaints after a wake, which can
+      // corrupt the glyph atlas without any context-loss event.
+      const gpu = loadGpuRenderer(xterm);
 
     // Copy and paste are xterm's own; this adds select-all, and off macOS the
     // Ctrl+C rule. Claude's TUI turns on mouse reporting, so a plain drag goes
@@ -444,13 +472,42 @@ export function ClaudePanel({
     // it assumes, so a tracked set still wins; `AGENT_MOUSE_MODES` is only the
     // fallback, and only here, where the TUI is known to want the mouse.
     const restoreMouse = () => {
-      if (selectMode) return;
+      if (selectModeRef.current) return;
       const tracked = mouseModes.current.restoreSequence();
       if (tracked) xterm.write(tracked);
-      else if (xterm.buffer.active.type === "alternate") xterm.write(AGENT_MOUSE_MODES);
+      else if (xterm.buffer.active.type === "alternate") {
+        xterm.write(AGENT_MOUSE_MODES);
+        // Recorded as if the program had sent it, so SELECT turns off exactly
+        // what is now on and puts exactly it back.
+        mouseModes.current.observe(AGENT_MOUSE_MODES);
+      }
     };
     restoreMouse();
-    const buffers = xterm.buffer.onBufferChange(restoreMouse);
+
+    // **A replay that left fullscreen Claude on the alt screen with no mouse.**
+    // An older daemon replays a raw ring that, minutes into a session, no
+    // longer holds the `?1002h` Claude sent at startup — but still puts xterm
+    // on the alternate screen, where the wheel becomes ↑/↓ and recalls old
+    // prompts. Decided from xterm's *actual* modes after each chunk is parsed,
+    // for the first seconds of an attach only (the replay); after that the
+    // program owns its modes. See `lib/replay-modes.ts`.
+    let repairUntil = Number.POSITIVE_INFINITY;
+    const repairReplay = () => {
+      const seq = replayMouseRepair({
+        provider,
+        fullscreen,
+        buffer: xterm.buffer.active.type,
+        mouseTracking: xterm.modes.mouseTrackingMode,
+        selectMode: selectModeRef.current,
+      });
+      if (!seq) return;
+      xterm.write(seq);
+      mouseModes.current.observe(seq);
+    };
+    const buffers = xterm.buffer.onBufferChange(() => {
+      restoreMouse();
+      if (Date.now() < repairUntil) xterm.write("", repairReplay);
+    });
 
     // Vietnamese and every other IME that rewrites what it already typed.
     // macOS Telex fires no composition events at all — it inserts the plain
@@ -486,7 +543,9 @@ export function ClaudePanel({
           configure(sessionId, { contextWindow: sniffed });
         }
       }
-      xterm.write(bytes);
+      if (repairUntil === Number.POSITIVE_INFINITY) repairUntil = Date.now() + REPLAY_REPAIR_MS;
+      if (Date.now() < repairUntil) xterm.write(bytes, repairReplay);
+      else xterm.write(bytes);
       setReady(true);
       // Bytes are arriving, so whatever broke is fixed. Cleared here rather than
       // when the attach call returns: the call can succeed against a connection
@@ -520,7 +579,23 @@ export function ClaudePanel({
           // the session object we already hold. The attach path is id-keyed and
           // provider-blind — a pi session reattaches through the same call.
           invoke("claude_attach", { id: existing, output }).then(() => ({ id: existing }))
-        : provider === "pi"
+        : provider === "codex"
+          ? // Codex: the sandbox/bypass choice and an *OpenAI* profile, applied
+            // as the `openai` credential kind so nothing of Claude's reaches it.
+            invoke<{ id: string }>("codex_start", {
+              target,
+              cwd,
+              resume,
+              sessionName: agentSession ?? `codex-${sessionId}`,
+              sandbox: codexSandbox,
+              bypassApprovals,
+              modelProfile,
+              lowLatency,
+              cols: xterm.cols,
+              rows: xterm.rows,
+              output,
+            })
+          : provider === "pi"
           ? // pi has no fullscreen / skipPermissions / modelProfile — its start
             // takes only the connection, folder, resume, name and initial size.
             invoke<{ id: string }>("pi_start", {
@@ -545,6 +620,7 @@ export function ClaudePanel({
               fullscreen,
               skipPermissions,
               modelProfile,
+              activeProfile,
               lowLatency,
               cols: xterm.cols,
               rows: xterm.rows,
@@ -698,6 +774,7 @@ export function ClaudePanel({
       window.removeEventListener("rmux-theme", onTheme);
       onData.dispose();
       xtermRef.current = null;
+      gpu();
       xterm.dispose();
       // The session is deliberately NOT stopped: Claude may be mid-task, and
       // this view may simply be remounting. It is stopped only when the coding
@@ -765,9 +842,12 @@ export function ClaudePanel({
 
     const tick = async () => {
       try {
-        const next = await invoke<ClaudeState & { exited?: number }>("claude_state", {
-          id: claudeId,
-        });
+        // Codex's screen is read by Codex's rules (`codex_state`), returned in
+        // the same shape; everything below is then the Claude path unchanged.
+        const next = await invoke<ClaudeState & { exited?: number }>(
+          provider === "codex" ? "codex_state" : "claude_state",
+          { id: claudeId },
+        );
         if (cancelled) return;
 
         // **The connection died.** The ssh attach process exited, so its terminal
@@ -848,7 +928,7 @@ export function ClaudePanel({
     // **Claude only.** `api.claudeSessions` / `api.claudeTranscript` read
     // Claude's own `.jsonl`; pi has neither, so this cosmetic poll is skipped
     // rather than left to error against a transcript that does not exist.
-    if (provider === "pi") return;
+    if (provider === "pi" || provider === "codex") return;
     if (!claudeId || !cwd) return;
     let cancelled = false;
 
@@ -1013,6 +1093,7 @@ export function ClaudePanel({
               term.write(
                 next ? mouseModes.current.disableSequence() : mouseModes.current.restoreSequence(),
               );
+              selectModeRef.current = next;
               setSelectMode(next);
             }}
           >

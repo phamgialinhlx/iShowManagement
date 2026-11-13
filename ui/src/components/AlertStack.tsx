@@ -52,13 +52,14 @@ export function AlertStack() {
               type="button"
               className="flex min-w-0 flex-1 flex-col gap-[3px] text-left"
               onClick={() => {
-                activate(alert.sessionId);
+                if (alert.onOpen) alert.onOpen();
+                else activate(alert.sessionId);
                 dismiss(alert.sessionId);
               }}
-              title="Go to this session"
+              title={alert.onOpen ? "Open" : "Go to this session"}
             >
               <span className="micro" style={{ color: alert.asking ? "rgb(var(--primary))" : "var(--text-soft)" }}>
-                {alert.asking ? "NEEDS YOU" : "FINISHED"}
+                {alert.label ?? (alert.asking ? "NEEDS YOU" : "FINISHED")}
               </span>
               <span className="data truncate text-[12px]" style={{ color: "var(--text)" }}>
                 {alert.title}

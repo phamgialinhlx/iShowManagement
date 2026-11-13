@@ -211,7 +211,7 @@ sessions in it.
   is not enough when headers, controls and a long path can exceed a short window
   on their own.
 - Existing ceilings: the transcript, SENT, the Jira picker, today's list, the
-  task list, the host-wide resume list, and the running-sessions picker — a host
+  task list, the host-wide resume list, the connect dialog's `~/.ssh/config` host list, and the running-sessions picker — a host
   routinely holds more than fits, because every rebuilt agent leaves its
   predecessor's daemon running and `list` unions them all. Anything added beside
   them needs one.
@@ -391,6 +391,35 @@ connection while the operator had been told the problem was solved.
   Those tests hold a `SERIAL` mutex — they share one `authorized_keys`, and in
   parallel each counts the other's line.
 
+**A key the operator *chooses* follows the same rules** (Connect a server › KEY
+FILE…, or a machine row's right-click › Connection settings…):
+
+- **It is one more `-i`, chosen first, rmux's own key still after it.** Additive,
+  never `IdentitiesOnly`; de-duplicated when the operator picks rmux's own file;
+  skipped silently when the file is gone. Every ssh rmux runs gets it through
+  `keys::identity_args_for` — master, client commands (Windows), mosh's bootstrap,
+  the forwards (`ControlPath=none`, so they inherit nothing) — and the CLI through
+  `servers::ssh_args`.
+- **It is not the server's identity.** `TargetRef.identity` is ignored by
+  `TargetRef::id`, `serverId`, the target caches and the ControlMaster socket, so
+  picking a key never re-keys a server's projects and sessions. It lives in a side
+  table in `rmux_ssh::keys`, keyed by the same `user@alias` label rmux's own key is
+  filed under (so, like that key, it is per label, not per port). A `TargetRef`
+  carrying a path *adds* to the table; only `servers_sync` — the server list —
+  *replaces* it, which is how DEFAULT takes a key away. A `TargetRef` built
+  somewhere without the field must not be able to un-choose a key.
+- **Path only, never contents**, in `localStorage` and in `~/.rmux/servers.json`.
+  The key stays where the operator keeps it, under their own permissions.
+- **Host, user and port are which server it is; the key is how rmux gets in.**
+  Connection settings edits the key in place and says that a different
+  host/user/port is a new server, rather than silently re-keying everything.
+- **TEST CONNECTION is its own connection** (`ControlPath=none`) and builds its
+  host id by hand rather than through `TargetRef::id`, so a test the operator
+  cancels registers nothing and keeps nothing open.
+- **The picker is `plugin:dialog|open`**, which needs `dialog:allow-open` in
+  `capabilities/default.json` (`tests/key_file_dialog.rs`). `<input type=file>`
+  hands the webview bytes, never a path, and a key is offered by path.
+
 ## Managing the host
 
 - **A pid crosses the IPC bridge as a `u32`.** This is the one place the operator points at
@@ -421,6 +450,70 @@ inflates it by a third, and `ARG_MAX` caps a single argument at 128 KiB, so an a
 works for an icon and fails on anything real. Verified against a real host — same md5, `600`,
 recognised as a PNG. Like a browser report, the path is *typed* into the composer and never
 submitted.
+
+## rmux follows herdr — layout, look and keyboard
+
+Since November 2026 rmux deliberately adopts the model and look of herdr (github.com/herdrdev/herdr,
+Apache-2.0), keeping everything rmux has that herdr lacks (glass, the instruments rail, files,
+Host panel, Jira, Progress, mosh, the web build). The decision is the operator's and it
+**supersedes SIGNAL ROOM as the visual direction**; SIGNAL ROOM remains a selectable theme.
+
+- **Project (herdr's "workspace") → tabs → a binary split tree of panes**
+  (`ui/src/lib/layout-tree.ts`, pure and tested by `ui/layout-tree-check.ts`). The equal-size
+  grid is gone. **Every session lives in exactly one leaf of one tab of its own project** —
+  `normalizeLayout` repairs a violation on load rather than letting a session become
+  unreachable, and a session is never mounted twice. Layout is per window; sessions are shared.
+- **The v3 → v4 migration gives each existing session its own tab and preserves every id**,
+  because `reattachName` derives the daemon name from it. Closing a pane holding a session ends
+  that session (with a confirmation naming what ends); detach still kills nothing.
+- **Panes render flat and absolutely positioned, keyed by leaf id**, so reshaping the tree never
+  remounts a terminal; a warm set of recent tabs stays mounted behind `display:none`.
+- **The prefix key (`ctrl+b`) is intercepted inside xterm's custom key handler**, the single
+  handler `attachClipboard` installs — a window listener is too late, xterm has already written
+  `\x02` to the pty, and a second `attachCustomKeyEventHandler` silently replaces the clipboard
+  rules. Pressing the prefix twice sends it literally; it never fires during IME composition or
+  inside a text input/Monaco. `ui/prefix-terminal-check.ts` pins this against a real xterm.
+- **Themes are herdr's palettes** (Catppuccin Mocha default) exposed as slot variables
+  (`--accent`, `--surface0`, `--overlay0`, `--st-working` …); every older token is derived from
+  them. Corners use `--radius`; SIGNAL ROOM sets it to 0.
+- **The sidebar is herdr's**: spaces (projects with branch ↑ahead ↓behind, polled lightly via
+  `git_branch` — `--no-optional-locks`, never for a disconnected server) and agents (grouped or
+  by priority), collapsing to a numbered rail.
+
+- **Several projects can be on screen at once** (`Layout.view`, a `ProjectTree` reusing the
+  same generic split code). `activeProject` is the focused tile; a project appears in at most
+  one tile; closing a tile never ends sessions. "On screen" (`visibleLeaves`) spans every
+  tile's active tab — the sidebar marks, hands-free, notification suppression and child
+  placement all read it.
+- **⌘K is the quick switcher** (`quick-switch.ts`, pure ranking). Monaco keeps ⌘K while it has
+  focus. Its input stops every key reaching window handlers — Ctrl+N means "next row" there,
+  and leaking it opened "Connect a server" behind the overlay.
+
+## Agents drive rmux; `rmux` is one command everywhere
+
+`rmux-agent` is also the operator's CLI: tmux vocabulary (`ls`, `attach`, `new`,
+`kill-session`, `rename-session`, `has-session`, `detach`) plus herdr-style orchestration
+(`spawn`, `prompt --wait`, `wait --until`, `read`, `keys`, `interrupt`, `close`, `children`).
+See `docs/cli.md` and `docs/orchestration.md`.
+
+- **It runs on the host, beside the daemon, so it works with the app closed** — the same
+  reason the Redstone bridge lives there. Inside every session the daemon sets `RMUX_ENV`,
+  `RMUX_SESSION`, `RMUX_BIN` and puts the `~/.rmux/bin/rmux` shim first on PATH (also as an
+  assignment on the launch line, because Debian's `/etc/profile` resets PATH).
+- **Children are recorded on the host** (`~/.rmux/children.json`, 0600, pruned) and the app
+  adopts a child of a session it shows as a split beside the parent **without moving focus**;
+  a detached child is remembered (`rmux.children.seen`) and not re-adopted. `close` refuses
+  anything the caller did not spawn (`not_owner`); `--skip-permissions` is refused unless the
+  parent itself runs with it.
+- **This does not weaken the bridge's no-`exec` rule.** The bridge carries a remote caller's
+  verbs; the CLI is run by someone already holding a shell on that host.
+- **The detach key is opt-in per attach** (`--detach-key`, default `C-b d` for the CLI only).
+  The app never passes it: the app's own prefix is `ctrl+b`, and a double prefix there sends a
+  literal `\x02` — with the key always on, `ctrl+b ctrl+b d` inside the app would detach.
+- **The client knows the operator's servers from `~/.rmux/servers.json`**, written by the app
+  (`servers_sync`, no secrets). Hosts go to `ssh` verbatim with the rmux key offered — and the
+  key chosen for the server, by *path* (`identity`), when one was; the far side resolves its own
+  `$HOME`; older agents are handled through their plain `list`.
 
 ## Design system
 
@@ -560,9 +653,13 @@ to say "this is a string".
 
 ## The session rail is the answer to "which machine needs me?"
 
-- **A running session turns; it does not blink.** A static amber dot cannot distinguish work
-  still going from work that stopped an hour ago, which is the single most useful thing the
-  rail can say. Rule 2 holds — the ring rotates continuously and the dot never disappears.
+- **Five states, herdr's vocabulary, one mapping** (`ui/src/lib/agent-state.ts`): blocked
+  (waiting on you), working, done (idle *and unseen*), idle, unknown (an agent session with no
+  report yet). Priority blocked > done > working > idle > unknown, rolled up as the maximum
+  through tab → project → machine. Indicators are **static** (dots or symbols, a setting); the
+  rotating ring is gone — "done" now carries the distinction it used to draw, because it is the
+  one state that says *work stopped since you last looked*. Terminals stay neutral, not
+  "unknown": no report is expected from them.
 - **"Finished" (unseen) is a watermark, not an edge flag.** `idle` cannot tell a session that
   just finished ten minutes of work from one that has never run, and those deserve opposite
   amounts of attention. A session is *unseen* when it is idle and its last status change is
@@ -701,12 +798,13 @@ safety property, not an oversight.
 
 ## Disconnecting a server
 
-Six caches hold a resolved target — terminal, claude, files, metrics, agent and
-**claude_status** — and one survivor keeps the connection up. A disconnect that
+Seven caches hold a resolved target — terminal, claude, files, metrics, agent,
+**claude_status** and the **`fs-serve` supervisor** (`WorktreeStore`) — and one
+survivor keeps the connection up. A disconnect that
 half-worked is indistinguishable from one that did nothing, so `server_disconnect`
 returns how many it evicted.
 
-- **The status watcher is aborted, not dropped.** Dropping a `JoinHandle` does
+- **The status watcher and the `fs-serve` supervisor are aborted, not dropped.** Dropping a `JoinHandle` does
   not cancel the task; it runs `watch-status` in a reconnect loop and would dial
   straight back out, re-opening the connection just closed. The operator sees a
   server that refuses to disconnect and nothing names the cause.
@@ -821,7 +919,7 @@ sees, and nothing anywhere says why**.
   character), `Mod+T` → `\x14`, `Mod+P` → `\x10` (previous command in every shell), and the
   four `Mod+Alt+Arrow` → `\e[1;7A..D`. Off macOS they are `Mod+Shift+…`, the Windows/Linux
   terminal convention, measured free.
-- **Off macOS the grid moves on `H/J/K/L`, because no arrow chord is free.** xterm encodes
+- **Off macOS pane focus moves on `H/J/K/L`, because no arrow chord is free.** xterm encodes
   *every* modifier combination of an arrow — `\e[1;3D`, `\e[1;4D`, `\e[1;6D`, `\e[1;7D` were
   all measured taken — so there is nothing to pick. Letters are the only free directional set.
 - **`reachesTerminal` marks a rebind that collides (REACHES SHELL); it is a model of xterm's
@@ -839,9 +937,112 @@ sees, and nothing anywhere says why**.
   operator to ignore the marker, which costs more than the marker is worth. Worth measuring on
   a Mac; if it collides there too, the macOS defaults need the same treatment.
 
+## Files follow Zed's model
+
+`rmux-agent fs-serve` (`crates/rmux-fs/src/serve.rs`) is rmux's version of Zed's headless
+remote server: **one long-lived process per host**, run over the existing ControlMaster as
+`ssh -T host -- <agent> fs-serve`, speaking a framed protocol on stdin/stdout
+(`crates/rmux-fs/src/wire.rs`). On this machine the very same server runs in-process over a
+`tokio::io::duplex` — same protocol, same code; only the pipe differs. No socket, no new network
+surface, the user's own rights, and it exits the moment stdin closes.
+
+- **The host sends a snapshot, then changes.** `open_worktree` streams every entry under the root,
+  breadth-first, `.gitignore`-aware (`.gitignore`, `.ignore`, `.git/info/exclude`,
+  `core.excludesFile`, and the ignore files above the root up to the repo); then a watcher —
+  inotify per scanned directory on Linux, one recursive FSEvents stream on macOS — streams
+  `changes`, debounced (40 ms quiet, 250 ms max hold) and coalesced. Rust keeps a mirror per
+  (server, root) (`crates/rmux-app/src/worktree.rs`) and so does the webview
+  (`ui/src/lib/worktree.ts`), so **expanding a folder and quick open never touch the network**.
+- **Ignored directories are one lazy entry, never scanned.** `node_modules` and `target` outweigh
+  the project; they list on demand when expanded. `.git` is never in the tree, but a change under
+  it emits `git_changed`. Past 250k entries the scan stops, says `truncated`, and names the
+  directories it left out — those are lazy from then on. The tree says `live · partial`.
+- **Frames are `u32 header len | u32 payload len | JSON | raw bytes`.** File bytes are the raw
+  payload, never base64 in the JSON. **A short read is an error** — EOF inside a frame is
+  `UnexpectedEof`, at every cut point (a test cuts at each byte); and the client checks the read
+  payload against the size the header claims.
+- **Names are bytes.** A path in a header is a JSON string when it is UTF-8 and `{"b64": …}` when it
+  is not; it round-trips exactly. The webview cannot hold raw bytes in a string, so a non-UTF-8 byte
+  crosses to it as a private-use code point (`U+F780 + (b − 0x80)`) and Rust maps it back —
+  lossless both ways, including for a name that genuinely contains one of those code points.
+- **Every shell-path invariant holds here too.** Saving copies over the original (`O_TRUNC` on the
+  same inode — mode `0600` and hard links survive, tested); create is `O_EXCL`; create-dir is
+  `mkdir`, not `mkdir -p`; upload is `O_EXCL` then chunks, and a short or aborted upload is
+  removed; rename is `renameat2(RENAME_NOREPLACE)` on Linux (the raw syscall — musl's wrapper is
+  recent) and `renamex_np(RENAME_EXCL)` on macOS, falling back to `link`+`unlink` for a file on a
+  filesystem that refuses the flag. Only a *directory* on such a filesystem uses check-then-rename,
+  which can race — the one case with no atomic primitive, named in the code rather than hidden.
+- **Saves are mtime-checked.** `fs_read_versioned` returns a version token (the mtime in ns, as a
+  string — a JS number cannot hold it); `fs_write_versioned` quotes it and the server refuses with
+  `conflict` if the disk moved. The editor then shows *changed on disk — reload / keep mine*
+  inline, and stops saving until the operator chooses; neither side is ever overwritten silently.
+  A clean buffer whose file changed on disk reloads by itself, keeping cursor and scroll
+  (`pushEditOperations` + view state, not `setValue`). Contents are cached in Rust (64 MB LRU),
+  served only when the watcher's current version matches the cached one.
+- **The fallback is the shell path, transparently.** `AgentFs` implements the same `FileSystem`
+  trait and answers every call through `fs-serve` when it is live, and through `TargetFs`/`LocalFs`
+  otherwise: Windows hosts (no agent), an agent that predates `fs-serve` (it prints `unknown
+  command` instead of a hello), a dev build with no agents, or a connection still coming up — a
+  first listing never waits on an agent upload. On those hosts the tree lists on demand and says
+  `on demand`; quick open says it has no file list rather than offering a search that cannot work.
+- **Reconnect resets its backoff only after a connection that lasted** (30 s) — the bridge's rule.
+  A reconnected mirror is rebuilt to the side and swapped in as **one diff**, so the tree never
+  empties and refills under the operator.
+- **The tree is virtualised and scroll-anchored.** A file an agent creates above the fold must not
+  push every visible row down a line (`anchoredScrollTop`, pinned in `ui/worktree-check.ts`).
+- **Quick open is ⌘P on macOS, Ctrl+Shift+P elsewhere** (Ctrl+P is the shell's previous-command
+  key). Progress moved to Mod+Shift+Y on both; a stored map holding Progress on its old default is
+  migrated, or the two would collide. Quick open fires even with Monaco focused (`EDITOR_SAFE` in
+  `match`) — Monaco binds nothing to either chord — while every other shortcut still yields to
+  the editor. Ranking is path-aware (`ui/src/lib/quick-open.ts`, pinned by
+  `ui/quick-open-check.ts`): a name match outranks a directory match.
+- LSP is a later slice; it will ride the same connection.
+
+## Transfers — every download and upload, kept until it is done
+
+`ui/src/lib/transfers.ts` (model + store, pinned by `ui/transfers-check.ts`) and
+`ui/src/lib/transfer-run.ts` (the runners). Every entry point registers there — the tree's
+"Download a copy", "Upload files…", a drop onto the tree — and the footer's TRANSFERS control
+lists them. Their status used to live in the context menu and died with it.
+
+- **Metadata only in `rmux.transfers`**, never bytes, and the persisted fields are named one by
+  one in `serialize` so nothing can ride along. Pruned on every write to 100 entries / 7 days;
+  a running entry is never pruned. The quota is the one the session list lives in.
+- **Interrupted, never "done".** A running entry whose owning window stopped heartbeating
+  (12 s) is *interrupted*, with the reason. Judged by heartbeat, not "running at load", because a
+  second window opening is not a restart — the first is still moving those bytes. Each window is
+  the authority for the transfers it runs (`merge`).
+- **An interrupted upload has no retry control at all.** The webview held a `File` with no path,
+  and it is gone with the page; a RETRY there could only fail. It says "drop the file again".
+  A download keeps RETRY — its source is still on the server.
+- **Downloads are staged as `<name>.part` and moved into place only when complete**
+  (`files::download_into`). Before this the bytes went straight to the final name, so a dropped
+  connection or short read left a truncated file exactly where the operator would look. The
+  move is `hard_link` (refuses to clobber; picks the next free name on a collision), with
+  check-then-rename only on a filesystem without hard links. Failure and cancel remove the
+  `.part`. Tests cover all three.
+- **Cancel reaches a running transfer by id from any window** (`LiveTransfers` in the shared
+  ctx). A download stops via `fs_download_cancel` — the future is *boxed* and dropped before the
+  staging file is removed, because on Windows an open file cannot be deleted. An upload cancel is
+  `fs_upload_abort`, which now also stops a *send already in progress*: removing the staging copy
+  alone did not, since an open file outlives its name.
+- **The far side removes a short upload.** `upload_script` now takes the expected size and, after
+  `cat`, removes a file of any other length and answers `S`. A cancel on the shell path closes our
+  end of the pipe, so `cat` succeeds on a truncated file — without the check that file would sit
+  on the host looking complete. Removing it is safe *because* of `set -C`: this run created it.
+  On fs-serve a cancel surfaces as a read error so `upload_stream` sends `UploadAbort`.
+- **Progress is measured, ~4/s:** downloads over a `Call` sink channel (`{id, done, total}`),
+  uploads by chunks *acknowledged* while staging and `fs-upload-progress` while sending. `total`
+  is `null` until known and the row shows the sweep, never a guessed percentage.
+- **SHOW IN FINDER is `fs_reveal_download`, restricted to the downloads folder** — it launches a
+  program on this machine from the webview. Elsewhere it opens the folder. `Web::No`, like
+  `fs_download`.
+
 ## Searching a project
 
-**`grep` runs on the machine that owns the disk** (`crates/rmux-fs/src/search.rs`). Listing
+**Search runs on the machine that owns the disk.** With `fs-serve` live it runs in-process there
+(`serve::search`: the same ignore rules, skip list, 500 ceiling and binary skip); otherwise
+**`grep` runs there** (`crates/rmux-fs/src/search.rs`). Listing
 directories and reading each file is one round trip per file, which over SSH is unusable on
 any real checkout — a few thousand files is a few thousand connections' worth of latency even
 with ControlMaster holding the socket. Only the matches cross the network.
@@ -962,7 +1163,8 @@ stopped working. These are not aspirations; each one is a rule with a test.
 - **The rail marks every session on screen, not just the focused one.** In a grid the operator
   is looking at four of eight and nothing said which four, so "is that one visible or do I need
   to go and find it?" could only be answered by looking away and counting panes. Derived with
-  the same `gridLayout` the workbench uses — two sources for one fact is two chances to drift.
+  `visibleLeaves` from `layout-tree.ts`, the same function the pane area renders from — two
+  sources for one fact is two chances to drift.
 - **A context menu flips before it clamps.** Right-clicking near the bottom of a file tree put
   half the items below the window edge, unreachable, with nothing indicating they existed —
   Delete was simply gone. Growing *upward* from the cursor keeps the pointer on the menu's edge
@@ -1055,12 +1257,38 @@ and a pinned composer is what the operator asked for. Inline stays available per
   terminal's own `Cmd-F` over the buffer (the conversation lives on the alternate screen, not
   xterm's scrollback) — Claude's `Ctrl-O` transcript search replaces it, and `[` in transcript
   mode writes the conversation back into native scrollback on demand.
-- **Reattach is the open gap.** The daemon replays its raw byte scrollback verbatim
-  (`rmux-term`), and a replay that contains a mid-stream `?1049h` does **not** reconstruct the
-  screen — so a reattached fullscreen pane can come back garbled. The fix is the orca approach:
-  daemon-side DECSET/`?1049` **mode-mirroring** (the Rust twin of `mouse-modes.ts`) plus a
-  coherent reattach that reissues the current mode set and screen instead of the raw toggles.
-  That is the next slice; until it lands, defaulting to fullscreen ships this known limitation.
+- **Reattach: modes are mirrored now, and the screen is still not reconstructed.** The replay is
+  a 256 KiB ring that drains from the front, and a fullscreen TUI sets its modes once and then
+  redraws for hours. So a session that ran detached for minutes (an agent-spawned child adopted
+  late, above all) replayed a stream whose `?1002h`/`?1006h` were long gone while later output
+  still put xterm on the alternate screen, and xterm with the alt buffer active and no mouse mode
+  turns the **wheel into ↑/↓**. Every wheel step recalled an earlier prompt in Claude's composer.
+  - **Daemon side** (`rmux-term/src/modes.rs`): a streaming, allocation-free parser of
+    `ESC [ ? Pm h|l` only, fed the bytes **as they leave the ring**, so it holds the mode state at
+    the ring's first byte. It tracks alt screen `1049/1047/47`, mouse `1000/1002/1003`, encodings
+    `1005/1006/1015`, `1004`, `2004`, DECCKM `1` and cursor `25`. `snapshot()` puts that state in
+    front of the ring: alt screen first, then the others in the order the program last changed
+    them, because terminals treat the mouse modes as one setting and `1000h 1002h 1000l` is not
+    `1000l 1002h`. The ring's later toggles then replay over it, so prefix plus ring has the same
+    effect as the whole stream. A mode never touched is never mentioned. After a drain the cut
+    moves on to the next ESC or line start (at most 4 KiB further, and the skipped bytes still go
+    through the tracker), so the ring never resumes mid-sequence and swallows the prefix. Tests
+    were red on the old `Scrollback` before the fix. Like every agent fix, a host gets it only
+    from a **new daemon** (see the next section).
+  - **App side** (`lib/replay-modes.ts`, wired into `ClaudePanel`): this is the net for sessions
+    an older daemon still serves. For the first 5s of an attach, after each chunk is parsed, a
+    **Claude** session that is **fullscreen** (`fullscreen !== false`), on the alt buffer, with
+    `xterm.modes.mouseTrackingMode === "none"` and SELECT off gets `?1002h?1006h` written **into
+    xterm**, never to the pty. The sequences are also fed to the Select-mode tracker, so SELECT
+    turns off exactly what is on. The decision reads xterm's real mode, not the tracker: a
+    surviving `?1006h` or `?1004h` leaves the tracker non-empty while the wheel still sends
+    arrows. Inline Claude, pi, Codex, dsh and terminals are untouched. `replay-modes-check.ts`
+    tests the decision, and `xterm-clipboard-check.ts` proves it against a real xterm: arrows
+    before, SGR wheel reports after.
+  - **Still open:** the *screen* is not reconstructed. A replay holding a mid-stream `?1049h`
+    redraws whatever the ring holds, so a reattached fullscreen pane can still come back garbled
+    until Claude repaints. The rest of the orca approach (reissuing a coherent screen rather than
+    raw bytes) is the next slice.
 - **orca does not force the mode at all** — it runs whatever the agent defaults to and makes its
   *terminal* handle a fullscreen TUI well (wheel→line-report translation, mode mirroring,
   scrollback checkpointing). That works because its users are on a Claude new enough to default
@@ -1263,6 +1491,35 @@ resolves on the server. That is the arrangement that actually delivers "no port 
   left for the operator to send — never submitted. Anything else is a prompt-injection path
   straight from any page the operator happens to open.
 
+## One local app's own UI is not an in-app browser
+
+The DeepSeek Harness pane (`docs/dsh.md`, `src-tauri/src/dsh.rs`) shows a web
+page inside rmux, and that does **not** reopen the decision above. The browser
+was removed because it was general browsing — any URL, any port, a per-session
+proxy the single webview could not have. The dsh view is the opposite shape, and
+must stay that way:
+
+- **One origin, built by rmux.** The URL is `http://127.0.0.1:<local>/?token=` from
+  a loopback forward rmux opened to a server rmux started. The UI never supplies a
+  URL; `on_navigation` refuses anything off that origin (an `https` link goes to the
+  real browser), and new windows are denied.
+- **Loopback at both ends.** `dsh web --host 127.0.0.1` on the host, and
+  `-L 127.0.0.1:<local>:127.0.0.1:<remote>` here (`Forwards::loopback`).
+- **A child webview, not an `<iframe>` — measured.** In a real WKWebView with the
+  page at `tauri://localhost`, the iframe's token exchange succeeds but dsh's
+  `SameSite=Strict` cookie is never sent back from a cross-site frame: "dsh web
+  authentication required". Working round it (a cookie-injecting proxy, stripping
+  `Sec-Fetch-Site`) would disable dsh's own CSRF/DNS-rebinding fence for every local
+  page. A child webview navigated directly is first-party and works. It needs
+  Tauri's `unstable` feature (`Window::add_child`).
+- **No IPC.** The page is a remote origin and Tauri 2.12 rejects app commands from
+  one unless a capability's `remote` grants it; none may. Verified live: `invoke`
+  from the dsh view is rejected.
+- **The token never reaches rmux's own page.** It is parsed from the
+  server's output in Rust and used there only.
+- **A native view draws above the page**, so rmux menus over a dsh pane are hidden
+  behind it. That is the accepted cost; do not "fix" it with an iframe.
+
 ## Claude credentials
 
 Three kinds, told apart by prefix (`rmux_claude::auth::CredentialKind`) because they look
@@ -1325,13 +1582,178 @@ stores and applies it.
   would move a conversation to another provider on the next restart with nothing on screen to
   say so. A session naming a deleted profile **refuses to start** rather than falling back to
   Anthropic, because a silent change of provider is the failure worth being loud about.
-- **Only `ANTHROPIC_*` and `CLAUDE_CODE_*` keys are carried**, and refused keys are *named*.
-  A profile is not a general-purpose environment editor; `PATH` and `LD_PRELOAD` do not belong
-  in one. Unknown keys inside those two namespaces are still carried — Claude Code gains
-  variables faster than a hard-coded list can.
+- **Each kind carries only its own namespace**, and refused keys are *named*: Claude
+  `ANTHROPIC_*`/`CLAUDE_CODE_*`, DeepSeek `DEEPSEEK_*`, OpenAI `OPENAI_*`/`CODEX_*`. A profile is
+  not a general-purpose environment editor; `PATH` and `LD_PRELOAD` do not belong in one, and
+  neither does an `ANTHROPIC_API_KEY` pasted into a Codex profile. Unknown keys inside a kind's
+  namespaces are still carried — the agents gain variables faster than a hard-coded list can.
 - **The paste is parsed, not retyped.** People have these as a block of `KEY=value \` lines;
   eight text fields would mean transcribing a base URL by hand, and a typo there points a
   credential at the wrong host without ever looking wrong.
+
+### A profile has a kind, and the host keeps one environment per kind
+
+A profile used to mean "Claude against some Anthropic-compatible endpoint". It now has a
+**kind** — `claude`, `deepseek` (DeepSeek Harness: `DEEPSEEK_API_KEY`, optional
+`DEEPSEEK_BASE_URL`, both read from dsh's own `llm-deepseek-api-key` package) or `openai`
+(Codex: `OPENAI_API_KEY`/`CODEX_API_KEY`, optional `OPENAI_BASE_URL` and `OPENAI_MODEL`).
+
+- **A stored profile without a kind is a Claude profile** (`#[serde(default)]`). Every profile
+  saved before kinds existed is one, and loading it as anything else would repoint saved
+  sessions at a provider nobody chose. A test loads the old JSON shape. A profile's kind
+  **cannot be changed** after saving — sessions already point at it.
+- **The daemon used to hold one environment that every session inherited**, then one per
+  kind (`Sessions::kind_env`, chosen by daemon-name prefix — `claude-` → claude, `codex-` →
+  openai, `dsh-` → deepseek, via `rmux_claude_core::env_kind::for_session`). The per-kind set
+  is still there for clients that do not bind (the bridge, older apps), and still
+  **replaced, not merged**, and `Frame::SetKindEnv` is still answered with an `Ack`. But it is
+  per *daemon*, and that cannot express two Claude sessions on two accounts, a child inheriting
+  its parent's provider, or one session moving account without moving everyone — so it is no
+  longer how the app delivers a profile. See the next subsection.
+
+- **Session Settings offers only profiles of the session's kind**, and a profile of the wrong
+  kind is refused at start by name (`apply_to_target(ctx, target, kind, id)`), never applied.
+  pi takes no profile.
+- **Codex's base URL and model are launch flags, not environment.** Current Codex reads its
+  base URL from config (`openai_base_url`) and its model from `-m`, so the profile's
+  `OPENAI_BASE_URL`/`OPENAI_MODEL` become `-c openai_base_url="…"` and `-m …` on the launch
+  line — neither is a secret. The key never is: it travels only as the `openai` set.
+
+### Credentials are named per session, not per daemon
+
+A session is **bound** to one named credential set when it is created, and gets exactly
+that set at spawn. `rmux-agent setenv --kind K --set ID [--label NAME]` (stdin, never argv)
+stores a set under a **profile id** (`Frame::SetNamedEnv`, answered); `attach --env-set ID`
+binds the new session to it (`Frame::HelloBound`). `apply_to_target`/`apply_bound` deliver the
+session's set (or every member of its chain, plus each kind's default) and return the attach
+arguments; `claude_start`, `codex_start` and `dsh_start` pass them. Two reserved names:
+`none` (no profile — always present, cannot carry variables) and `default` (a kind's default
+profile, what a child of *another* kind binds to).
+
+- **The binding is a new frame kind, never a field on `Hello`, and that is the safety
+  property.** `Hello` is parsed leniently so old daemons accept new clients — which means an
+  older daemon would *ignore* a binding field and start the session on whatever the host
+  defaults to while the app named another provider. An older daemon cannot decode
+  `HelloBound`, drops the connection, and the client **refuses to start** ("too old to bind").
+  A daemon that does decode it answers `Ack` before the replay, or `Refused { reason }` —
+  printed in the session's own terminal — for a set that is not loaded, a kind mismatch, or a
+  non-agent session. **A missing set never falls back.** Sets are memory-only, so after a
+  daemon restart they are gone until the app re-delivers them, which it does before every
+  attach. A live session keeps the binding it was created with; reattaching never rebinds.
+- **Precedence: a session's set always wins over the shared account.** Spawn order is terminal
+  env, the shared (untagged `SetEnv`, the stored Claude account) env, then *either* the bound
+  set *or* (unbound) the per-kind set, then `Hello.env`, then rmux's session env. An **empty
+  value in a named set is a removal**: it takes the key out of everything before it, and the
+  daemon also puts `unset K…; … exec claude` on the launch line, because `-l -i` reads
+  `.zshrc` *after* the daemon built the environment and an export there would come straight
+  back. `exec` keeps the pid (status is correlated on it); a test spawns through it and checks.
+- **A subscription-token profile** (`claude setup-token`, `sk-ant-oat…`) sets
+  `CLAUDE_CODE_OAUTH_TOKEN` and **removes** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+  `ANTHROPIC_BASE_URL`, so the session really runs on that subscription. Settings › Models ›
+  "Add a Claude account (token)" takes a paste — checked by `CredentialKind::detect`: an admin
+  key is refused (it must never reach a host), and so is an API key pasted as a token — or
+  "Get a token", which runs the existing `setup-token` flow (`claude_login_submit_profile`) and
+  saves straight to the keychain; the webview sees only the redacted view. A profile with its
+  own endpoint (a gateway) removes the stored Anthropic credentials it does not set, so the
+  operator's Anthropic key is never carried to the gateway.
+- **The keychain document is `{profiles, chains, defaults}`**; the bare array every earlier
+  build wrote still loads (`ProfileStore::parse`). Deleting a profile removes it from chains
+  (an emptied chain goes too) and from defaults. Downgrading to an app from before this reads
+  the object as nothing — re-save there would lose the store.
+
+### Fallback chains — moving a session to the next account on a limit, loudly
+
+A chain is `{id: "chain-N", name, kind: claude, members: [profileId…], switchOnOverloaded}`; a
+session's `modelProfile` may name one and the session records its **active member**
+(`activeProfile` in the app, `ChainState.active` in the daemon binding). Detection and
+switching run **in the daemon** (`daemon::monitor`, every 3s), so a chain works with the app
+closed. The pure half — matcher, state machine, resume line, log — is
+`rmux_claude_core::fallback`; the host I/O is `rmux-agent/src/fallback.rs`.
+
+- **The transcript is authoritative and, when it exists, the only source.** The conversation id
+  comes from Claude's own `~/.claude/sessions/<pid>.json` (else `--resume` on the line); the
+  tail of `~/.claude/projects/*/<id>.jsonl` is read for records Claude marks as API errors
+  (`isApiErrorMessage`, an `error` field, `level: error`) newer than the member's binding. The
+  screen is read only when no transcript is found, and then only its bottom 15 lines, skipping
+  composer/echoed-prompt lines, after a 15s grace from (re)spawn. An ordinary record or prompt
+  that merely *says* "rate limit" is conversation, never a trigger — tests pin both.
+- **The phrases are a table** (`fallback::PATTERNS`): `usage limit reached`, `hit your limit`,
+  `5-hour/weekly limit reached`, `limit reached … resets`, `limit will reset at`,
+  `rate_limit_error`, `API Error … 429` switch; `overloaded_error` / `API Error … 529` are
+  **retryable, not a switch**, unless the chain opts in. Updating detection is adding a row and
+  a captured sample beside it. Reset times are read from `…|<unix>` or `resets 3pm` (host local
+  time) — a display hint for "switch back", never acted on.
+- **The switch:** mark the member exhausted (with its reset time), pick the next member *after*
+  it that is not exhausted, rebind, relaunch in the same session name with
+  `claude --resume <conversation>` (`fallback::resume_line` keeps the rendering assignments and
+  `--dangerously-skip-permissions`, drops a positional first prompt — resuming with it would
+  send it twice), wait for the TUI to settle, and submit `CONTINUE_MESSAGE` through
+  `keys::send_message` — the one definition. Attached clients **follow** the relaunch
+  (`TermSlot`: `respawning` is raised before the old process is killed, so its `Exited` is not
+  forwarded). **Never cycles back**: the chain stops at its end and the session is *parked*
+  waiting, with the record saying so. **One limit, one switch**: only records newer than the
+  binding count, and a 90s cooldown follows every switch. A member whose set is not loaded on
+  the host is skipped and named in the record.
+- **Every switch is recorded** in `~/.rmux/fallback.json` (`0600` in `0700`, temp-then-rename,
+  pruned to 200 entries / 14 days) and exposed by `rmux-agent fallback-log --json` (switches
+  plus every live session's binding, names and labels only) and `claude_fallback_log`.
+- **The app shows it loudly** — the rule is that a provider change the operator did not see is
+  the failure this whole section exists to prevent. A strip across the pane
+  (`FallbackStrip`: "Switched to Work after a usage limit on Personal at 14:02 — resets 15:00",
+  stays until dismissed), the sidebar row names the active account (`⇄ Work · Max chain`),
+  and Session Settings lists the chain, the active member and the spent ones (`ChainStatus`).
+  When an earlier member's reset passes, **switch back** is *offered* (`fallback-switch`,
+  `Frame::Switch`) — never done automatically, and nothing is typed into the conversation.
+  The poll (`lib/fallback-watch.ts`, 15s, one per host) runs only while a chained session is
+  mounted.
+
+### Children inherit their parent's credentials
+
+`rmux spawn` and `rmux new` (from inside a session) bind the child to the parent's set — and
+to the parent's chain **with its active member and exhausted members**, so a child never
+starts on an account the parent already spent (`rmux-agent/src/inherit.rs`). A child of a
+different kind uses that kind's `default` set; with none loaded the spawn is **refused** with
+the reason, because the parent chose a provider and the host's own login is not it. A parent
+bound to `none` passes `none` on; an unbound parent gives no binding. `--profile ID` overrides.
+The binding is recorded in `children.json` (`profile`, `chain`), and `adoptChild` copies the
+parent's `modelProfile`/`activeProfile` into the adopted row so a restart from the UI agrees.
+
+## Codex — the third agent, and the first that publishes nothing
+
+`SessionKind` `codex`; daemon name `codex-<id>` (stem `codexsession`, so never `codex-codex-…`);
+`crates/rmux-claude-core/src/codex.rs` is the one definition of the launch line, the login line,
+the rollout listing/transcript and the screen rules, shared by `codex_start`
+(`crates/rmux-app/src/codex.rs`), `rmux spawn --agent codex` and `rmux new --codex`.
+
+- **It runs under the agent through the login shell**, like pi — `codex` is npm-installed under
+  a version manager. No non-agent fallback: a host without the agent refuses with a reason.
+  `codex_start` refuses a session name without the `codex-` prefix, because the prefix is what
+  scopes the OpenAI credentials on the host.
+- **`--dangerously-bypass-approvals-and-sandbox` is the skip-permissions rule exactly**: a
+  per-session launch choice (the picker and Session Settings), off by default, explained only
+  once chosen, kept with the session. It replaces `--sandbox`, which Codex refuses beside it.
+  `rmux spawn --skip-permissions` maps to it for a Codex child, and either flag in the parent's
+  command is the latitude that permits either in the child.
+- **Status is read off the rendered screen, on purpose.** Codex's lifecycle hooks run only once
+  the operator has *trusted* them in the TUI (a stored hash per hook); installing one would do
+  nothing, and writing the trust hash ourselves would be bypassing another program's security
+  control. Its legacy `notify` reports only turn-complete — never "working" or "waiting" — and
+  is marked for removal. So `codex::detect` applies herdr's Codex manifest (Apache-2.0,
+  credited in the source) to the screen the app already emulates, served as `codex_state` in
+  Claude's shape; the rail polls it for every Codex session with a handle, push stream or not.
+  `Unknown` is never reported as idle.
+- **The CLI does not guess.** The agent has no emulator, only the raw replay, so `spawn` reads
+  just the unmistakable folder-trust blocker and otherwise returns `unknown` once output
+  settles; `wait`, `prompt --wait` and `read --source transcript` answer `unsupported` for Codex
+  rather than time out or invent "done".
+- **Sign-in is the real CLI in a real terminal**: Session Settings › SIGN IN opens a terminal
+  session with `run: "codex-login"` → `codex login --device-auth`. Device auth, always — the
+  browser flow waits on `localhost:1455` *of the host*, which the operator's browser cannot
+  reach. `terminal::Run` is a closed enum: the webview names a purpose, never a command line.
+- **Conversations are `${CODEX_HOME:-~/.codex}/sessions/**/rollout-*-<uuid>.jsonl`.** Listing
+  reads only each file's first line (`session_meta`: id, cwd), with the UUID in the file name as
+  the fallback; the transcript is a tail read, keeping only `event_msg` `user_message` /
+  `agent_message` / `exec_command_end` and skipping everything else rather than binding to it.
 
 ## Reading a conversation back
 

@@ -20,14 +20,17 @@
 
 name: release
 
+# **Dispatch only, never on a tag push.** The macOS release is cut on the
+# developer's Mac and tagged `rmux-vX.Y.Z`; Windows and Linux are published as a
+# *separate* release under their own tag (`rmux-vX.Y.Z-win-linux`). A tag-push
+# trigger fired on the macOS tag too, and `tauri-action` then uploaded the
+# Linux and Windows installers into the macOS release.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to publish (e.g. rmux-v0.1.1)"
+        description: "Tag to publish (e.g. rmux-v0.2.27-win-linux)"
         required: true
-  push:
-    tags: ["rmux-v*"]
 
 jobs:
   agents:
@@ -79,12 +82,9 @@ jobs:
           # trying to import one rather than falling back to unsigned — which is
           # exactly what killed both macOS jobs on the first run. An unsigned
           # macOS build would not be usable by anyone anyway.
-          # Windows is off for this release at the operator's request — it is
-          # being checked on a real Windows machine separately. Restore these
-          # three lines to build it again; nothing else depends on them.
-          # - name: Windows
-          #   os: windows-latest
-          #   args: ""
+          - name: Windows
+            os: windows-latest
+            args: ""
           - name: Linux
             os: ubuntu-22.04
             args: ""

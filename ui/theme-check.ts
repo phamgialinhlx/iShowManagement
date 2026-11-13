@@ -4,6 +4,13 @@ import {
   terminalTheme,
   monacoTheme,
   BUILT_INS,
+  SLOT_KEYS,
+  slotVar,
+  contrast,
+  isLight,
+  parseHex,
+  DEFAULT_THEME,
+  type Theme,
 } from "./src/lib/theme";
 import { TERMINAL_THEME } from "./src/lib/terminal-theme";
 import "./src/styles/signal-room.css";
@@ -82,7 +89,19 @@ document.body.appendChild(probe);
 
 function resolved(varName: string): { r: number; g: number; b: number } {
   probe.style.color = `var(${varName})`;
-  const m = getComputedStyle(probe).color.match(/\d+/g) ?? ["0", "0", "0"];
+  const css = getComputedStyle(probe).color;
+  // WebKit answers `rgb(r, g, b)`; Chromium answers a `color-mix` result as
+  // `color(srgb 0.59 0.58 0.56)` — fractions, which the old digit regex read as
+  // huge integers and failed on.
+  const srgb = css.match(/color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  if (srgb) {
+    return {
+      r: Math.round(Number(srgb[1]) * 255),
+      g: Math.round(Number(srgb[2]) * 255),
+      b: Math.round(Number(srgb[3]) * 255),
+    };
+  }
+  const m = css.match(/\d+/g) ?? ["0", "0", "0"];
   return { r: Number(m[0]), g: Number(m[1]), b: Number(m[2]) };
 }
 function near(varName: string, wantHex: string, tol: number) {
@@ -117,6 +136,104 @@ for (const t of BUILT_INS) {
     got: bad ? "FAIL" : "ok",
     want: "ok",
     ok: !bad,
+  });
+}
+
+// --- herdr-family: every built-in defines every slot; legibility floors -------
+//
+// Each built-in except SIGNAL ROOM (which derives its slots on purpose, to stay
+// byte-identical to the old app) must state all nineteen herdr slots itself —
+// a missing one would silently fall back to a derivation nobody chose. And the
+// *published* tokens must clear WCAG on the theme background: `--text` at
+// 4.5:1, `--subtext0` at 3:1, `--text-soft` 5.5:1, `--text-faint` 4.5:1.
+const AGENT_STATES = ["--st-working", "--st-blocked", "--st-done", "--st-idle", "--st-unknown"];
+for (const t of BUILT_INS) {
+  const d = deriveTokens(t);
+  if (t.name !== SIGNAL_ROOM.name) {
+    const missing = SLOT_KEYS.filter((k) => !t.ui?.[k] || !parseHex(t.ui[k] ?? ""));
+    rows.push({
+      name: `${t.name}: all 19 slots stated`,
+      got: missing.length ? `missing ${missing.join(",")}` : "ok",
+      want: "ok",
+      ok: missing.length === 0,
+    });
+  }
+  const vars = [...SLOT_KEYS.map(slotVar), ...AGENT_STATES];
+  const absent = vars.filter((v) => !d[v]);
+  rows.push({
+    name: `${t.name}: every slot var derived`,
+    got: absent.length ? `absent ${absent.join(",")}` : "ok",
+    want: "ok",
+    ok: absent.length === 0,
+  });
+  const floor = (v: string, min: number) => {
+    const value = d[v] ?? "";
+    const c = parseHex(value) ? contrast(value, t.background) : NaN;
+    rows.push({
+      name: `${t.name}: ${v} ≥ ${min}:1`,
+      got: Number.isNaN(c) ? `(mix) ${value}` : `${c.toFixed(2)}:1 ${value}`,
+      want: `≥ ${min}`,
+      // A slot-less theme's two dim greys are `color-mix` strings, measured
+      // through the browser below for SIGNAL ROOM; skip the JS floor for them.
+      ok: Number.isNaN(c) ? !t.ui : c >= min,
+    });
+  };
+  floor("--text", 4.5);
+  floor("--subtext0", 3);
+  floor("--text-soft", 5.5);
+  floor("--text-faint", 4.5);
+  const raw = t.ui?.text;
+  if (raw && raw !== d["--text"]) {
+    rows.push({ name: `${t.name}: --text nudged for contrast`, got: `${raw} → ${d["--text"]}`, want: "(info)", ok: true });
+  }
+  const rawSub = t.ui?.subtext0;
+  if (rawSub && rawSub !== d["--subtext0"]) {
+    rows.push({ name: `${t.name}: --subtext0 nudged`, got: `${rawSub} → ${d["--subtext0"]}`, want: "(info)", ok: true });
+  }
+  // Appearance is stated, and agrees with the background's luminance.
+  rows.push({
+    name: `${t.name}: appearance ${t.appearance}`,
+    got: isLight(t) ? "light" : "dark",
+    want: t.appearance ?? "?",
+    ok: (t.appearance === "light") === isLight({ ...t, appearance: undefined } as Theme),
+  });
+  // Monaco base follows the side.
+  rows.push({
+    name: `${t.name}: monaco base`,
+    got: monacoTheme(t).base,
+    want: isLight(t) ? "vs" : "vs-dark",
+    ok: monacoTheme(t).base === (isLight(t) ? "vs" : "vs-dark"),
+  });
+}
+
+// --- the default is Mocha, with herdr's exact slots ---------------------------
+const mocha = deriveTokens(DEFAULT_THEME);
+expect("default theme", DEFAULT_THEME.name, "Catppuccin Mocha");
+expect("mocha --accent", mocha["--accent"], "#89b4fa");
+expect("mocha --panel-bg", mocha["--panel-bg"], "#181825");
+expect("mocha --surface0", mocha["--surface0"], "#313244");
+expect("mocha --overlay0", mocha["--overlay0"], "#6c7086");
+expect("mocha --text", mocha["--text"], "#cdd6f4");
+expect("mocha --st-working", mocha["--st-working"], "#f9e2af");
+expect("mocha --st-blocked", mocha["--st-blocked"], "#f38ba8");
+expect("mocha --st-done", mocha["--st-done"], "#94e2d5");
+expect("mocha --st-idle", mocha["--st-idle"], "#a6e3a1");
+expect("mocha --app-bg", mocha["--app-bg"], "#1e1e2e");
+expect("mocha --radius", mocha["--radius"], "4px");
+expect("signal room --radius", tok["--radius"], "0px");
+expect("signal room --accent", tok["--accent"], "#e63b2e");
+expect("signal room --scroll-thumb", tok["--scroll-thumb"], "#242424");
+
+// --- an old saved theme (no ui/appearance/radius) still derives everything ----
+{
+  const legacy: Theme = { ...SIGNAL_ROOM, name: "Old Save", appearance: undefined, radius: undefined };
+  const d = deriveTokens(legacy);
+  const absent = [...SLOT_KEYS.map(slotVar), ...AGENT_STATES].filter((v) => !d[v]);
+  rows.push({
+    name: "legacy saved theme derives all slots",
+    got: absent.length ? absent.join(",") : "ok",
+    want: "ok",
+    ok: absent.length === 0 && d["--app-panel"] === "#0a0a0a",
   });
 }
 

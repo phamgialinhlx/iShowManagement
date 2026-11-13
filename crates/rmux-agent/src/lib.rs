@@ -17,10 +17,18 @@
 pub mod alias;
 pub mod attach;
 pub mod bridge;
+pub mod children;
+pub mod cli;
 pub mod daemon;
+pub mod detach;
+pub mod fallback;
+pub mod inherit;
 pub mod ipc;
+pub mod orchestrate;
 pub mod protocol;
 pub mod provision;
+pub mod servers;
+pub mod session_env;
 pub mod status;
 pub mod tty;
 

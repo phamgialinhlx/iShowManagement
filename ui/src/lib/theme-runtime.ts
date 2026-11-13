@@ -19,7 +19,16 @@
 
 import { listen } from "./bridge";
 
-import { SIGNAL_ROOM, BUILT_INS, deriveTokens, type Theme } from "./theme";
+import {
+  BUILT_INS,
+  DEFAULT_THEME,
+  DEFAULT_DARK_THEME,
+  DEFAULT_LIGHT_THEME,
+  deriveTokens,
+  isBuiltIn,
+  isLight,
+  type Theme,
+} from "./theme";
 import { api, isTauri, type ThemeState } from "./api";
 
 /** Paint-cache only. Not authoritative — see the module note. */
@@ -31,9 +40,36 @@ const CACHE_KEY = "rmux.theme.cache";
  */
 export const THEME_EVENT = "rmux-theme";
 
-let current: Theme = SIGNAL_ROOM;
+let current: Theme = DEFAULT_THEME;
 let userThemes: Theme[] = [];
-let activeName: string = SIGNAL_ROOM.name;
+let activeName: string = DEFAULT_THEME.name;
+
+/**
+ * Follow the OS appearance (herdr's `[theme] auto_switch`). When on, the theme
+ * in effect is `lightName` or `darkName` by `prefers-color-scheme`, and
+ * `activeName` is only the fallback for an engine that cannot say.
+ */
+export type AutoSwitch = { on: boolean; light: string; dark: string };
+let auto: AutoSwitch = { on: false, light: DEFAULT_LIGHT_THEME, dark: DEFAULT_DARK_THEME };
+
+const DARK_QUERY = "(prefers-color-scheme: dark)";
+
+/** What the OS appearance is right now, or null where it cannot be read. */
+export function osAppearance(): "light" | "dark" | null {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return null;
+  const dark = window.matchMedia(DARK_QUERY);
+  if (dark.matches) return "dark";
+  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : null;
+}
+
+/** The theme *name* that should be on screen for a given active + auto setting. */
+export function effectiveName(active: string, a: AutoSwitch): string {
+  if (!a.on) return active;
+  const os = osAppearance();
+  if (os === "dark") return a.dark;
+  if (os === "light") return a.light;
+  return active;
+}
 
 const listeners = new Set<() => void>();
 
@@ -48,14 +84,29 @@ export function allThemes(): Theme[] {
 }
 
 /** The current state for the switcher UI. */
-export function themeSnapshot(): { active: string; all: Theme[]; user: Theme[] } {
-  return { active: activeName, all: allThemes(), user: userThemes };
+export function themeSnapshot(): {
+  active: string;
+  all: Theme[];
+  user: Theme[];
+  auto: AutoSwitch;
+} {
+  return { active: activeName, all: allThemes(), user: userThemes, auto };
 }
 
-/** Resolve a name to a theme, falling back to SIGNAL ROOM for an unknown one —
+/** Resolve a name to a theme, falling back to the default for an unknown one —
  *  a deleted active theme must not leave the app with no colours. */
 export function resolve(name: string, users: Theme[] = userThemes): Theme {
-  return [...BUILT_INS, ...users].find((t) => t.name === name) ?? SIGNAL_ROOM;
+  return [...BUILT_INS, ...users].find((t) => t.name === name) ?? DEFAULT_THEME;
+}
+
+/**
+ * A user theme saved by an older build under a name that is now a built-in
+ * ("Dracula", say) would be shadowed for ever — `resolve` finds the built-in
+ * first and Rust refuses to save over a built-in name. It is listed under a
+ * distinct name instead, so it stays reachable; saving it writes the new name.
+ */
+function unshadow(users: Theme[]): Theme[] {
+  return users.map((t) => (isBuiltIn(t.name) ? { ...t, name: `${t.name} (yours)` } : t));
 }
 
 /** Subscribe to state changes (for the Settings switcher). Returns an unsubscribe. */
@@ -73,6 +124,13 @@ export function applyTheme(t: Theme): void {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
   for (const [k, v] of Object.entries(deriveTokens(t))) root.style.setProperty(k, v);
+  // Native form controls, scrollbars and the like follow the theme's side.
+  const light = isLight(t);
+  root.style.colorScheme = light ? "light" : "dark";
+  root.dataset.appearance = light ? "light" : "dark";
+  // SIGNAL ROOM's square corners are an identity, not a default: radius 0
+  // re-imposes zero radius on everything (`signal-room.css`, `[data-square]`).
+  root.dataset.square = (t.radius ?? 4) <= 0 ? "on" : "off";
   window.dispatchEvent(new Event(THEME_EVENT));
 }
 
@@ -95,12 +153,39 @@ function cached(): Theme | null {
 
 /** Fold a fresh state from Rust into the live palette and notify the UI. */
 function ingest(state: ThemeState): void {
-  userThemes = state.userThemes ?? [];
+  userThemes = unshadow(state.userThemes ?? []);
   activeName = state.active;
-  const t = resolve(activeName, userThemes);
+  auto = {
+    on: state.autoSwitch ?? false,
+    light: state.lightName ?? DEFAULT_LIGHT_THEME,
+    dark: state.darkName ?? DEFAULT_DARK_THEME,
+  };
+  repaint();
+  for (const l of listeners) l();
+}
+
+/** Apply whatever should be on screen now, and cache it for the next launch. */
+function repaint(): void {
+  const t = resolve(effectiveName(activeName, auto), userThemes);
   applyTheme(t);
   cache(t);
-  for (const l of listeners) l();
+}
+
+/**
+ * Repaint when the OS flips light/dark. Only acts while auto-switch is on, and
+ * notifies subscribers so a Settings window previewing a staged choice can put
+ * its preview back on top rather than being silently overwritten.
+ */
+function watchAppearance(): void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+  const mq = window.matchMedia(DARK_QUERY);
+  const onChange = () => {
+    if (!auto.on) return;
+    repaint();
+    for (const l of listeners) l();
+  };
+  if (typeof mq.addEventListener === "function") mq.addEventListener("change", onChange);
+  else mq.addListener(onChange);
 }
 
 /**
@@ -109,7 +194,7 @@ function ingest(state: ThemeState): void {
  * no flash; `initTheme` reconciles against the file immediately after.
  */
 export function applyCachedThemeEarly(): void {
-  applyTheme(cached() ?? SIGNAL_ROOM);
+  applyTheme(cached() ?? DEFAULT_THEME);
 }
 
 /**
@@ -118,16 +203,17 @@ export function applyCachedThemeEarly(): void {
  * hand-edit (the watcher emits the same). Fire-and-forget from startup.
  */
 export async function initTheme(): Promise<void> {
+  watchAppearance();
   if (!isTauri()) {
     // Plain browser (design work, the check harnesses): the cache or the default
     // is all there is, and there is no file to reconcile against.
-    applyTheme(cached() ?? SIGNAL_ROOM);
+    applyTheme(cached() ?? DEFAULT_THEME);
     return;
   }
   try {
     ingest(await api.themeState());
   } catch {
-    applyTheme(SIGNAL_ROOM);
+    applyTheme(DEFAULT_THEME);
   }
   try {
     await listen<ThemeState>("theme-changed", (e) => ingest(e.payload));
@@ -141,6 +227,11 @@ export async function initTheme(): Promise<void> {
 /** Switch the active theme. Rust writes the file and tells every window. */
 export async function setActiveTheme(name: string): Promise<void> {
   ingest(await api.themeSetActive(name));
+}
+
+/** Turn OS-appearance following on or off, with its two picks. */
+export async function setAutoSwitch(a: AutoSwitch): Promise<void> {
+  ingest(await api.themeSetAuto(a.on, a.light, a.dark));
 }
 
 /** Create or update a user theme (never a built-in — Rust refuses). */

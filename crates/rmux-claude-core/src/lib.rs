@@ -31,10 +31,14 @@
 //!    makes the TUI treat the whole thing as one bracketed chunk and swallow the
 //!    newline, so the message sits in the composer, typed but never sent.
 
+pub mod codex;
+pub mod env_kind;
+pub mod fallback;
 pub mod keys;
 pub mod launch;
 pub mod pi;
 pub mod sessions;
+pub mod skill;
 pub mod transcript;
 
 pub use launch::{launch_line, Rendering};

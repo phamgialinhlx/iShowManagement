@@ -1,6 +1,55 @@
 import { useEffect, useState } from "react";
 
-import { api, type ModelProfile, type ParsedProfile } from "../lib/api";
+import { api, type ModelProfile, type ParsedProfile, type ProfileKind } from "../lib/api";
+import { ChainsAndDefaults, TokenAccountEditor } from "./ModelAccounts";
+
+/**
+ * What each kind is for, what it may carry, and where it goes by default. One
+ * table so the editor, the rows and the empty state cannot disagree.
+ */
+const KINDS: Record<
+  ProfileKind,
+  {
+    label: string;
+    agent: string;
+    endpointVar: string;
+    defaultHost: string;
+    namespaces: string;
+    placeholder: string;
+    examples: string;
+  }
+> = {
+  claude: {
+    label: "CLAUDE",
+    agent: "Claude Code",
+    endpointVar: "ANTHROPIC_BASE_URL",
+    defaultHost: "api.anthropic.com",
+    namespaces: "ANTHROPIC_ and CLAUDE_CODE_",
+    placeholder: "ANTHROPIC_BASE_URL=https://…\nANTHROPIC_AUTH_TOKEN=…\nANTHROPIC_DEFAULT_OPUS_MODEL=…",
+    examples: "Synthetic, GLM, Kimi…",
+  },
+  deepseek: {
+    label: "DEEPSEEK",
+    agent: "DeepSeek Harness (dsh)",
+    endpointVar: "DEEPSEEK_BASE_URL",
+    defaultHost: "api.deepseek.com",
+    namespaces: "DEEPSEEK_",
+    placeholder: "DEEPSEEK_API_KEY=sk-…\nDEEPSEEK_BASE_URL=https://…   (optional)",
+    examples: "DeepSeek, DeepSeek via gateway…",
+  },
+  openai: {
+    label: "OPENAI",
+    agent: "Codex",
+    endpointVar: "OPENAI_BASE_URL",
+    defaultHost: "api.openai.com",
+    namespaces: "OPENAI_ and CODEX_",
+    placeholder:
+      "OPENAI_API_KEY=sk-…\nOPENAI_BASE_URL=https://…   (optional)\nOPENAI_MODEL=gpt-5   (optional)",
+    examples: "OpenAI, Azure gateway…",
+  },
+};
+
+const kindOf = (p: ModelProfile): ProfileKind => p.kind ?? "claude";
 
 /**
  * Model profiles — running Claude Code against something other than Anthropic.
@@ -27,8 +76,11 @@ import { api, type ModelProfile, type ParsedProfile } from "../lib/api";
  */
 export function ModelProfilesPanel() {
   const [profiles, setProfiles] = useState<ModelProfile[] | null>(null);
-  const [editing, setEditing] = useState<null | { id: string | null; name: string }>(null);
+  const [editing, setEditing] = useState<null | { id: string | null; name: string; kind: ProfileKind }>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
+  const [addingToken, setAddingToken] = useState(false);
 
   useEffect(() => {
     api
@@ -43,8 +95,10 @@ export function ModelProfilesPanel() {
         <h2 className="kicker">MODEL PROFILES</h2>
         <p className="data text-[11px] leading-[1.5]" style={{ color: "var(--text-soft)" }}>
           Run a session against Kimi, GLM, an internal gateway or a reseller instead of
-          Anthropic. A profile is the set of environment variables that provider gave you;
-          pick one when you start a session.
+          Anthropic — or give DeepSeek Harness and Codex their own API keys. A profile is the
+          set of environment variables that provider gave you; pick one when you start a
+          session. Each profile belongs to one agent, and the server hands its variables only to
+          that agent's sessions.
         </p>
       </header>
 
@@ -61,11 +115,9 @@ export function ModelProfilesPanel() {
         // rather than an empty box that reads as a feature that failed to load.
         <div className="inset flex flex-col items-start gap-3 p-4">
           <span className="data text-[11px]" style={{ color: "var(--text-soft)" }}>
-            No profiles yet. Sessions use your Claude account and Anthropic's API.
+            No profiles yet. Sessions use each agent's own login on the server.
           </span>
-          <button type="button" className="btn btn-primary" onClick={() => setEditing({ id: null, name: "" })}>
-            Add a profile
-          </button>
+          <AddButtons primary onAdd={(kind) => setEditing({ id: null, name: "", kind })} />
         </div>
       ) : (
         <div className="flex flex-col gap-2">
@@ -73,20 +125,12 @@ export function ModelProfilesPanel() {
             <Row
               key={p.id}
               profile={p}
-              onEdit={() => setEditing({ id: p.id, name: p.name })}
+              onEdit={() => setEditing({ id: p.id, name: p.name, kind: kindOf(p) })}
               onDeleted={setProfiles}
             />
           ))}
 
-          {!editing && (
-            <button
-              type="button"
-              className="btn self-start"
-              onClick={() => setEditing({ id: null, name: "" })}
-            >
-              Add a profile
-            </button>
-          )}
+          {!editing && <AddButtons onAdd={(kind) => setEditing({ id: null, name: "", kind })} />}
         </div>
       )}
 
@@ -100,6 +144,44 @@ export function ModelProfilesPanel() {
           onCancel={() => setEditing(null)}
         />
       )}
+
+      {profiles !== null &&
+        (addingToken ? (
+          <TokenAccountEditor
+            onSaved={(next) => {
+              setProfiles(next);
+              setAddingToken(false);
+            }}
+            onCancel={() => setAddingToken(false)}
+          />
+        ) : (
+          !editing && (
+            <button type="button" className="btn self-start" onClick={() => setAddingToken(true)}>
+              Add a Claude account (token)
+            </button>
+          )
+        ))}
+
+      {profiles !== null && profiles.length > 0 && <ChainsAndDefaults profiles={profiles} />}
+    </div>
+  );
+}
+
+/** One button per kind: the kind is chosen first, because it decides what a
+ *  paste may carry and which sessions will ever see it. */
+function AddButtons({ onAdd, primary }: { onAdd: (kind: ProfileKind) => void; primary?: boolean }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {(Object.keys(KINDS) as ProfileKind[]).map((k) => (
+        <button
+          key={k}
+          type="button"
+          className={primary && k === "claude" ? "btn btn-primary" : "btn"}
+          onClick={() => onAdd(k)}
+        >
+          Add a {KINDS[k].agent} profile
+        </button>
+      ))}
     </div>
   );
 }
@@ -134,9 +216,10 @@ function Row({
         <span className="data text-[12px]" style={{ color: "var(--text)" }}>
           {profile.name}
         </span>
-        {/* The destination, not the name, is the fact that matters. */}
-        <span className="micro truncate" title={profile.endpoint ?? "Anthropic"}>
-          {profile.endpoint ?? "api.anthropic.com"}
+        {/* Which agent, then the destination — not the name, which proves nothing. */}
+        <span className="micro shrink-0">{KINDS[kindOf(profile)].label}</span>
+        <span className="micro truncate" title={profile.endpoint ?? KINDS[kindOf(profile)].defaultHost}>
+          {profile.endpoint ?? KINDS[kindOf(profile)].defaultHost}
         </span>
         <span className="micro ml-auto shrink-0">
           {profile.hasCredential ? "OWN TOKEN" : "HOST LOGIN"}
@@ -192,7 +275,7 @@ function Editor({
   onSaved,
   onCancel,
 }: {
-  initial: { id: string | null; name: string };
+  initial: { id: string | null; name: string; kind: ProfileKind };
   onSaved: (profiles: ModelProfile[]) => void;
   onCancel: () => void;
 }) {
@@ -201,6 +284,8 @@ function Editor({
   const [parsed, setParsed] = useState<ParsedProfile | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const kind = initial.kind;
+  const meta = KINDS[kind];
 
   // Parsed as it is typed, so what rmux understood is visible *before* it is
   // committed. Debounced because each keystroke would otherwise cross IPC.
@@ -212,7 +297,7 @@ function Editor({
     let cancelled = false;
     const timer = setTimeout(() => {
       api
-        .modelProfileParse(text)
+        .modelProfileParse(text, kind)
         .then((p) => !cancelled && setParsed(p))
         .catch(() => {});
     }, 200);
@@ -220,25 +305,27 @@ function Editor({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [text]);
+  }, [text, kind]);
 
   const save = async () => {
     setBusy(true);
     setError(null);
     try {
-      onSaved(await api.modelProfileSave(initial.id, name, text));
+      onSaved(await api.modelProfileSave(initial.id, name, text, kind));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
     }
   };
 
-  const endpoint = parsed?.vars["ANTHROPIC_BASE_URL"];
+  const endpoint = parsed?.vars[meta.endpointVar];
   const keys = Object.keys(parsed?.vars ?? {});
 
   return (
     <div className="inset flex flex-col gap-3 p-4">
-      <span className="kicker">{initial.id ? "EDIT PROFILE" : "NEW PROFILE"}</span>
+      <span className="kicker">
+        {initial.id ? "EDIT" : "NEW"} {meta.label} PROFILE · FOR {meta.agent.toUpperCase()}
+      </span>
 
       <label className="flex flex-col gap-1">
         <span className="micro">NAME</span>
@@ -246,7 +333,7 @@ function Editor({
           className="field"
           value={name}
           spellCheck={false}
-          placeholder="Synthetic, GLM, Kimi…"
+          placeholder={meta.examples}
           onChange={(e) => setName(e.target.value)}
         />
       </label>
@@ -264,7 +351,7 @@ function Editor({
           value={text}
           onChange={(e) => setText(e.target.value)}
           style={{ fontSize: 11, lineHeight: 1.5, resize: "vertical" }}
-          placeholder={"ANTHROPIC_BASE_URL=https://…\nANTHROPIC_AUTH_TOKEN=…\nANTHROPIC_DEFAULT_OPUS_MODEL=…"}
+          placeholder={meta.placeholder}
         />
         {/* Editing shows an empty box on purpose: the stored token never comes
             back to the page, so there is nothing to edit in place. Said out
@@ -282,12 +369,12 @@ function Editor({
         <div className="flex flex-col gap-1">
           <span className="micro">
             {keys.length} {keys.length === 1 ? "VARIABLE" : "VARIABLES"} · SENDS TO{" "}
-            {endpoint || "api.anthropic.com"}
+            {endpoint || meta.defaultHost}
           </span>
           {parsed.ignored.length > 0 && (
             <span className="data text-[10.5px]" style={{ color: "rgb(var(--busy))" }}>
-              Ignored: {parsed.ignored.join(", ")} — only ANTHROPIC_ and CLAUDE_CODE_ variables
-              are carried.
+              Ignored: {parsed.ignored.join(", ")} — a {meta.label} profile carries only{" "}
+              {meta.namespaces} variables.
             </span>
           )}
           {parsed.warnings.map((w) => (

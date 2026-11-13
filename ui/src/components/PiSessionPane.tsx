@@ -28,6 +28,7 @@ import {
   GIT_PATH,
   GEAR_PATH,
 } from "./SessionPaneChrome";
+import { effectiveLowLatency } from "../lib/transport-default";
 
 /**
  * A pi session pane — the live pi TUI, rendered as an interactive xterm.
@@ -176,7 +177,7 @@ export function PiSessionPane({ session }: { session: SessionV3 }) {
             cwd={session.hostName ? undefined : (session.cwd ?? folder)}
             agentSession={reattachName(session)}
             resume={session.resume}
-            lowLatency={session.lowLatency}
+            lowLatency={effectiveLowLatency(session)}
             headerActions={headerActions}
           />
         </div>
@@ -237,7 +238,7 @@ export function PiSessionPane({ session }: { session: SessionV3 }) {
               session={companionName(session.id)}
               sessionId={session.id}
               // The companion shell runs on the conversation's transport.
-              lowLatency={session.lowLatency}
+              lowLatency={effectiveLowLatency(session)}
               // Shares the conversation's id, so it would answer the same focus
               // request. Switching to the pi pane means the conversation, not
               // the shell beside it.

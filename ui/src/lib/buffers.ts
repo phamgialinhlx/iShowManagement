@@ -28,7 +28,30 @@ export type Buffer = {
   error: string | null;
   saving: boolean;
   saveError: string | null;
+  /**
+   * The version token the file was read (or last saved) at — its mtime as Rust
+   * reports it. Quoted on save so a file changed on disk since is refused
+   * rather than overwritten. `null`/absent on the shell path, which cannot
+   * vouch for one.
+   */
+  version?: string | null;
+  /** The disk moved under this buffer and the operator has to choose. */
+  disk?: DiskState | null;
 };
+
+/**
+ * Why the editor is showing *changed on disk — reload / keep mine*.
+ *
+ * Never resolved silently in either direction: reloading would discard the
+ * operator's edits, saving would discard the agent's.
+ */
+export type DiskState =
+  /** A newer copy is on disk and this buffer has unsaved edits. */
+  | { kind: "changed"; version: string }
+  /** A save was refused because the file changed since it was read. */
+  | { kind: "conflict" }
+  /** The file is gone. */
+  | { kind: "deleted" };
 
 /**
  * Buffers are keyed by project, not by path alone — see the note above.

@@ -393,7 +393,7 @@ async fn a_real_file_downloads_byte_for_byte() {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let dest = dir.join("blob.bin");
 
-    let written = fs.download(&remote, &dest).await.expect("download");
+    let written = fs.download(&remote, &dest, &rmux_fs::Transfer::default()).await.expect("download");
     let got = std::fs::read(&dest).expect("read back");
 
     let outcome = (|| {
@@ -404,7 +404,7 @@ async fn a_real_file_downloads_byte_for_byte() {
     })();
 
     // The second download must not overwrite the first.
-    let clobber = fs.download(&remote, &dest).await;
+    let clobber = fs.download(&remote, &dest, &rmux_fs::Transfer::default()).await;
 
     let _ = fs.delete(&root).await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -421,9 +421,7 @@ async fn a_real_file_downloads_byte_for_byte() {
 #[tokio::test]
 #[ignore = "needs a real SSH host; set RMUX_LIVE_HOST"]
 async fn a_large_upload_streams_to_a_real_host_intact() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    use rmux_fs::{FileSystem, TargetFs};
+    use rmux_fs::{FileSystem, TargetFs, Transfer};
     use rmux_transport::{CommandSpec, Target, Tty};
 
     let Some(host) = live_host() else { return };
@@ -450,18 +448,18 @@ async fn a_large_upload_streams_to_a_real_host_intact() {
     let remote = format!("/tmp/rmux-live-upload-{}.bin", std::process::id());
     // A second target for the same host shares its connection; `SshTarget` is not `Clone`.
     let fs = TargetFs::new(SshTarget::new(SshHostId::new(&host)));
-    let sent = AtomicU64::new(0);
+    let sent = Transfer::default();
     let started = std::time::Instant::now();
     fs.upload_file(&remote, &local, &sent).await.expect("upload failed");
     let secs = started.elapsed().as_secs_f64();
     eprintln!("uploaded {} MB in {secs:.1}s ({:.1} MB/s)", len >> 20, (len as f64 / 1048576.0) / secs);
-    assert_eq!(sent.load(Ordering::Relaxed), len as u64);
+    assert_eq!(sent.done(), len as u64);
 
     let sum = target
         .exec(&CommandSpec::new("sh").arg("-c").arg(format!("sha256sum {remote}")).tty(Tty::None))
         .await
         .unwrap();
-    let refused = fs.upload_file(&remote, &local, &AtomicU64::new(0)).await;
+    let refused = fs.upload_file(&remote, &local, &Transfer::default()).await;
     let _ = target.exec(&CommandSpec::new("rm").arg("-f").arg(&remote).tty(Tty::None)).await;
     let _ = std::fs::remove_file(&local);
 

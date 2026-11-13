@@ -29,7 +29,7 @@ pub mod usage;
 /// `reqwest` and `alacritty_terminal` onto every host rmux touches. Re-exported
 /// under the paths every existing caller already knows — `rmux_claude::keys`,
 /// `rmux_claude::transcript` — because renaming them buys nothing.
-pub use rmux_claude_core::{keys, launch, pi, sessions, transcript};
+pub use rmux_claude_core::{codex, env_kind, fallback, keys, launch, pi, sessions, transcript};
 pub use rmux_claude_core::{launch_line, Rendering};
 
 pub use screen::{Choice, ClaudeState, Prompt, Screen};
@@ -152,6 +152,12 @@ impl ClaudeSession {
         self.screen.lock().state()
     }
 
+    /// The rendered screen, one string per row — for an agent whose state is
+    /// read by its own rules rather than Claude's (Codex: [`codex::detect`]).
+    pub fn screen_lines(&self) -> Vec<String> {
+        self.screen.lock().lines()
+    }
+
     /// The Claude sessions already recorded for `folder` on `target`.
     ///
     /// Offered before starting, so a conversation can be resumed rather than
@@ -200,6 +206,22 @@ impl ClaudeSession {
             return Ok(Vec::new());
         }
         Ok(pi::parse_all_conversations(out.stdout.as_bytes()))
+    }
+
+    /// Every recorded Codex conversation on `target`, newest first.
+    pub async fn codex_list_all<T: Target + ?Sized>(
+        target: &T,
+    ) -> anyhow::Result<Vec<codex::Conversation>> {
+        let spec = CommandSpec::new("sh")
+            .arg("-c")
+            .arg(codex::list_all_conversations_script())
+            .tty(Tty::None);
+        let out = target.exec(&spec).await?;
+        // No `~/.codex/sessions` is "no conversations", not a failure.
+        if out.status != 0 {
+            return Ok(Vec::new());
+        }
+        Ok(codex::parse_all_conversations(out.stdout.as_bytes()))
     }
 
     pub async fn list<T: Target + ?Sized>(

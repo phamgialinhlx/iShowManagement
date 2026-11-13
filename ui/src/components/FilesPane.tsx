@@ -7,6 +7,7 @@ import { FileSearch } from "./FileSearch";
 import { BinaryPreview, MarkdownPreview, previewKind } from "./FilePreview";
 import { useWorkspace } from "../lib/workspace";
 import { isDirty, type Buffer } from "../lib/buffers";
+import { installDiskSync, keepMine, reloadFromDisk } from "../lib/disk-sync";
 import { measureScale, widthFromPointer, TREE_DEFAULT, TREE_MIN, TREE_MAX } from "../lib/pane-resize";
 
 /**
@@ -88,6 +89,62 @@ function EditorTabs({ projectId }: { projectId: string }) {
   );
 }
 
+/**
+ * *Changed on disk — reload / keep mine.*
+ *
+ * Shown inline, above the file, never as a dialog: a modal over the workbench
+ * would take the keystrokes of whoever is typing in a terminal. Neither choice
+ * is the default and neither happens on its own — reloading discards the
+ * operator's edits, keeping theirs overwrites the other change.
+ */
+function DiskBanner({ buffer }: { buffer: Buffer }) {
+  const close = useWorkspace((s) => s.closeBuffer);
+  const [busy, setBusy] = useState(false);
+  if (!buffer.disk) return null;
+  const name = buffer.path.split("/").filter(Boolean).pop() ?? buffer.path;
+  const deleted = buffer.disk.kind === "deleted";
+  const run = (fn: () => Promise<void>) => {
+    setBusy(true);
+    void fn().finally(() => setBusy(false));
+  };
+  return (
+    <div
+      role="alert"
+      className="flex shrink-0 items-center gap-2 border-b px-3 py-[6px]"
+      style={{ borderColor: "var(--border)", background: "var(--hover)" }}
+    >
+      <span className="data min-w-0 flex-1 truncate text-[11px]" style={{ color: "rgb(var(--busy))" }}>
+        {deleted
+          ? `${name} was deleted on disk`
+          : buffer.disk.kind === "conflict"
+            ? `${name} changed on disk — your save was not written`
+            : `${name} changed on disk while you had unsaved edits`}
+      </span>
+      {busy ? (
+        <span className="micro">working…</span>
+      ) : deleted ? (
+        <>
+          <button type="button" className="chip" title="Write your version back, recreating the file" onClick={() => run(() => keepMine(buffer.key))}>
+            keep mine
+          </button>
+          <button type="button" className="chip" title="Close this tab" onClick={() => close(buffer.key)}>
+            close
+          </button>
+        </>
+      ) : (
+        <>
+          <button type="button" className="chip" title="Discard your edits and show what is on disk" onClick={() => run(() => reloadFromDisk(buffer.key))}>
+            reload
+          </button>
+          <button type="button" className="chip" title="Overwrite the disk with your version" onClick={() => run(() => keepMine(buffer.key))}>
+            keep mine
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** Show a file the way it wants to be shown; source is one click away. */
 function FileBody({ target, buffer }: { target: TargetRef; buffer: Buffer }) {
   const save = useWorkspace((s) => s.save);
@@ -113,6 +170,7 @@ function FileBody({ target, buffer }: { target: TargetRef; buffer: Buffer }) {
 
   return (
     <div className="flex h-full flex-col">
+      <DiskBanner buffer={buffer} />
       {canPreview && (
         <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1" style={{ borderColor: "var(--border)" }}>
           <div className="seg">
@@ -143,6 +201,7 @@ export function FilesPane({ projectId }: { projectId: string }) {
   const restoreFiles = useWorkspace((s) => s.restoreFiles);
 
   useEffect(() => restoreFiles(projectId), [projectId, restoreFiles]);
+  useEffect(installDiskSync, []);
 
   const [treeWidth, setTreeWidth] = useState(() => readSize(TREE_KEY, TREE_DEFAULT));
   const [dragging, setDragging] = useState(false);

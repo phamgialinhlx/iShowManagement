@@ -1,0 +1,532 @@
+/*
+ * The sidebar — herdr's anatomy (spaces / agents / footer, and a compact
+ * column), drawn by `WorkspaceRail.tsx`.
+ *
+ * Kept beside `layout.css` rather than in `signal-room.css`: this is the
+ * structure of one component, and every colour is a theme token with a
+ * fallback, so a theme that defines herdr's slot names restyles it and one
+ * that does not still renders.
+ *
+ * Nothing here animates. State marks are static glyphs (`agent-state.ts`).
+ */
+
+.sb {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--sidebar-bg, var(--app-panel));
+  border-right: 1px solid var(--border);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: calc(12px * var(--font-scale, 1));
+  color: var(--subtext0, var(--text-soft));
+}
+
+/* ── top: search + needs-you ─────────────────────────────────────────────── */
+
+.sb-top {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.sb-search {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 2px 4px;
+  background: transparent;
+  outline: none;
+  color: var(--text);
+  font: inherit;
+}
+.sb-search::placeholder {
+  color: var(--overlay0, var(--text-faint));
+}
+.sb-needs {
+  flex-shrink: 0;
+  font-size: 0.85em;
+  font-weight: 700;
+  color: var(--st-blocked, rgb(var(--primary)));
+  white-space: nowrap;
+}
+
+/* ── sections ────────────────────────────────────────────────────────────── */
+
+/* The scrolling element *is* the section, and it carries its own ceiling
+   (`max-height` set inline from the split) — CLAUDE.md: a list of unknown
+   length gets its ceiling in the element that scrolls. */
+.sb-scroll {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.sb-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px 3px;
+  background: var(--sidebar-bg, var(--app-panel));
+  color: var(--overlay0, var(--text-faint));
+  font-size: 0.85em;
+  font-weight: 700;
+  white-space: pre;
+}
+.sb-sort {
+  color: var(--overlay1, var(--text-soft));
+  font-weight: 400;
+  cursor: pointer;
+}
+.sb-sort:hover {
+  color: var(--text);
+}
+
+.sb-divider {
+  position: relative;
+  flex-shrink: 0;
+  height: 5px;
+  cursor: row-resize;
+}
+.sb-divider::after {
+  content: "";
+  position: absolute;
+  inset: 2px 0 auto;
+  height: 1px;
+  background: var(--border);
+}
+.sb-divider:hover::after {
+  background: var(--accent, var(--border-strong));
+}
+
+.sb-empty {
+  padding: 4px 10px 8px;
+  color: var(--overlay0, var(--text-faint));
+  white-space: pre;
+}
+
+/* ── machine header ──────────────────────────────────────────────────────── */
+
+.sb-machine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 3px 8px 3px 10px;
+  color: var(--overlay1, var(--text-soft));
+}
+.sb-machine-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  color: var(--text);
+  font-weight: 700;
+}
+.sb-conn {
+  flex-shrink: 0;
+  font-size: 0.85em;
+  color: var(--overlay0, var(--text-faint));
+}
+
+/* ── controls that appear on hover ───────────────────────────────────────── */
+
+.sb-act {
+  flex-shrink: 0;
+  padding: 0 3px;
+  color: var(--overlay1, var(--text-soft));
+  opacity: 0.75;
+}
+.sb-act:hover {
+  opacity: 1;
+  color: var(--text);
+}
+.sb-hover {
+  opacity: 0;
+}
+.sb-machine:hover .sb-hover,
+.sb-space:hover .sb-hover,
+.sb-row:hover .sb-hover,
+.sb-hover:focus-visible {
+  opacity: 0.75;
+}
+
+/* ── a space (project) ───────────────────────────────────────────────────── */
+
+.sb-space {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 3px 8px 3px 6px;
+  cursor: pointer;
+  color: var(--subtext0, var(--text-soft));
+}
+.sb-space:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+/* Focused: the row background, bold primary text and a mauve secondary line —
+   plus an accent edge, because on themes where the row background equals the
+   sidebar's (Mocha) a tone-only difference is not a state anyone can see. */
+.sb-space[data-active="true"] {
+  background: var(--active-row-bg, color-mix(in srgb, var(--text) 10%, transparent));
+  box-shadow: inset 2px 0 0 var(--accent, var(--text));
+  color: var(--text);
+  font-weight: 700;
+}
+.sb-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+.sb-num {
+  width: 1.6em;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--overlay0, var(--text-faint));
+  font-weight: 400;
+}
+.sb-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-sub {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  padding-left: calc(1.6em + 5px + 12px + 5px + 1.1em + 5px);
+  color: var(--overlay0, var(--text-faint));
+  font-size: 0.9em;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.sb-space[data-active="true"] .sb-sub {
+  color: var(--mauve, var(--text-soft));
+}
+.sb-up {
+  color: var(--green);
+}
+.sb-down {
+  color: var(--red);
+}
+.sb-toggle {
+  display: inline-flex;
+  width: 12px;
+  flex-shrink: 0;
+  justify-content: center;
+  color: var(--overlay1, var(--text-soft));
+  font-weight: 400;
+}
+
+/* ── tabs and sessions inside an expanded space ──────────────────────────── */
+
+.sb-children {
+  margin-left: 26px;
+  border-left: 1px solid var(--border);
+}
+.sb-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  color: var(--overlay1, var(--text-soft));
+  cursor: pointer;
+}
+.sb-tab[data-active="true"] {
+  color: var(--text);
+}
+.sb-tab:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.sb-row {
+  position: relative;
+}
+.sb-row-main {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 22px 3px 14px;
+  text-align: left;
+  color: var(--subtext0, var(--text-soft));
+}
+.sb-row[data-active="true"] .sb-row-main {
+  color: var(--text);
+}
+.sb-row .sb-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
+/* An agent row: two lines, the first being where it is. */
+.sb-agent {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  padding: 3px 22px 3px 10px;
+  text-align: left;
+  color: var(--subtext0, var(--text-soft));
+}
+.sb-agent .sb-where {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--overlay1, var(--text-soft));
+}
+.sb-agent .sb-name {
+  padding-left: calc(1.1em + 6px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--subtext0, var(--text-soft));
+}
+.sb-row[data-active="true"] .sb-agent .sb-name {
+  color: var(--text);
+  font-weight: 700;
+}
+
+/* The state glyph: a fixed cell so dots and symbols align in a column. */
+.sb-state {
+  display: inline-block;
+  width: 1.1em;
+  flex-shrink: 0;
+  text-align: center;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.sb-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 10px 6px 14px;
+}
+
+/* ── footer ──────────────────────────────────────────────────────────────── */
+
+.sb-foot {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border);
+  color: var(--overlay1, var(--text-soft));
+  white-space: pre;
+}
+.sb-foot button:hover {
+  color: var(--text);
+}
+
+/* ── compact (collapsed) column ──────────────────────────────────────────── */
+
+.sb-compact {
+  width: 44px;
+  align-items: stretch;
+}
+.sb-compact .sb-cell {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 3px 0;
+  color: var(--subtext0, var(--text-soft));
+}
+.sb-compact .sb-cell:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+.sb-compact .sb-cell[data-active="true"] {
+  background: var(--active-row-bg, color-mix(in srgb, var(--text) 10%, transparent));
+  box-shadow: inset 2px 0 0 var(--accent, var(--text));
+  color: var(--text);
+  font-weight: 700;
+}
+.sb-compact .sb-rule {
+  flex-shrink: 0;
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--border);
+}
+
+/* Parentage — a child an agent spawned (`rmux spawn`). In the agents list it is
+   a third line under the name; in the spaces tree a leading ↳ on the row. */
+.sb-agent .sb-parent {
+  padding-left: calc(1.1em + 6px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--overlay0, var(--text-faint));
+}
+.sb-parent-mark {
+  flex: none;
+  margin-right: -2px;
+  color: var(--overlay0, var(--text-faint));
+}
+
+/* ── project grid marks (`TileMark`) ─────────────────────────────────────── */
+
+/* A project with a tile: a muted edge (the focused one keeps the accent edge
+   from `[data-active]`), plus the tile glyph and number in the row. */
+.sb-space[data-shown="true"]:not([data-active="true"]) {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent, var(--text)) 40%, transparent);
+}
+.sb-tile {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  font-size: 0.85em;
+  font-weight: 400;
+  color: var(--overlay1, var(--text-soft));
+}
+.sb-tile[data-focused="true"] {
+  color: var(--accent, var(--text));
+}
+.sb-compact .sb-cell[data-shown="true"]:not([data-active="true"]) {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent, var(--text)) 40%, transparent);
+}
+
+/* ── cards ───────────────────────────────────────────────────────────────── */
+
+/*
+ * Every row is a card, herdr-style: a tinted, rounded surface with a gap
+ * between neighbours, so each space and each agent reads as one object at a
+ * glance instead of a run of text lines that have to be parsed to find where
+ * one ends. The tint is low enough that glass and painted backgrounds still
+ * show through; state stays carried by the glyph, never by the card colour.
+ *
+ * Kept as one block of overrides at the end so the structural rules above stay
+ * readable and this is easy to tune or remove.
+ */
+.sb-scroll {
+  padding-bottom: 6px;
+}
+
+.sb-space {
+  margin: 4px 8px;
+  padding: 7px 9px 7px 6px;
+  border: 1px solid color-mix(in srgb, var(--text) 7%, transparent);
+  border-radius: var(--radius, 4px);
+  background: color-mix(in srgb, var(--surface0, var(--hover)) 55%, transparent);
+  gap: 2px;
+}
+.sb-space:hover {
+  background: color-mix(in srgb, var(--surface1, var(--hover)) 70%, transparent);
+  border-color: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.sb-space[data-active="true"] {
+  background: var(--active-row-bg, color-mix(in srgb, var(--text) 10%, transparent));
+  border-color: color-mix(in srgb, var(--accent, var(--text)) 70%, transparent);
+  box-shadow: none;
+}
+.sb-space[data-shown="true"]:not([data-active="true"]) {
+  box-shadow: none;
+  border-color: color-mix(in srgb, var(--accent, var(--text)) 35%, transparent);
+}
+
+/* The expanded space's tabs and sessions: smaller cards hung off the space,
+   joined to it by the tree line rather than floating free. */
+.sb-children {
+  margin: 0 8px 6px 22px;
+  padding-left: 6px;
+}
+.sb-tab {
+  margin: 3px 0 2px;
+  padding: 3px 8px;
+  border-radius: var(--radius, 4px);
+}
+.sb-children .sb-row {
+  margin: 2px 0;
+  border-radius: var(--radius, 4px);
+  background: color-mix(in srgb, var(--surface0, var(--hover)) 55%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
+}
+.sb-children .sb-row:hover {
+  background: color-mix(in srgb, var(--surface1, var(--hover)) 60%, transparent);
+}
+.sb-children .sb-row[data-active="true"] {
+  background: var(--active-row-bg, color-mix(in srgb, var(--text) 10%, transparent));
+  border-color: color-mix(in srgb, var(--accent, var(--text)) 55%, transparent);
+}
+.sb-children .sb-row-main {
+  padding: 5px 22px 5px 8px;
+}
+
+/* Agents: one card each. */
+.sb-row:has(> .sb-agent),
+.sb-row:has(.sb-agent) {
+  margin: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--text) 7%, transparent);
+  border-radius: var(--radius, 4px);
+  background: color-mix(in srgb, var(--surface0, var(--hover)) 55%, transparent);
+}
+.sb-row:has(.sb-agent):hover {
+  background: color-mix(in srgb, var(--surface1, var(--hover)) 70%, transparent);
+  border-color: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.sb-row:has(.sb-agent)[data-active="true"] {
+  background: var(--active-row-bg, color-mix(in srgb, var(--text) 10%, transparent));
+  border-color: color-mix(in srgb, var(--accent, var(--text)) 70%, transparent);
+}
+.sb-agent {
+  padding: 7px 24px 7px 9px;
+  gap: 2px;
+}
+.sb-row .sb-x {
+  top: 8px;
+}
+
+/* The section headers sit flush with the cards' left edge. */
+.sb-head {
+  padding-left: 12px;
+}
+
+/* A space card's actions float over its right edge while it is hovered (or a
+   control in it has keyboard focus) instead of reserving their width — six
+   buttons took 126px of a 206px row and left the project's name as "r…". */
+.sb-space .sb-line {
+  position: relative;
+}
+.sb-space .sb-actions {
+  position: absolute;
+  top: 50%;
+  right: -4px;
+  transform: translateY(-50%);
+  padding: 1px 2px 1px 14px;
+  border-radius: var(--radius, 4px);
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, var(--surface1, var(--app-panel)) 96%, transparent) 14px
+  );
+  opacity: 0;
+  pointer-events: none;
+}
+.sb-space:hover .sb-actions,
+.sb-space .sb-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+.sb-space .sb-actions .sb-hover {
+  opacity: 0.8;
+}

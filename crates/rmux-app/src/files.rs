@@ -7,12 +7,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rmux_fs::{DirEntry, FileContent, FileSystem, LocalFs, PreviewContent, SearchHit, SearchQuery, TargetFs};
+use rmux_fs::{DirEntry, FileContent, FileSystem, LocalFs, PreviewContent, SearchHit, SearchQuery, TargetFs, Transfer};
 use rmux_ssh::SshTarget;
 use rmux_transport::TargetId;
 use serde::Deserialize;
 
+use crate::ctx::Ctx;
 use crate::host::Host;
+use crate::worktree::{AgentFs, WorktreeStore};
 use crate::registry::{Call, NoArgs, Registry, Web};
 use crate::terminal::TargetRef;
 
@@ -47,16 +49,19 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 async fn filesystem(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: &TargetRef,
 ) -> Result<Arc<dyn FileSystem>, String> {
+    let store = ctx.store::<FsStore>();
     let id = target.id();
 
     if let Some(existing) = store.filesystems.lock().get(&id) {
         return Ok(Arc::clone(existing));
     }
 
-    let fs: Arc<dyn FileSystem> = match &id {
+    // The shell path: what answers when `fs-serve` cannot (Windows, an older
+    // agent, a dev build with no agents) or is not up yet.
+    let fallback: Arc<dyn FileSystem> = match &id {
         // Native calls locally: routing a local file browser through a shell
         // would spawn a process per directory, which is exactly the sluggishness
         // a local IDE must not have.
@@ -67,63 +72,67 @@ async fn filesystem(
             Arc::new(TargetFs::new(ssh))
         }
     };
+    // Every operation prefers the long-lived `fs-serve` connection and falls
+    // back to `fallback` transparently — see `worktree`.
+    let server = ctx.store::<WorktreeStore>().server(ctx, target);
+    let fs: Arc<dyn FileSystem> = Arc::new(AgentFs::new(server, fallback));
 
     store.filesystems.lock().insert(id, Arc::clone(&fs));
     Ok(fs)
 }
 
 pub async fn fs_list(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
 ) -> Result<Vec<DirEntry>, String> {
-    filesystem(store, &target).await?.list_dir(&path).await.map_err(err)
+    filesystem(ctx, &target).await?.list_dir(&path).await.map_err(err)
 }
 
 pub async fn fs_read(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
 ) -> Result<FileContent, String> {
-    filesystem(store, &target).await?.read_file(&path).await.map_err(err)
+    filesystem(ctx, &target).await?.read_file(&path).await.map_err(err)
 }
 
 pub async fn fs_write(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
     contents: String,
 ) -> Result<(), String> {
-    filesystem(store, &target).await?.write_file(&path, &contents).await.map_err(err)
+    filesystem(ctx, &target).await?.write_file(&path, &contents).await.map_err(err)
 }
 
 /// Read a file as base64, for formats the text editor cannot show.
 pub async fn fs_preview(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
 ) -> Result<PreviewContent, String> {
-    filesystem(store, &target).await?.read_preview(&path).await.map_err(err)
+    filesystem(ctx, &target).await?.read_preview(&path).await.map_err(err)
 }
 
-pub async fn fs_home(store: &FsStore, target: TargetRef) -> Result<String, String> {
-    filesystem(store, &target).await?.home_dir().await.map_err(err)
+pub async fn fs_home(ctx: &Arc<Ctx>, target: TargetRef) -> Result<String, String> {
+    filesystem(ctx, &target).await?.home_dir().await.map_err(err)
 }
 
 pub async fn fs_create_file(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
 ) -> Result<(), String> {
-    filesystem(store, &target).await?.create_file(&path).await.map_err(err)
+    filesystem(ctx, &target).await?.create_file(&path).await.map_err(err)
 }
 
 pub async fn fs_create_dir(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
 ) -> Result<(), String> {
-    filesystem(store, &target).await?.create_dir(&path).await.map_err(err)
+    filesystem(ctx, &target).await?.create_dir(&path).await.map_err(err)
 }
 
 /// Write dropped or picked bytes into a new file on the target.
@@ -136,7 +145,7 @@ pub async fn fs_create_dir(
 /// would reject files a third smaller than the stated limit, which is a cap that
 /// lies about itself.
 pub async fn fs_upload(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
     base64: String,
@@ -155,7 +164,7 @@ pub async fn fs_upload(
         ));
     }
 
-    filesystem(store, &target).await?.upload(&path, &bytes).await.map_err(err)
+    filesystem(ctx, &target).await?.upload(&path, &bytes).await.map_err(err)
 }
 
 /// Where an upload is assembled before it is streamed to the target.
@@ -282,13 +291,15 @@ struct UploadProgress {
 /// looks complete — so it is refused, the same rule reads follow.
 pub async fn fs_upload_finish(
     host: &dyn Host,
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
     id: String,
     size: u64,
 ) -> Result<(), String> {
     let local = staged(host, &id)?;
+    let transfers = ctx.store::<LiveTransfers>();
+    let live = transfers.begin(&id);
 
     let result = async {
         let staged_len = std::fs::metadata(&local).map_err(err)?.len();
@@ -297,17 +308,18 @@ pub async fn fs_upload_finish(
                 "{path} was not uploaded — only {staged_len} of {size} bytes arrived"
             ));
         }
-        let fs = filesystem(store, &target).await?;
-        let sent = std::sync::atomic::AtomicU64::new(0);
-        let upload = fs.upload_file(&path, &local, &sent);
+        let fs = filesystem(ctx, &target).await?;
+        let upload = fs.upload_file(&path, &local, &live.progress);
         tokio::pin!(upload);
 
-        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+        // ~4/s: often enough that a bar visibly moves, rarely enough that a
+        // fast link does not flood the bridge with events nobody can read.
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
         loop {
             tokio::select! {
                 done = &mut upload => break done.map_err(err),
                 _ = tick.tick() => {
-                    let sent = sent.load(std::sync::atomic::Ordering::Relaxed);
+                    let sent = live.progress.done();
                     let progress = UploadProgress { id: id.clone(), sent, size };
                     if let Ok(payload) = serde_json::to_value(progress) {
                         host.emit("fs-upload-progress", payload);
@@ -318,18 +330,63 @@ pub async fn fs_upload_finish(
     }
     .await;
 
+    transfers.end(&id);
     let _ = std::fs::remove_file(&local);
     result
 }
 
 /// Discard a staged upload that will not be finished.
-pub async fn fs_upload_abort(host: &dyn Host, id: String) -> Result<(), String> {
-    let _ = std::fs::remove_file(staged(host, &id)?);
+///
+/// Also the upload's **cancel**: if its staged copy is already being sent, the
+/// send is told to stop, and the far side removes what it had written (the
+/// fs-serve `UploadAbort`, or the shell script's length check). Removing only
+/// the staging copy would not stop a send already reading it — on Unix an open
+/// file outlives its name.
+pub async fn fs_upload_abort(host: &dyn Host, ctx: &Arc<Ctx>, id: String) -> Result<(), String> {
+    let path = staged(host, &id)?;
+    ctx.store::<LiveTransfers>().cancel(&id);
+    let _ = std::fs::remove_file(path);
     Ok(())
 }
 
+/// Transfers in flight, by the id the UI knows them by, so a cancel can reach
+/// one that is running in another call.
+#[derive(Default)]
+pub struct LiveTransfers {
+    live: Mutex<HashMap<String, Arc<Live>>>,
+}
+
+pub struct Live {
+    pub progress: Transfer,
+    /// Wakes a waiting download at once, rather than at its next chunk — a
+    /// chunk is 8 MB, which on a slow link is the better part of a minute.
+    stop: tokio::sync::Notify,
+}
+
+impl LiveTransfers {
+    fn begin(&self, id: &str) -> Arc<Live> {
+        let live = Arc::new(Live { progress: Transfer::default(), stop: tokio::sync::Notify::new() });
+        self.live.lock().insert(id.to_owned(), Arc::clone(&live));
+        live
+    }
+
+    fn end(&self, id: &str) {
+        self.live.lock().remove(id);
+    }
+
+    /// Whether anything was running under `id`.
+    pub fn cancel(&self, id: &str) -> bool {
+        let Some(live) = self.live.lock().get(id).cloned() else { return false };
+        live.progress.cancel();
+        // `notify_one` stores a permit, so a cancel that lands before the
+        // download reaches its `select!` is not lost.
+        live.stop.notify_one();
+        true
+    }
+}
+
 /// What a completed download tells the operator.
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Downloaded {
     /// The full local path. "Check your downloads" is not an answer when the
@@ -358,27 +415,152 @@ pub struct Downloaded {
 /// every browser uses. Nothing on disk is ever replaced, and nothing is refused
 /// for a reason the operator did not cause.
 pub async fn fs_download(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
+    transfer: Option<String>,
+    progress: Option<Arc<dyn crate::host::Sink>>,
 ) -> Result<Downloaded, String> {
-    let name = path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download");
+    let dir = download_dir()?;
+    let fs = filesystem(ctx, &target).await?;
 
+    // Without an id the UI cannot cancel it, but it still gets a private one
+    // so two concurrent downloads never share a live entry.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = transfer.unwrap_or_else(|| {
+        format!("anon-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    });
+    let transfers = ctx.store::<LiveTransfers>();
+    let live = transfers.begin(&id);
+    let result = download_into(fs.as_ref(), &path, &dir, &live, |done, total| {
+        if let Some(sink) = &progress {
+            let _ = sink.send_json(serde_json::json!({ "id": id, "done": done, "total": total }));
+        }
+    })
+    .await;
+    transfers.end(&id);
+    result
+}
+
+/// Where downloads land: Downloads, else the Desktop, else home.
+fn download_dir() -> Result<std::path::PathBuf, String> {
     let dir = dirs::download_dir()
         .or_else(dirs::desktop_dir)
         .or_else(dirs::home_dir)
         .ok_or("could not find a folder to download into")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not open {}: {e}", dir.display()))?;
+    Ok(dir)
+}
 
-    let dest = unique_path(&dir, name);
+/// The body of [`fs_download`]: stage, then move into place.
+///
+/// ## Temp name, then rename — and why it matters more than it looks
+///
+/// The bytes go to `<name>.part` and only a *complete* file takes the real
+/// name. Written straight to the final name, a download that failed half way —
+/// a dropped connection, a short read, a cancel — left a truncated file sitting
+/// exactly where the operator would look for the real one, indistinguishable
+/// from it until opened. A failed or cancelled download now leaves nothing.
+///
+/// The move refuses to clobber: `hard_link` fails if the name was taken while
+/// the download ran, and then the next free name is chosen instead.
+pub async fn download_into(
+    fs: &dyn FileSystem,
+    path: &str,
+    dir: &std::path::Path,
+    live: &Live,
+    mut report: impl FnMut(u64, Option<u64>),
+) -> Result<Downloaded, String> {
+    let name = path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download");
+    let staging = unique_path(dir, &format!("{name}.part"));
 
-    let bytes = filesystem(store, &target)
-        .await?
-        .download(&path, &dest)
-        .await
-        .map_err(err)?;
+    // Boxed rather than `pin!`ned so the `drop` below really ends it: the
+    // future holds the staging file open, and on Windows an open file cannot
+    // be removed.
+    let mut download = Box::pin(fs.download(path, &staging, &live.progress));
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    let outcome = loop {
+        tokio::select! {
+            done = &mut download => break done.map_err(err),
+            _ = live.stop.notified() => break Err(rmux_fs::CANCELLED.to_owned()),
+            _ = tick.tick() => report(live.progress.done(), live.progress.total()),
+        }
+    };
+    // Dropped before the cleanup, so nothing is still writing the staging file
+    // when it is removed.
+    drop(download);
+
+    let bytes = match outcome {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let _ = std::fs::remove_file(&staging);
+            return Err(if live.progress.is_cancelled() { rmux_fs::CANCELLED.to_owned() } else { e });
+        }
+    };
+    report(bytes, Some(bytes));
+
+    let mut dest = unique_path(dir, name);
+    let mut placed = false;
+    for _ in 0..16 {
+        match std::fs::hard_link(&staging, &dest) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&staging);
+                placed = true;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => dest = unique_path(dir, name),
+            // A filesystem without hard links (FAT, some network shares):
+            // check-then-rename, the one non-atomic step, named here.
+            Err(_) if !dest.exists() => {
+                if std::fs::rename(&staging, &dest).is_ok() {
+                    placed = true;
+                }
+                break;
+            }
+            Err(_) => dest = unique_path(dir, name),
+        }
+    }
+    if !placed {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("downloaded {name}, but could not move it into {}", dir.display()));
+    }
 
     Ok(Downloaded { path: dest.to_string_lossy().into_owned(), bytes })
+}
+
+/// Stop a running download; its staging file is removed.
+pub fn fs_download_cancel(ctx: &Arc<Ctx>, transfer: &str) -> bool {
+    ctx.store::<LiveTransfers>().cancel(transfer)
+}
+
+/// Show a finished download in Finder (or open its folder elsewhere).
+///
+/// **Only inside the downloads folder.** This is a "launch something on this
+/// machine" bridge reachable from the webview; restricting it to files that
+/// [`fs_download`] could have written keeps it from opening an arbitrary path.
+pub async fn fs_reveal_download(path: String) -> Result<(), String> {
+    use rmux_transport::NoConsoleWindow as _;
+
+    let dir = download_dir()?.canonicalize().map_err(err)?;
+    let file = std::path::Path::new(&path)
+        .canonicalize()
+        .map_err(|_| "that file is no longer there — it may have been moved or deleted".to_owned())?;
+    if !file.starts_with(&dir) {
+        return Err("only files in the downloads folder can be shown".to_owned());
+    }
+
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = tokio::process::Command::new("open");
+        c.arg("-R").arg(&file);
+        c
+    } else {
+        let folder = file.parent().unwrap_or(&dir).to_path_buf();
+        let mut c = tokio::process::Command::new(if cfg!(target_os = "windows") { "explorer" } else { "xdg-open" });
+        c.arg(folder);
+        c
+    };
+    cmd.no_console_window().spawn().map_err(|e| format!("could not open the folder: {e}"))?;
+    Ok(())
 }
 
 /// `report.txt` → `report (2).txt` → `report (3).txt`, until one is free.
@@ -409,20 +591,20 @@ fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
 }
 
 pub async fn fs_rename(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     from: String,
     to: String,
 ) -> Result<(), String> {
-    filesystem(store, &target).await?.rename(&from, &to).await.map_err(err)
+    filesystem(ctx, &target).await?.rename(&from, &to).await.map_err(err)
 }
 
 pub async fn fs_delete(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     path: String,
 ) -> Result<(), String> {
-    filesystem(store, &target).await?.delete(&path).await.map_err(err)
+    filesystem(ctx, &target).await?.delete(&path).await.map_err(err)
 }
 
 /// Used by the UI to build child paths without duplicating separator rules.
@@ -495,6 +677,86 @@ mod tests {
     fn trailing_separators_do_not_confuse_the_parent() {
         assert_eq!(parent_path("/home/me/").as_deref(), Some("/home"));
     }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rmux-dl-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn names(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> =
+            std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    fn live() -> Live {
+        Live { progress: Transfer::default(), stop: tokio::sync::Notify::new() }
+    }
+
+    #[tokio::test]
+    async fn a_download_is_staged_then_renamed_into_place() {
+        let src = scratch("src-ok");
+        let out = scratch("out-ok");
+        let file = src.join("report.txt");
+        std::fs::write(&file, vec![7u8; 3 * 1024 * 1024 + 5]).unwrap();
+        // A file already holding the name: the download must not replace it.
+        std::fs::write(out.join("report.txt"), b"mine").unwrap();
+
+        let mut reports = Vec::new();
+        let got = download_into(&LocalFs, file.to_str().unwrap(), &out, &live(), |d, t| reports.push((d, t)))
+            .await
+            .unwrap();
+
+        assert_eq!(got.bytes, 3 * 1024 * 1024 + 5);
+        assert!(got.path.ends_with("report (2).txt"), "{}", got.path);
+        assert_eq!(names(&out), vec!["report (2).txt", "report.txt"], "a staging file was left behind");
+        assert_eq!(std::fs::read(out.join("report.txt")).unwrap(), b"mine");
+        let last = reports.last().copied().unwrap();
+        assert_eq!(last, (got.bytes, Some(got.bytes)));
+        assert!(reports.iter().all(|(d, t)| t.is_none_or(|t| *d <= t)), "progress passed the total");
+        let _ = std::fs::remove_dir_all(src);
+        let _ = std::fs::remove_dir_all(out);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_download_leaves_no_file_under_any_name() {
+        let src = scratch("src-cancel");
+        let out = scratch("out-cancel");
+        let file = src.join("big.bin");
+        std::fs::write(&file, vec![1u8; 8 * 1024 * 1024]).unwrap();
+
+        let l = live();
+        l.progress.cancel();
+        l.stop.notify_one();
+        let e = download_into(&LocalFs, file.to_str().unwrap(), &out, &l, |_, _| {}).await.unwrap_err();
+        assert_eq!(e, rmux_fs::CANCELLED);
+        assert!(names(&out).is_empty(), "left behind: {:?}", names(&out));
+        let _ = std::fs::remove_dir_all(src);
+        let _ = std::fs::remove_dir_all(out);
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_leaves_no_partial_file() {
+        let out = scratch("out-fail");
+        let e = download_into(&LocalFs, "/definitely/not/here.bin", &out, &live(), |_, _| {}).await.unwrap_err();
+        assert!(!e.is_empty());
+        assert!(names(&out).is_empty(), "left behind: {:?}", names(&out));
+        let _ = std::fs::remove_dir_all(out);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_reaches_a_running_transfer_by_id() {
+        let t = LiveTransfers::default();
+        assert!(!t.cancel("nope"));
+        let l = t.begin("tx-1");
+        assert!(t.cancel("tx-1"));
+        assert!(l.progress.is_cancelled());
+        t.end("tx-1");
+        assert!(!t.cancel("tx-1"));
+    }
 }
 
 /// Find text under `root`, on whichever machine it lives on.
@@ -502,7 +764,7 @@ mod tests {
 /// One command for local and remote, like every other filesystem call — the
 /// branch is inside the `FileSystem` impl, never here.
 pub async fn fs_search(
-    store: &FsStore,
+    ctx: &Arc<Ctx>,
     target: TargetRef,
     root: String,
     query: SearchQuery,
@@ -512,7 +774,58 @@ pub async fn fs_search(
     if query.text.trim().is_empty() {
         return Ok(Vec::new());
     }
-    filesystem(store, &target).await?.search(&root, &query).await.map_err(err)
+    filesystem(ctx, &target).await?.search(&root, &query).await.map_err(err)
+}
+
+/// A file plus its version token, for an editor that will save it back.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Versioned {
+    pub content: FileContent,
+    /// Opaque; `None` when the backend cannot vouch for one (the shell path),
+    /// in which case saves are not conflict-checked.
+    pub version: Option<String>,
+}
+
+pub async fn fs_read_versioned(ctx: &Arc<Ctx>, target: TargetRef, path: String) -> Result<Versioned, String> {
+    let (content, version) = filesystem(ctx, &target).await?.read_versioned(&path).await.map_err(err)?;
+    Ok(Versioned { content, version })
+}
+
+/// Save, refusing when the file changed on disk since `expected` was read.
+///
+/// A refusal is an error that starts with [`crate::worktree::CONFLICT_PREFIX`],
+/// so the editor can offer *reload / keep mine* rather than a bare failure —
+/// never silently overwriting either side.
+pub async fn fs_write_versioned(
+    ctx: &Arc<Ctx>,
+    target: TargetRef,
+    path: String,
+    contents: String,
+    expected: Option<String>,
+) -> Result<Option<String>, String> {
+    filesystem(ctx, &target)
+        .await?
+        .write_versioned(&path, &contents, expected.as_deref())
+        .await
+        .map_err(err)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsWriteVersionedArgs {
+    pub target: TargetRef,
+    pub path: String,
+    pub contents: String,
+    #[serde(default)]
+    pub expected: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeOpenArgs {
+    pub target: TargetRef,
+    pub root: String,
 }
 
 // ── Registration ─────────────────────────────────────────────────────────────
@@ -566,6 +879,25 @@ pub struct FsUploadFinishArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FsDownloadArgs {
+    pub target: TargetRef,
+    pub path: String,
+    /// The UI's id for this transfer — what a cancel names.
+    #[serde(default)]
+    pub transfer: Option<String>,
+    /// A channel for `{id, done, total}` progress, ~4/s.
+    #[serde(default)]
+    pub progress: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferIdArgs {
+    pub transfer: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UploadIdArgs {
     pub id: String,
 }
@@ -599,8 +931,8 @@ pub struct FsSearchArgs {
     pub query: SearchQuery,
 }
 
-fn store(call: &Call) -> Arc<FsStore> {
-    call.ctx().store::<FsStore>()
+fn store(call: &Call) -> Arc<Ctx> {
+    call.ctx_arc()
 }
 
 pub fn register(r: &mut Registry) {
@@ -638,14 +970,27 @@ pub fn register(r: &mut Registry) {
         fs_upload_finish(call.ctx().host(), &store(&call), a.target, a.path, a.id, a.size).await
     });
     r.add("fs_upload_abort", Web::Yes, |call: Call, a: UploadIdArgs| async move {
-        fs_upload_abort(call.ctx().host(), a.id).await
+        fs_upload_abort(call.ctx().host(), &store(&call), a.id).await
     });
     // **Not on the web.** It writes into the Downloads folder of the machine
     // rmux runs on — for rmux-web that is the dev host, not the device in the
     // operator's hand, so it would report a path they cannot open. The web
     // needs a streamed download to the browser instead, which does not exist yet.
-    r.add("fs_download", Web::No, |call: Call, a: TargetPathArgs| async move {
-        fs_download(&store(&call), a.target, a.path).await
+    r.add("fs_download", Web::No, |call: Call, a: FsDownloadArgs| async move {
+        let progress = match &a.progress {
+            Some(channel) => Some(call.sink(channel).map_err(err)?),
+            None => None,
+        };
+        fs_download(&store(&call), a.target, a.path, a.transfer, progress).await
+    });
+    // Same reasoning as `fs_download`: only the desktop runs downloads.
+    r.add("fs_download_cancel", Web::No, |call: Call, a: TransferIdArgs| async move {
+        Ok::<_, String>(fs_download_cancel(&store(&call), &a.transfer))
+    });
+    // Launches Finder/Explorer on *this* machine, which on the web is the
+    // dev host rather than the device in the operator's hand.
+    r.add("fs_reveal_download", Web::No, |_, a: PathArgs| async move {
+        fs_reveal_download(a.path).await
     });
     r.add("fs_rename", Web::Yes, |call: Call, a: FsRenameArgs| async move {
         fs_rename(&store(&call), a.target, a.from, a.to).await
@@ -664,5 +1009,17 @@ pub fn register(r: &mut Registry) {
     });
     r.add("fs_search", Web::Yes, |call: Call, a: FsSearchArgs| async move {
         fs_search(&store(&call), a.target, a.root, a.query).await
+    });
+    r.add("fs_read_versioned", Web::Yes, |call: Call, a: TargetPathArgs| async move {
+        fs_read_versioned(&store(&call), a.target, a.path).await
+    });
+    r.add("fs_write_versioned", Web::Yes, |call: Call, a: FsWriteVersionedArgs| async move {
+        fs_write_versioned(&store(&call), a.target, a.path, a.contents, a.expected).await
+    });
+    // The worktree mirror (`worktree`): a snapshot now, `fs-worktree` patches
+    // after. An `unsupported: …` error means this host is on the shell path and
+    // the tree should list lazily instead.
+    r.add("fs_worktree_open", Web::Yes, |call: Call, a: WorktreeOpenArgs| async move {
+        crate::worktree::open(&call.ctx_arc(), a.target, a.root).await
     });
 }

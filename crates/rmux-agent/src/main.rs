@@ -26,6 +26,22 @@ async fn main() -> ExitCode {
     let command = args.first().map(String::as_str).unwrap_or("help");
     install_panic_reporter(command);
 
+    // The tmux-style CLI (`rmux ls`, `rmux attach -t …`, bare `rmux`) — see
+    // `cli`. Checked before everything else, but it claims `attach` only
+    // without `--session`, so the primitive the desktop app runs is untouched.
+    let first = args.first().map(String::as_str);
+    let rest = args.get(1..).unwrap_or_default();
+    if rmux_agent::cli::owns(first, rest) {
+        return rmux_agent::cli::run(first, rest).await;
+    }
+
+    // The orchestration CLI (`rmux spawn`, `rmux prompt`, …) — see
+    // `orchestrate`. Checked first so `list --json` reaches it while plain
+    // `list` keeps the tab-separated format the desktop app parses.
+    if rmux_agent::orchestrate::handles(command, &args[1..]) {
+        return rmux_agent::orchestrate::run(command, &args[1..]).await;
+    }
+
     match command {
         "daemon" => {
             tracing_subscriber::fmt()
@@ -45,8 +61,8 @@ async fn main() -> ExitCode {
         }
 
         "attach" => {
-            let mut hello = match parse_attach(&args[1..]) {
-                Ok(hello) => hello,
+            let (mut hello, detach, binding) = match parse_attach(&args[1..]) {
+                Ok(parsed) => parsed,
                 Err(e) => {
                     eprintln!("rmux-agent: {e}");
                     return ExitCode::FAILURE;
@@ -56,8 +72,20 @@ async fn main() -> ExitCode {
             // of the wire protocol entirely: the daemon only ever sees session
             // keys, so an older daemon needs no changes to serve a renamed
             // session. A name that is not an alias passes through unchanged.
+            let label = (hello.session != alias::resolve(&hello.session)).then(|| hello.session.clone());
             hello.session = alias::resolve(&hello.session);
-            match attach::attach(hello, true).await {
+            // The detach key exists only when `--detach-key` was passed — the
+            // CLI passes it; the desktop app never does (see `detach`).
+            let label = label.or_else(|| alias::load().get(&hello.session).cloned());
+            let binding = match binding.resolve(&hello.session) {
+                Ok(binding) => binding,
+                Err(e) => {
+                    eprintln!("rmux-agent: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let options = attach::AttachOptions { detach, label, binding };
+            match attach::attach_with(hello, true, options).await {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!("rmux-agent: {e}");
@@ -98,7 +126,17 @@ async fn main() -> ExitCode {
                 .filter(|(k, _)| !k.is_empty())
                 .collect();
 
-            match attach::set_env(pairs).await {
+            // `--kind claude|deepseek|openai` scopes the variables to sessions
+            // of that agent (`Frame::SetKindEnv`); `--set NAME` (with `--kind`)
+            // stores a named per-session set (`Frame::SetNamedEnv`) that a
+            // session is bound to by `attach --env-set NAME`. Without either the
+            // variables reach every session, which is what the Claude account
+            // still uses.
+            let delivered = match attach::SetenvTarget::parse(&args[1..]) {
+                Ok(target) => target.deliver(pairs).await,
+                Err(e) => Err(e),
+            };
+            match delivered {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("rmux-agent: {e}");
@@ -201,6 +239,24 @@ async fn main() -> ExitCode {
             }
         }
 
+        // Every account switch a fallback chain made on this host, plus which
+        // set every agent session runs on now. `--json` for the app.
+        "fallback-log" => match rmux_agent::fallback::run_log(&args[1..]).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("rmux-agent: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        // Move a chained session to a member and relaunch it — "switch back".
+        "fallback-switch" => match rmux_agent::fallback::run_switch(&args[1..]).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("rmux-agent: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
         // Publish one agent-agnostic status fact into `~/.rmux/status`. This is
         // the writer every non-Claude agent's hook calls — pi's status extension
         // shells out to it on each lifecycle event, a Codex `Stop` hook could
@@ -216,19 +272,39 @@ async fn main() -> ExitCode {
             }
         },
 
+        // The filesystem server (`rmux_fs::serve`): a framed protocol on
+        // stdin/stdout, run by rmux over `ssh -T`. A worktree snapshot plus a
+        // watcher stream, so the file tree is local and live. stdout *is* the
+        // protocol here — nothing else may print to it — and the process exits
+        // the moment stdin closes, so a dropped connection leaves nothing behind.
+        "fs-serve" => {
+            let code = match rmux_fs::serve::serve_stdio().await {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("rmux-agent: {e}");
+                    1
+                }
+            };
+            // Exit outright: watcher threads must not keep a process alive that
+            // nobody can reach any more.
+            std::process::exit(code);
+        }
+
         "version" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
 
         _ => {
-            eprintln!("usage: rmux-agent <attach|alias|daemon|hook|kill|list|setenv|watch-status|version> [--session NAME] [--cwd DIR]");
+            eprint!("rmux: unknown command {command:?}\n\n{}", rmux_agent::cli::HELP);
             ExitCode::FAILURE
         }
     }
 }
 
-fn parse_attach(args: &[String]) -> anyhow::Result<Hello> {
+fn parse_attach(
+    args: &[String],
+) -> anyhow::Result<(Hello, Option<rmux_agent::detach::DetachKey>, rmux_agent::attach::BindingFlags)> {
     let mut hello = Hello {
         session: String::new(),
         cwd: None,
@@ -240,6 +316,8 @@ fn parse_attach(args: &[String]) -> anyhow::Result<Hello> {
         rows: 24,
     };
 
+    let mut detach = None;
+    let mut binding = rmux_agent::attach::BindingFlags::default();
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -250,18 +328,25 @@ fn parse_attach(args: &[String]) -> anyhow::Result<Hello> {
 
         match flag {
             "--session" => hello.session = value()?,
+            "--detach-key" => {
+                detach = rmux_agent::detach::DetachKey::parse(&value()?).map_err(anyhow::Error::msg)?;
+            }
             "--cwd" => hello.cwd = Some(value()?),
             "--program" => hello.program = Some(value()?),
             "--login-command" => hello.login_command = Some(value()?),
             "--cols" => hello.cols = value()?.parse()?,
             "--rows" => hello.rows = value()?.parse()?,
+            "--env-set" => binding.set = Some(value()?),
+            "--env-chain" => binding.chain = Some(value()?),
+            "--env-members" => binding.members = Some(value()?),
+            "--env-overloaded" => binding.overloaded = true,
             other => anyhow::bail!("unknown option {other}"),
         }
         i += 1;
     }
 
     anyhow::ensure!(!hello.session.is_empty(), "--session is required");
-    Ok(hello)
+    Ok((hello, detach, binding))
 }
 
 

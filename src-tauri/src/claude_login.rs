@@ -91,7 +91,7 @@ pub async fn claude_login_start(
     // reuses that host's existing ControlMaster connection rather than opening a
     // second one.
     let claude_store = crate::bridge::store::<rmux_app::claude::ClaudeStore, _>(&app);
-    let target = rmux_app::claude::resolve(&claude_store, &target.unwrap_or(TargetRef { host: None, user: None, port: None })).await?;
+    let target = rmux_app::claude::resolve(&claude_store, &target.unwrap_or_default()).await?;
 
     // A login shell, because `claude` is installed by a version manager whose
     // PATH only exists there — spawning the binary directly gives "command not
@@ -205,6 +205,41 @@ pub async fn claude_login_submit(
     cancel_locked(&store);
 
     rmux_app::claude_account::claude_account_save(crate::bridge::ctx(&app).host(), token).await
+}
+
+/// Like [`claude_login_submit`], but the token becomes a **Claude account
+/// profile** named `name` instead of the stored account — Settings › Models ›
+/// "Get a token". The token goes straight from the CLI's output into the
+/// keychain; the webview only ever sees the redacted profile view.
+#[tauri::command]
+pub async fn claude_login_submit_profile(
+    app: tauri::AppHandle,
+    store: State<'_, LoginStore>,
+    code: String,
+    name: String,
+) -> Result<Vec<rmux_app::model_profile::ProfileView>, String> {
+    let code = code.trim().to_owned();
+    if code.is_empty() {
+        return Err(fail("paste the code from your browser first"));
+    }
+    let output = {
+        let mut guard = store.session.lock().unwrap();
+        let login = guard
+            .as_mut()
+            .ok_or_else(|| fail("that sign-in is no longer active — start it again"))?;
+        login
+            .writer
+            .write_all(format!("{code}\r").as_bytes())
+            .map_err(|e| fail(format!("could not send the code: {e}")))?;
+        login.writer.flush().ok();
+        Arc::clone(&login.output)
+    };
+    let Some(token) = wait_for(&output, TOKEN_TIMEOUT, auth::find_token) else {
+        let tail = tail_of(&output);
+        return Err(fail(format!("no token came back. Last output: {tail}")));
+    };
+    cancel_locked(&store);
+    rmux_app::model_profile::model_profile_save_token(crate::bridge::ctx(&app).host(), None, name, token)
 }
 
 /// Abandon a login in progress.

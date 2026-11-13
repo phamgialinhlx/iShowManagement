@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PanelLoader } from "./PanelLoader";
 import { useWorkspace } from "../lib/workspace";
-import { isClaudeSession, reattachName, type ServerId } from "../lib/workspace-model";
+import { adoptedKind, reattachName, type ServerId } from "../lib/workspace-model";
 import {
   api,
   hasBackend,
@@ -746,7 +746,7 @@ function Sessions({ target, serverId }: { target: TargetRef; serverId: ServerId 
                 adoptServerSession(
                   serverId,
                   s.name,
-                  isClaudeSession(s.command) ? "claude" : "terminal",
+                  adoptedKind(s.command),
                   s.alias,
                   s.cwd,
                 );

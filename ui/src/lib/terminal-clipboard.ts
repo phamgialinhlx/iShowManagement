@@ -1,4 +1,7 @@
 import type { Terminal as Xterm } from "@xterm/xterm";
+import { copyText } from "./clipboard";
+
+import { terminalKeyGate } from "./prefix-runtime.ts";
 
 /**
  * Clipboard helpers for an xterm view.
@@ -46,32 +49,9 @@ const onWindows = (): boolean => platformSays(/win/i);
  * errors: the operator pastes stale content somewhere else and never learns why.
  */
 async function write(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return;
-  } catch {
-    // `navigator.clipboard` needs a secure context and a permission that a
-    // webview does not always grant. The old path still works everywhere, and a
-    // copy that silently fails is worse than an ugly implementation.
-  }
-
-  let copied = false;
-  const holder = document.createElement("textarea");
-  holder.value = text;
-  // Off-screen rather than hidden: `display:none` cannot be selected, so the
-  // copy would do nothing.
-  holder.style.position = "fixed";
-  holder.style.opacity = "0";
-  holder.style.pointerEvents = "none";
-  document.body.appendChild(holder);
-  holder.select();
-  try {
-    copied = document.execCommand("copy");
-  } finally {
-    holder.remove();
-  }
-
-  if (!copied) throw new Error("the clipboard rejected the write");
+  // One implementation for the whole app — see `clipboard.ts` for why the
+  // desktop goes through the native pasteboard.
+  await copyText(text);
 }
 
 /** Decode an OSC 52 base64 payload as UTF-8 text. */
@@ -145,6 +125,12 @@ export function attachClipboard(xterm: Xterm): Disposer {
   const isWindows = onWindows();
 
   xterm.attachCustomKeyEventHandler((event) => {
+    // **The prefix layer decides first** (`prefix-runtime.ts`). This is the one
+    // handler slot xterm has, so the prefix gate lives inside it rather than
+    // beside it — a second `attachCustomKeyEventHandler` would replace this one.
+    // It must run before xterm encodes anything, or `ctrl+b` is `\x02` on the
+    // wire before a window listener could see it.
+    if (!terminalKeyGate(event)) return false;
     if (event.type !== "keydown") return true;
 
     const key = event.key.toLowerCase();

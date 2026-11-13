@@ -29,6 +29,10 @@ export type Alert = {
   asking: boolean;
   /** For ordering, and so the card can say how long it has been waiting. */
   at: number;
+  /** The kicker, when it is not a session's FINISHED / NEEDS YOU — a transfer's card. */
+  label?: string;
+  /** What clicking the card does, when it is not "go to this session". */
+  onOpen?: () => void;
 };
 
 type AlertStore = {

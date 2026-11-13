@@ -7,13 +7,16 @@
 use tauri::Manager;
 
 mod askpass;
+mod clipboard;
 mod background;
+mod cli_install;
 mod control;
 mod notify;
 mod redstone;
 mod uplink;
 mod userpath;
 mod tunnels;
+mod dsh;
 pub mod bridge;
 mod claude_login;
 mod auth;
@@ -43,6 +46,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
     bridge::invoke_handler(
         std::sync::Arc::new(rmux_app::registry()),
         tauri::generate_handler![
+            clipboard::clipboard_write,
             auth::auth_config,
             auth::sign_in,
             auth::open_external,
@@ -79,6 +83,11 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             tunnels::port_unforward,
             tunnels::ports_forwarded,
             tunnels::port_proxy,
+            dsh::dsh_view_open,
+            dsh::dsh_view_bounds,
+            dsh::dsh_view_close,
+            dsh::dsh_open_browser,
+            dsh::dsh_probe,
             control::control_sync,
             control::control_open_url,
             control::control_info,
@@ -95,10 +104,15 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             redstone::redstone_start_bridge,
             claude_login::claude_login_start,
             claude_login::claude_login_submit,
+            claude_login::claude_login_submit_profile,
             claude_login::claude_login_cancel,
             server::server_disconnect,
             server::server_alias,
             background::background_set,
+            cli_install::servers_sync,
+            cli_install::cli_status,
+            cli_install::cli_install,
+            cli_install::cli_uninstall,
             background::background_clear,
             settings_window::restart_app,
             glass::glass_status,
@@ -110,6 +124,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             theme::theme_state,
             theme::theme_save,
             theme::theme_set_active,
+            theme::theme_set_auto,
             theme::theme_delete,
         ],
     )
@@ -181,6 +196,13 @@ pub fn run() {
         // Gives a notification rmux's own icon and name. Driven from Rust (see
         // `notify`), so it needs no ACL entry.
         .plugin(tauri_plugin_notification::init())
+        // The native file picker, for Connect a server › KEY FILE: a key is
+        // chosen by *path* (it is offered to ssh with `-i`), and `<input
+        // type=file>` hands the webview bytes, never a path. A plugin command,
+        // so it is ACL-checked — `dialog:allow-open` in capabilities/default.json,
+        // guarded by `tests/key_file_dialog.rs`; without the grant the picker
+        // promise rejects and the button silently does nothing.
+        .plugin(tauri_plugin_dialog::init())
         // Face model weights. See `face_models::SCHEME` for why this is a
         // protocol of our own rather than Tauri's asset: handler.
         .register_uri_scheme_protocol(face_models::SCHEME, |ctx, request| {

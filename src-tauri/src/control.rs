@@ -163,8 +163,7 @@ async fn discover_ports(app: &AppHandle, host: Option<&str>) -> Result<Vec<u16>,
     // business, which is where it stays: rmux never resolves that file itself.
     let target = rmux_app::TargetRef {
         host: host.map(str::to_owned),
-        user: None,
-        port: None,
+        ..Default::default()
     };
     let claude_store = crate::bridge::store::<rmux_app::claude::ClaudeStore, _>(app);
     let resolved = rmux_app::claude::resolve(&claude_store, &target).await?;

@@ -67,7 +67,18 @@ export type ActionId =
   | "pane.right"
   | "pane.up"
   | "pane.down"
-  | "progress";
+  | "pane.splitRight"
+  | "pane.splitDown"
+  | "pane.close"
+  | "pane.zoom"
+  | "tab.new"
+  | "tab.next"
+  | "tab.prev"
+  | "progress"
+  | "quickSwitch"
+  | "quickOpen"
+  | "tile.openBeside"
+  | "tile.close";
 
 export type Action = { id: ActionId; label: string; hint: string };
 
@@ -85,11 +96,22 @@ export const ACTIONS: readonly Action[] = [
   { id: "view.jira", label: "Jira", hint: "This session's board" },
   { id: "view.git", label: "Git", hint: "What changed in this project" },
   { id: "session.terminal", label: "Terminal", hint: "A shell on this session's machine" },
-  { id: "pane.left", label: "Pane left", hint: "Move the focus one tile left" },
-  { id: "pane.right", label: "Pane right", hint: "Move the focus one tile right" },
-  { id: "pane.up", label: "Pane up", hint: "Move the focus one tile up" },
-  { id: "pane.down", label: "Pane down", hint: "Move the focus one tile down" },
+  { id: "pane.left", label: "Pane left", hint: "Move the focus to the pane on the left" },
+  { id: "pane.right", label: "Pane right", hint: "Move the focus to the pane on the right" },
+  { id: "pane.up", label: "Pane up", hint: "Move the focus to the pane above" },
+  { id: "pane.down", label: "Pane down", hint: "Move the focus to the pane below" },
+  { id: "pane.splitRight", label: "Split right", hint: "A new terminal beside the focused pane" },
+  { id: "pane.splitDown", label: "Split down", hint: "A new terminal below the focused pane" },
+  { id: "pane.close", label: "Close pane", hint: "Close the focused pane — asks first, and ends its session" },
+  { id: "pane.zoom", label: "Zoom pane", hint: "The focused pane fills the tab, or goes back" },
+  { id: "tab.new", label: "New tab", hint: "A new tab with a terminal in this project" },
+  { id: "tab.next", label: "Next tab", hint: "The tab to the right, wrapping" },
+  { id: "tab.prev", label: "Previous tab", hint: "The tab to the left, wrapping" },
   { id: "progress", label: "Progress", hint: "Open or close the Progress page" },
+  { id: "tile.openBeside", label: "Project beside", hint: "Open the next project not on screen in a tile beside this one" },
+  { id: "tile.close", label: "Close tile", hint: "Take this project off the screen — its sessions keep running" },
+  { id: "quickSwitch", label: "Go to…", hint: "Search every session and project and jump to it (in the editor, Monaco keeps this chord)" },
+  { id: "quickOpen", label: "Open file…", hint: "Fuzzy-find a file in this project and open it — works from inside the editor too" },
 ];
 
 const KEY = "rmux.shortcuts";
@@ -136,7 +158,32 @@ const MAC_DEFAULTS: Record<ActionId, string> = {
   "pane.right": "Mod+Shift+ArrowRight",
   "pane.up": "Mod+Shift+ArrowUp",
   "pane.down": "Mod+Shift+ArrowDown",
-  progress: "Mod+P",
+  // The split tree. ⌘D / ⌘⇧D is the iTerm and VS Code pair, so it is the one a
+  // Mac terminal user already has in their hands. ⌘⇧W, not ⌘W — ⌘W closes the
+  // window from the app menu. ⌘⇧X, not ⌘⇧Z — ⌘⇧Z is Redo in every text field.
+  // Tabs on letters, not ⌘⇧[ ]: `accelOf` reads `e.key`, and Shift turns `]`
+  // into `}` on one layout and something else on the next — U and I sit side by
+  // side, previous on the left.
+  "pane.splitRight": "Mod+D",
+  "pane.splitDown": "Mod+Shift+D",
+  "pane.close": "Mod+Shift+W",
+  "pane.zoom": "Mod+Shift+X",
+  "tab.new": "Mod+Shift+N",
+  "tab.next": "Mod+Shift+I",
+  "tab.prev": "Mod+Shift+U",
+  // ⌘P is quick open, as in every editor a Mac developer already uses (Zed,
+  // VS Code, Sublime). Progress moved off it to ⌘⇧Y — Y for "your day", and
+  // free of both the app menu and Monaco. ⌘ encodes nothing in xterm.
+  progress: "Mod+Shift+Y",
+  quickOpen: "Mod+P",
+  // ⌘K is the Spotlight/Slack/VS Code "go to" chord. With Monaco focused it
+  // stays Monaco's chord prefix: `match` skips a text-field target.
+  quickSwitch: "Mod+K",
+  // The project grid. B for "beside"; Backspace for taking a tile away, because
+  // ⌘⇧Q is the system's Log Out and ⌘⇧W is already the pane close. ⌘ encodes
+  // nothing in xterm, so both are free of the terminal.
+  "tile.openBeside": "Mod+Shift+B",
+  "tile.close": "Mod+Shift+Backspace",
 };
 
 /**
@@ -164,8 +211,37 @@ const TERMINAL_SAFE_DEFAULTS: Record<ActionId, string> = {
   "pane.right": "Mod+Shift+L",
   "pane.up": "Mod+Shift+K",
   "pane.down": "Mod+Shift+J",
-  progress: "Mod+Shift+P",
+  // Ctrl+Shift+E / Ctrl+Shift+O is Terminator's split pair (side by side /
+  // stacked), and Ctrl+Shift+W and Ctrl+Shift+X its close and zoom — the
+  // nearest thing Linux has to a convention, and all Ctrl+Shift+letter, which
+  // the module note shows is the shape xterm leaves alone. ⌘D's twin is not
+  // available: Ctrl+Shift+D would leave split-down with no matching letter.
+  "pane.splitRight": "Mod+Shift+E",
+  "pane.splitDown": "Mod+Shift+O",
+  "pane.close": "Mod+Shift+W",
+  "pane.zoom": "Mod+Shift+X",
+  "tab.new": "Mod+Shift+N",
+  "tab.next": "Mod+Shift+I",
+  "tab.prev": "Mod+Shift+U",
+  // Ctrl+P is the shell's previous-command key, so quick open cannot have it
+  // here. Ctrl+Shift+P is the letter-plus-Shift shape xterm leaves alone
+  // (measured free in `shortcut-terminal-check.ts`), and keeps "P opens a
+  // file" on both platforms. Progress moves to Ctrl+Shift+Y with it.
+  progress: "Mod+Shift+Y",
+  quickOpen: "Mod+Shift+P",
+  // G for "go to", herdr's prefix letter for the same thing. Not
+  // Ctrl+Shift+K — that is pane.up here — and not Ctrl+Shift+C/V, which are
+  // copy and paste in every Linux terminal. Measured free of xterm.
+  quickSwitch: "Mod+Shift+G",
+  // Ctrl+Shift+letter is the shape xterm leaves alone. Not the macOS
+  // Backspace: xterm sends `\b` for Ctrl+Backspace whatever Shift says. Not
+  // Ctrl+Shift+V — that is paste in every Linux terminal.
+  "tile.openBeside": "Mod+Shift+B",
+  "tile.close": "Mod+Shift+Q",
 };
+
+/** Progress's default before quick open took it — see `readBindings`. */
+const LEGACY_PROGRESS = isMac() ? "Mod+P" : "Mod+Shift+P";
 
 /**
  * Resolved once at load: the platform cannot change under a running window, and
@@ -337,6 +413,12 @@ export function readBindings(): Bindings {
     const raw = localStorage.getItem(KEY);
     if (!raw) return out;
     const stored = JSON.parse(raw) as Partial<Record<ActionId, string>>;
+    // Quick open took Progress's old chord. A map saved before it existed holds
+    // Progress on that chord explicitly, which would make the two collide and
+    // leave quick open unreachable — so an untouched old default moves along.
+    if (stored.quickOpen === undefined && stored.progress && normalise(stored.progress) === normalise(LEGACY_PROGRESS)) {
+      delete stored.progress;
+    }
     for (const action of ACTIONS) {
       const value = stored[action.id];
       // An action added in a later version is absent from an older stored map,
@@ -393,39 +475,32 @@ export function isTypingTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
+/**
+ * Actions that still fire with the code editor focused.
+ *
+ * Monaco's input is a textarea, so the typing rule would otherwise swallow
+ * them — and jumping from one file to the next is exactly what you do *from*
+ * the editor. Monaco binds nothing to ⌘P / Ctrl+Shift+P in this build (its
+ * command palette is F1), so nothing of Monaco's is taken. Only Monaco is
+ * exempt: a rename field or the composer still keeps every key.
+ */
+const EDITOR_SAFE: ReadonlySet<ActionId> = new Set<ActionId>(["quickOpen"]);
+
+const inCodeEditor = (target: EventTarget | null) =>
+  target instanceof HTMLElement && !!target.closest(".monaco-editor");
+
 /** The action a keystroke triggers, or null. */
 export function match(e: KeyboardEvent, bindings: Bindings): ActionId | null {
-  if (isTypingTarget(e.target)) return null;
+  const typing = isTypingTarget(e.target);
+  if (typing && !inCodeEditor(e.target)) return null;
   const chord = accelOf(e);
   for (const action of ACTIONS) {
-    if (normalise(bindings[action.id] ?? "") === chord) return action.id;
+    if (normalise(bindings[action.id] ?? "") === chord) {
+      if (typing && !EDITOR_SAFE.has(action.id)) return null;
+      return action.id;
+    }
   }
   return null;
-}
-
-/**
- * Where the focus goes when moving one tile in a direction.
- *
- * Clamped rather than wrapped. Wrapping means pressing "left" at the left edge
- * lands on the far right, which in a 4×4 is six tiles from where the hand
- * expected — and there is no visual sense in which those are adjacent.
- * Returns the same index at an edge, so the caller can treat "no move" as a
- * no-op rather than a special case.
- */
-export function moveFocus(
-  index: number,
-  direction: "left" | "right" | "up" | "down",
-  cols: number,
-  rows: number,
-): number {
-  const total = Math.max(1, cols * rows);
-  const at = Math.min(Math.max(0, index), total - 1);
-  const row = Math.floor(at / cols);
-  const col = at % cols;
-  if (direction === "left") return col > 0 ? at - 1 : at;
-  if (direction === "right") return col < cols - 1 ? at + 1 : at;
-  if (direction === "up") return row > 0 ? at - cols : at;
-  return row < rows - 1 ? at + cols : at;
 }
 
 /**
@@ -467,3 +542,16 @@ export const FOCUS_EVENT = "rmux:focus-terminal";
 export function requestTerminalFocus(sessionId: string): void {
   window.dispatchEvent(new CustomEvent(FOCUS_EVENT, { detail: { sessionId } }));
 }
+
+/**
+ * Ask the deck to confirm closing something. An event, like `VIEW_EVENT`,
+ * because the confirmation is UI the deck owns and the keyboard handler cannot
+ * reach — and because a close that ends a session must never skip it.
+ * `leafId` absent means the whole tab.
+ */
+export const CLOSE_EVENT = "rmux:confirm-close";
+export type CloseRequest = { projectId: string; tabId: string; leafId?: string };
+export function requestClose(detail: CloseRequest): void {
+  window.dispatchEvent(new CustomEvent(CLOSE_EVENT, { detail }));
+}
+

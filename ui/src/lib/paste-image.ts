@@ -82,7 +82,7 @@ export async function uploadImage(target: TargetRef, file: File): Promise<Upload
  * paths, and `~/.rmux/pastes` avoids that by construction — but the operator
  * can drag a file in from anywhere.
  */
-export function promptFor(paths: string[], provider: "claude" | "pi" = "claude"): string {
+export function promptFor(paths: string[], provider: "claude" | "pi" | "codex" = "claude"): string {
   const mark = provider === "pi" ? "@" : "";
   return `${paths.map((p) => `${mark}${/[\s'"]/.test(p) ? JSON.stringify(p) : p}`).join(" ")} `;
 }

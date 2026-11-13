@@ -293,7 +293,7 @@ use rmux_transport::{LocalTarget, TargetId};
 /// already open") was the assumption that leaked twelve `ssh -N` processes for
 /// five hosts: a target per call, six subsystems per host, each with a state
 /// lock of its own that serialised nothing against the others.
-async fn resolved(target: &TargetRef) -> Result<Box<dyn Target>, String> {
+pub(crate) async fn resolved(target: &TargetRef) -> Result<Box<dyn Target>, String> {
     match target.id() {
         TargetId::Local => Ok(Box::new(LocalTarget::new())),
         TargetId::Ssh(host) => {

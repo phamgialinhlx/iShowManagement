@@ -32,6 +32,7 @@ pub mod keys;
 pub mod mosh;
 pub mod mosh_install;
 pub mod mux;
+pub mod probe;
 pub mod winshell;
 
 pub use config::{ConfigHost, list_hosts};
@@ -994,6 +995,46 @@ mod tests {
         let p = args.iter().position(|a| a == "-p").unwrap();
         assert_eq!(args[p + 1], "2222");
         assert_eq!(args[args.len() - 3], "devbox");
+    }
+
+    /// **Client commands carry the chosen key too**, not only the master:
+    /// Windows has no ControlMaster, so there every command authenticates on its
+    /// own. Same for mosh's bootstrap, which *is* an ssh. Additive, and gone
+    /// once the file is.
+    #[test]
+    fn client_commands_and_mosh_offer_the_chosen_identity() {
+        let _serial = keys::CHOSEN_TEST_LOCK.lock();
+        let dir = std::env::temp_dir().join(format!("rmux-client-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("picked key");
+        std::fs::write(&key, "x").unwrap();
+        let key_s = key.to_string_lossy().into_owned();
+
+        let host = SshHostId { alias: "client-identity-test".into(), user: Some("me".into()), port: None };
+        keys::choose_identity(&host.label(), &key);
+
+        let t = SshTarget::new(host.clone());
+        let args = argv_of(&t.build_command(&CommandSpec::new("uname").tty(Tty::None)).unwrap());
+        assert!(args.windows(2).any(|w| w[0] == "-i" && w[1] == key_s), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("IdentitiesOnly")));
+
+        // mosh: the bootstrap is rendered from the same connection options.
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(mosh::availability_for(&host, &FakeProbe(true)));
+        let t = SshTarget::new(host.clone());
+        let resolved = t.build_command(&CommandSpec::login_shell().low_latency(true)).unwrap();
+        assert_eq!(resolved.program, "mosh");
+        let bootstrap = argv_of(&resolved).into_iter().find(|a| a.starts_with("--ssh=")).unwrap();
+        assert!(bootstrap.contains(&rmux_transport::shell_quote(&key_s)), "{bootstrap}");
+
+        std::fs::remove_file(&key).unwrap();
+        let args = argv_of(&t.build_command(&CommandSpec::new("uname").tty(Tty::None)).unwrap());
+        assert!(!args.contains(&key_s), "a missing key is not named: {args:?}");
+
+        keys::replace_chosen_identities(Vec::new());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

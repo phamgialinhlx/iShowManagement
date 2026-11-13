@@ -20,6 +20,7 @@ rmux-metrics.workspace = true
 rmux-claude.workspace = true
 
 anyhow.workspace = true
+async-trait.workspace = true
 base64.workspace = true
 camino.workspace = true
 dirs.workspace = true

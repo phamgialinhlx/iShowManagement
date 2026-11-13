@@ -165,10 +165,13 @@ async fn the_disconnect_evicts_the_shared_ctx_stores() {
     ctx.store::<MetricsStore>().insert_for_test(id.clone(), local()).await;
     ctx.store::<AgentStore>().insert_for_test(id.clone(), Arc::new(tokio::sync::OnceCell::new()));
     ctx.store::<ClaudeStatusStore>().insert_for_test(id.clone(), tokio::spawn(async {}));
+    // The `fs-serve` supervisor: started for real (local runs in-process).
+    let ctx = Arc::new(ctx);
+    let _ = ctx.store::<rmux_app::worktree::WorktreeStore>().server(&ctx, &rmux_app::TargetRef::default());
 
-    let target = rmux_app::TargetRef { host: None, user: None, port: None };
+    let target = rmux_app::TargetRef::default();
     let done = rmux_lib::server::disconnect(&ctx, target.clone()).await.unwrap();
-    assert_eq!(done.evicted, 6, "every one of the six caches must let go");
+    assert_eq!(done.evicted, 7, "every one of the seven caches must let go");
     assert!(done.closed, "a held target was asked to close");
 
     let again = rmux_lib::server::disconnect(&ctx, target).await.unwrap();

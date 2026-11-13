@@ -152,13 +152,19 @@ export function CodeEditor({
     editor.focus();
   }, [buffer.key, buffer.content?.kind, buffer.path, buffer.text]);
 
-  // A save that rewrites the file elsewhere (or a reload) must be reflected
-  // without clobbering the cursor.
+  // A reload from disk (an agent edited the file) must land without moving the
+  // operator: the text is replaced as one undoable edit and the view state —
+  // cursor, selection, scroll — is put back exactly. `setValue` would reset all
+  // three and wipe the undo stack, so a silent reload would read as the editor
+  // jumping to the top on its own.
   useEffect(() => {
     const model = models.get(buffer.key);
-    if (model && !model.isDisposed() && buffer.text !== model.getValue()) {
-      model.setValue(buffer.text);
-    }
+    if (!model || model.isDisposed() || buffer.text === model.getValue()) return;
+    const editor = editorRef.current;
+    const attached = editor?.getModel() === model;
+    const view = attached ? editor!.saveViewState() : null;
+    model.pushEditOperations([], [{ range: model.getFullModelRange(), text: buffer.text }], () => null);
+    if (attached && view) editor!.restoreViewState(view);
   }, [buffer.key, buffer.text]);
 
   // Anything that is not editable text is shown *over* the host element rather

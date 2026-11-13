@@ -249,13 +249,22 @@ pub fn create_file_script(path: &str) -> String {
 /// Both failure paths drain stdin. Without that the far side exits while we are
 /// still writing megabytes into the pipe, and the upload surfaces as a broken
 /// pipe rather than the reason it actually stopped.
-pub fn upload_script(path: &str) -> String {
+///
+/// `size` is the length the sender is about to stream. A stream that ends short
+/// — a cancel, or a connection that dropped — leaves `cat` succeeding on a
+/// truncated file, so the script measures what it wrote and **removes** a short
+/// one, answering `S`. Removing it is safe precisely because of `set -C`: this
+/// run created the file, so it cannot be anything the operator had.
+pub fn upload_script(path: &str, size: u64) -> String {
     let p = rmux_transport::shell_quote_path(path);
     format!(
         r#"p={p}
 if [ -e "$p" ]; then cat > /dev/null; printf 'X'; exit 0; fi
 set -C
-if cat > "$p"; then printf 'O'; else cat > /dev/null; printf 'E'; fi"#
+if cat > "$p"; then
+  n=$(wc -c < "$p" | tr -d ' ')
+  if [ "$n" = "{size}" ]; then printf 'O'; else rm -f "$p"; printf 'S'; fi
+else cat > /dev/null; printf 'E'; fi"#
     )
 }
 
@@ -412,7 +421,7 @@ mod tests {
 
     #[test]
     fn an_upload_refuses_to_clobber_atomically() {
-        let script = upload_script("/srv/app/notes.txt");
+        let script = upload_script("/srv/app/notes.txt", 5);
         // `set -C` is the actual refusal — the `[ -e ]` above it only exists to
         // produce a better message. Losing the noclobber turns this back into a
         // check-then-write race that silently truncates.
@@ -424,10 +433,17 @@ mod tests {
     }
 
     #[test]
+    fn a_short_upload_is_removed_not_left_looking_complete() {
+        let script = upload_script("/srv/app/x.bin", 1234);
+        assert!(script.contains(r#"[ "$n" = "1234" ]"#), "{script}");
+        assert!(script.contains(r#"rm -f "$p"; printf 'S'"#), "{script}");
+    }
+
+    #[test]
     fn upload_never_puts_the_payload_in_the_command_line() {
         // The bytes belong on stdin. `ARG_MAX` caps one argument at 128 KiB, so
         // an argv-shaped upload works in testing and fails on a real file.
-        let script = upload_script("/srv/app/x.bin");
+        let script = upload_script("/srv/app/x.bin", 5);
         assert!(script.contains(r#"cat > "$p""#), "{script}");
     }
 
@@ -435,7 +451,7 @@ mod tests {
     fn an_upload_path_is_quoted() {
         // It reaches a remote login shell that re-parses the line.
         let hostile = "/srv/'; rm -rf /; echo '/x";
-        let script = upload_script(hostile);
+        let script = upload_script(hostile, 5);
         // Asserting the substring is *absent* would be wrong — the correctly
         // quoted form still contains it. What matters is that it appears only
         // inside the quoting.

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { api, isTauri, type ClaudeAccount, type UsageReport } from "../lib/api";
 import { compactTokens } from "../lib/context-window";
+import { copyText } from "../lib/clipboard";
 
 /**
  * The Claude credential, and how to get one.
@@ -137,7 +138,7 @@ export function ClaudeAccountPanel() {
             <button
               type="button"
               className="chip"
-              onClick={() => void navigator.clipboard.writeText(flow.authUrl)}
+              onClick={() => void copyText(flow.authUrl)}
             >
               copy link
             </button>

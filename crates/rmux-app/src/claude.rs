@@ -225,7 +225,7 @@ pub async fn claude_end_session(
 /// `false`/`None` touches nothing at all: not setting the flag is what keeps
 /// every other spec on ssh, and it is asserted rather than assumed by
 /// `rmux-ssh/tests/feature_specs.rs`.
-async fn ask_for_low_latency(
+pub(crate) async fn ask_for_low_latency(
     target: &dyn Target,
     spec: rmux_transport::CommandSpec,
     wanted: Option<bool>,
@@ -267,6 +267,8 @@ pub async fn claude_start(
     // conversation that silently changed provider on reconnect would be billed
     // and answered by whoever happened to be selected at the time.
     model_profile: Option<String>,
+    // A chain's member to start on — see `ClaudeStartArgs::active_profile`.
+    active_profile: Option<String>,
     // The per-session TRANSPORT choice: ask the target to minimise echo
     // latency. A *request*, never a protocol — what it becomes is the target's
     // decision, and absent means the ordinary ssh path. Kept with the session
@@ -317,9 +319,19 @@ pub async fn claude_start(
     // is selected: the daemon outlives sessions, so the previous profile's base
     // URL is still in its environment, and starting without clearing it would
     // run this session against the old provider while the UI showed Anthropic.
+    // The session is *bound* to its set (`--env-set`), so it always wins over
+    // the shared account delivered above — and over every other session's.
+    let mut attach_args: Vec<String> = Vec::new();
     if agent_available {
-        crate::model_profile::apply_to_target(ctx, resolved.as_ref(), model_profile.as_deref())
-            .await?;
+        attach_args = crate::model_profile::apply_bound(
+            ctx,
+            resolved.as_ref(),
+            rmux_claude::profile::ProfileKind::Claude,
+            model_profile.as_deref(),
+            active_profile.as_deref(),
+        )
+        .await?
+        .attach_args;
     } else if model_profile.is_some() {
         // Silently ignoring a chosen provider would run the conversation against
         // Anthropic while the UI named someone else — the exact silent
@@ -350,7 +362,7 @@ pub async fn claude_start(
             let line = rmux_claude::launch_line(resume.as_deref(), &args, rendering);
 
             let mut spec = installed.attach_spec(name, cwd.as_deref(), cols, rows);
-            spec = spec.arg("--login-command").arg(line);
+            spec = spec.arg("--login-command").arg(line).args(attach_args.clone());
             spec = ask_for_low_latency(resolved.as_ref(), spec, low_latency).await;
 
             ClaudeSession::start_with_spec(resolved.as_ref(), spec, cwd.as_deref(), size)
@@ -524,7 +536,7 @@ pub async fn pi_start(
 ///
 /// The raw screen always goes to an xterm view, so the operator sees exactly
 /// what Claude is showing rather than only our interpretation of it.
-fn stream_claude(session: Arc<ClaudeSession>, output: Arc<dyn Sink>) {
+pub(crate) fn stream_claude(session: Arc<ClaudeSession>, output: Arc<dyn Sink>) {
     let (backlog, mut receiver) = session.terminal().attach();
     if !backlog.is_empty() {
         let _ = output.send_bytes(backlog.to_vec());
@@ -562,6 +574,19 @@ pub async fn claude_attach(
 
 fn session(store: &ClaudeStore, id: &str) -> Result<Arc<ClaudeSession>, String> {
     store.sessions.lock().get(id).cloned().ok_or_else(|| format!("no such session: {id}"))
+}
+
+/// Hold a session started outside this module (DeepSeek Harness, `dsh.rs`) so
+/// the id-keyed commands — attach, write, resize, stop — reach it unchanged.
+pub(crate) fn insert_session(store: &ClaudeStore, session: Arc<ClaudeSession>) -> String {
+    let id = session.terminal().id().to_owned();
+    store.sessions.lock().insert(id.clone(), session);
+    id
+}
+
+/// The session behind an id, for modules that share this store.
+pub(crate) fn session_by_id(store: &ClaudeStore, id: &str) -> Result<Arc<ClaudeSession>, String> {
+    session(store, id)
 }
 
 /// What Claude is showing, plus whether it is still there at all.
@@ -693,6 +718,10 @@ pub struct ClaudeStartArgs {
     pub skip_permissions: Option<bool>,
     #[serde(default)]
     pub model_profile: Option<String>,
+    /// For a fallback chain: the member the session was last on, so a pane
+    /// that restarts after a switch does not quietly go back to a spent one.
+    #[serde(default)]
+    pub active_profile: Option<String>,
     #[serde(default)]
     pub low_latency: Option<bool>,
     pub cols: u16,
@@ -789,6 +818,7 @@ pub fn register(r: &mut Registry) {
             a.fullscreen,
             a.skip_permissions,
             a.model_profile,
+            a.active_profile,
             a.low_latency,
             a.cols,
             a.rows,

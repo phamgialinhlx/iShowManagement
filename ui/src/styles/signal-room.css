@@ -1,19 +1,30 @@
 /*
- * SIGNAL ROOM — rmux design system
- * ================================
+ * rmux design system
+ * ==================
  *
- * Four rules. They are what make this look deliberate rather than decorated,
- * and every one of them is load-bearing:
+ * The look follows herdr (Catppuccin Mocha by default, its whole theme family
+ * selectable — `lib/theme.ts`), with rmux's own materials — native Liquid Glass,
+ * a painted or picture backdrop, the translucent panels — working under every
+ * theme. SIGNAL ROOM, the house style this file was born as, remains one
+ * selectable theme and keeps its square corners there.
  *
- *   0. Red appears ONLY where the operator must act (waiting / decision /
- *      overdue). Working and done stay monochrome. If red means three things it
- *      means nothing, and a screen full of alerts trains you to ignore alerts.
- *   1. Zero border-radius, everywhere. Hairlines, not glows.
+ * Rules that still hold, whatever the theme:
+ *
+ *   0. The theme's *red* (`--st-blocked`, legacy `--primary`) appears only
+ *      where the operator must act (waiting / decision / error). Working is the
+ *      theme's yellow, done its teal, idle its green. If red means three things
+ *      it means nothing.
+ *   1. Corners are `var(--radius)` — 4px, herdr's softer chrome; 0 under SIGNAL
+ *      ROOM, which also re-imposes square corners on everything (see
+ *      `[data-square]` below). Hairlines, not glows.
  *   2. Blinking is reserved for cursors. Liveness is shown by data moving, never
- *      by opacity flicker — a pulsing dot conveys no information and costs
- *      attention continuously.
- *   3. No emoji. Inline SVG icons only, Lucide-style, 1.5-1.7px strokes,
- *      square caps.
+ *      by opacity flicker.
+ *   3. No emoji. Inline SVG icons only, Lucide-style, 1.5-1.7px strokes.
+ *
+ * Every colour below is a token written by `applyTheme` (`lib/theme-runtime.ts`)
+ * from the active theme. The `:root` values here are Catppuccin Mocha's, so a
+ * page that loads this sheet without the runtime (a check harness) still looks
+ * like the default.
  */
 
 @import "tailwindcss";
@@ -21,33 +32,67 @@
 /* ------------------------------------------------------------------ tokens */
 
 :root {
-  /* The one accent. Reserved for "you must act" — see rule 0. */
-  --primary: 230 59 46;
-  --primary-soft: 232 230 225;
+  /* -- herdr palette slots (Catppuccin Mocha) ----------------------------- */
+  --accent: #89b4fa;
+  --accent-rgb: 137 180 250;
+  --panel-bg: #181825;
+  --sidebar-bg: #1e1e2e;
+  --active-row-bg: #1e1e2e;
+  --selection-bg: #313244;
+  --surface0: #313244;
+  --surface1: #45475a;
+  --surface-dim: #1e1e2e;
+  --overlay0: #6c7086;
+  --overlay1: #7f849c;
+  --subtext0: #a6adc8;
+  --mauve: #cba6f7;
+  --green: #a6e3a1;
+  --yellow: #f9e2af;
+  --red: #f38ba8;
+  --blue: #89b4fa;
+  --teal: #94e2d5;
+  --peach: #fab387;
 
-  --app-bg: #060606;
-  --app-panel: #0a0a0a;
-  --app-panel-2: #0e0e0e;
-  --app-elev: #121212;
+  /* Agent state — herdr's mapping. */
+  --st-working: var(--yellow);
+  --st-blocked: var(--red);
+  --st-done: var(--teal);
+  --st-idle: var(--green);
+  --st-unknown: var(--overlay0);
 
-  --border: rgba(232, 230, 225, 0.14);
-  --border-strong: rgba(232, 230, 225, 0.24);
-  --hover: rgba(232, 230, 225, 0.055);
+  /* -- legacy tokens, derived from the slots ------------------------------ */
+  /* "You must act" — rule 0. A bare `r g b` triplet. */
+  --primary: 243 139 168;
+  --primary-soft: 205 214 244;
 
-  --text: #e8e6e1;
-  --text-soft: #98958f;
-  /*
-   * Raised from #5c5953, which measured 2.77:1 against the panel — well under
-   * the 4.5:1 that normal text needs to be legible. Most of what wears this is
-   * 9px micro-labels, which is exactly the size that cannot afford to be dim.
-   * #7e7b74 measures 4.57:1 and still sits a clear step below `--text-soft`
-   * (6.46:1), so the three-level hierarchy survives.
-   */
-  --text-faint: #7e7b74;
+  --app-bg: #1e1e2e;
+  --app-panel: #181825;
+  --app-panel-2: #25253a;
+  --app-elev: #313244;
+  --ansi-black: #12121f;
 
-  /* Work in progress is amber, never red — rule 0. */
-  --busy: 242 168 60;
-  --warn: #e0a44a;
+  --border: rgba(205, 214, 244, 0.14);
+  --border-strong: rgba(205, 214, 244, 0.24);
+  --hover: rgba(205, 214, 244, 0.055);
+  --well: rgba(0, 0, 0, 0.35);
+  --scroll-thumb: #313244;
+  --scroll-thumb-hover: #45475a;
+
+  --text: #cdd6f4;
+  --text-bright: #cdd6f4;
+  /* Prose at >= 5.5:1, captions at >= 4.5:1 — `deriveTokens` floors both. */
+  --text-soft: #a6adc8;
+  --text-faint: #82869e;
+
+  /* Work in progress — the theme's yellow, never red (rule 0). */
+  --busy: 249 226 175;
+  --warn: #f9e2af;
+
+  /* Text on an accent-filled control. */
+  --on-accent: #1e1e2e;
+
+  /* Rule 1. */
+  --radius: 4px;
 
   --font-display: "SFU Futura", "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-body: var(--font-display);
@@ -98,14 +143,16 @@
 }
 
 /*
- * Rule 1, enforced rather than encouraged. A single stray rounded corner reads
- * as a mistake against everything else, and rounding creeps in through every
- * third-party component (xterm, Monaco, form controls) unless it is stamped out
- * globally.
+ * Square corners, enforced — under SIGNAL ROOM only (`radius: 0`, which makes
+ * `applyTheme` set `data-square`). That theme's identity is zero radius
+ * everywhere, and rounding creeps in through every third-party component
+ * (xterm, Monaco, form controls) unless it is stamped out globally. Every other
+ * theme takes `var(--radius)` on the surfaces below and leaves third-party
+ * widgets their own small radii, which is what herdr's softer chrome looks like.
  */
-*,
-*::before,
-*::after {
+:root[data-square="on"] *,
+:root[data-square="on"] *::before,
+:root[data-square="on"] *::after {
   border-radius: 0 !important;
 }
 
@@ -165,11 +212,11 @@ body {
   cursor: default;
 }
 
-/* Rule 0 again: the caret is the one place red is always correct. */
+/* The caret wears the theme accent (SIGNAL ROOM's accent is its red). */
 input,
 textarea,
 [contenteditable] {
-  caret-color: rgb(var(--primary));
+  caret-color: var(--accent);
   user-select: text;
 }
 
@@ -201,7 +248,7 @@ textarea,
 }
 
 ::selection {
-  background: rgb(var(--primary) / 0.3);
+  background: rgb(var(--accent-rgb) / 0.3);
   color: var(--text);
 }
 
@@ -215,10 +262,11 @@ textarea,
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #242424;
+  background: var(--scroll-thumb);
+  border-radius: var(--radius);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #2e2e2e;
+  background: var(--scroll-thumb-hover);
 }
 
 /* On the alternate screen (Claude fullscreen, or any full-screen TUI) there is
@@ -366,7 +414,7 @@ textarea,
   position: absolute;
   inset: 0;
   /* Flat by construction: whatever is behind one panel is behind every panel. */
-  background: radial-gradient(rgba(232, 230, 225, 0.05) 1px, transparent 1px);
+  background: radial-gradient(color-mix(in srgb, var(--text) 5%, transparent) 1px, transparent 1px);
   background-size: 26px 26px;
 }
 
@@ -406,6 +454,7 @@ textarea,
      Appearance, because the right amount depends entirely on that wallpaper. */
   background: color-mix(in srgb, var(--app-panel) var(--panel-tint, 38%), transparent);
   border: 1px solid var(--border);
+  border-radius: var(--radius);
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.08),
     inset 0 0 0 1px rgb(255 255 255 / 0.03);
@@ -521,17 +570,20 @@ textarea,
 .window {
   background: color-mix(in srgb, var(--app-panel) var(--glass-pct), transparent);
   border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 1.5);
   box-shadow: 0 12px 40px rgb(0 0 0 / 0.5);
 }
 
 .menu {
   background: color-mix(in srgb, var(--app-panel) 92%, transparent);
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
   box-shadow: 0 24px 70px -30px rgb(0 0 0 / 0.8);
 }
 
 .inset {
   background: color-mix(in srgb, var(--app-elev) 62%, transparent);
+  border-radius: var(--radius);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
 }
 
@@ -552,6 +604,7 @@ textarea,
   text-transform: uppercase;
   padding: 8px 16px;
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
   background: transparent;
   color: var(--text);
   cursor: pointer;
@@ -602,6 +655,7 @@ textarea,
   gap: 4px;
   padding: 2px 6px;
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
   background: transparent;
   color: var(--text-soft);
   cursor: pointer;
@@ -694,6 +748,8 @@ textarea,
   display: inline-flex;
   align-items: stretch;
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
 }
 
 .seg > button {
@@ -756,14 +812,14 @@ textarea,
  */
 .btn-primary {
   background: var(--text);
-  color: #0a0a0a;
+  color: var(--app-bg);
   border-color: var(--text);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: rgb(var(--primary));
-  border-color: rgb(var(--primary));
-  color: var(--text);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
 }
 
 /*
@@ -783,15 +839,16 @@ textarea,
   font-size: calc(13px * var(--font-scale, 1));
   padding: 9px 12px;
   width: 100%;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--well);
   border: 1px solid var(--border);
+  border-radius: var(--radius);
   color: var(--text);
   outline: none;
   transition: border-color var(--dur) var(--ease);
 }
 
 .field:focus {
-  border-color: var(--border-strong);
+  border-color: rgb(var(--accent-rgb) / 0.6);
 }
 
 /* An input in an error state is exactly the "operator must act" case. */
@@ -850,6 +907,9 @@ textarea,
   border-top: 1px solid rgb(var(--primary-soft) / 0.5);
   border-right: 1px solid rgb(var(--primary-soft) / 0.5);
   pointer-events: none;
+  /* Follows the corner it brackets, so a rounded window does not wear a
+     square tick standing off its curve. */
+  border-top-right-radius: calc(var(--radius) * 1.5);
 }
 
 /* Hairline separator — a rule, never a shadow. */
@@ -1025,16 +1085,17 @@ body[data-hidden="true"] * {
 .markdown li { margin: 0.25em 0; }
 .markdown ul { list-style: square; }
 
-.markdown a { color: rgb(var(--primary)); text-decoration: underline; }
+.markdown a { color: var(--accent); text-decoration: underline; }
 
 .markdown code {
   font-family: var(--font-mono);
   font-size: 0.92em;
-  background: rgba(232, 230, 225, 0.07);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
   padding: 0.1em 0.35em;
 }
 .markdown pre {
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--well);
+  border-radius: var(--radius);
   border: 1px solid var(--border);
   padding: 12px;
   /* Long lines scroll inside the block; the page itself must never scroll
@@ -1054,7 +1115,7 @@ body[data-hidden="true"] * {
 .markdown table { border-collapse: collapse; margin: 0 0 1em; display: block; overflow-x: auto; }
 .markdown th,
 .markdown td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; }
-.markdown th { font-weight: 700; background: rgba(232, 230, 225, 0.05); }
+.markdown th { font-weight: 700; background: color-mix(in srgb, var(--text) 5%, transparent); }
 
 .markdown hr { border: 0; border-top: 1px solid var(--border); margin: 1.6em 0; }
 .markdown img { max-width: 100%; }

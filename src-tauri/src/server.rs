@@ -21,6 +21,7 @@ use rmux_app::claude_status::ClaudeStatusStore;
 use rmux_app::files::FsStore;
 use rmux_app::metrics::MetricsStore;
 use rmux_app::terminal::TerminalStore;
+use rmux_app::worktree::WorktreeStore;
 
 /// What a disconnect actually did.
 ///
@@ -30,7 +31,8 @@ use rmux_app::terminal::TerminalStore;
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Disconnected {
-    /// How many of the six caches were holding this host.
+    /// How many of the caches (six, plus DeepSeek Harness views) were holding
+    /// this host.
     pub evicted: usize,
     /// Whether a transport was asked to close. False for a local target, which
     /// has none.
@@ -46,13 +48,13 @@ pub struct Disconnected {
 /// only then is the transport closed — so nothing can hand out the connection
 /// between the close and the forget.
 ///
-/// ## Why all six, and why the count is returned
+/// ## Why all seven, and why the count is returned
 ///
 /// Each store caches independently, and one survivor is enough to keep the
 /// master alive. A disconnect that half-worked looks exactly like one that did
 /// nothing, so the count is surfaced rather than discarded.
 ///
-/// The six stores are the ones in the shared `Ctx` — the very instances the
+/// The seven stores are the ones in the shared `Ctx` — the very instances the
 /// commands in `rmux-app` cache into. Evicting any other copy would report a
 /// disconnect while the connection stayed up.
 #[tauri::command]
@@ -61,7 +63,11 @@ pub async fn server_disconnect<R: tauri::Runtime>(
     target: TargetRef,
 ) -> Result<Disconnected, String> {
     let ctx = crate::bridge::ctx(&app);
-    disconnect(&ctx, target).await
+    let out = disconnect(&ctx, target).await;
+    // The DeepSeek Harness views `disconnect` evicted are native webviews; only
+    // this command holds the `AppHandle` that can close them.
+    crate::dsh::close_orphaned(&app);
+    out
 }
 
 /// [`server_disconnect`] against a [`rmux_app::Ctx`] directly — what the
@@ -73,6 +79,7 @@ pub async fn disconnect(ctx: &rmux_app::Ctx, target: TargetRef) -> Result<Discon
     let metrics = ctx.store::<MetricsStore>();
     let agent = ctx.store::<AgentStore>();
     let status = ctx.store::<ClaudeStatusStore>();
+    let worktrees = ctx.store::<WorktreeStore>();
 
     let id = target.id();
 
@@ -84,6 +91,11 @@ pub async fn disconnect(ctx: &rmux_app::Ctx, target: TargetRef) -> Result<Discon
     // reconnects on its own when its stream ends, so leaving it running would
     // re-open the connection the rest of this function is closing.
     if status.evict_target(&id) {
+        evicted += 1;
+    }
+    // The `fs-serve` supervisor is aborted for the same reason as the status
+    // watcher: it reconnects on its own, and would re-open the master.
+    if worktrees.evict_target(&id) {
         evicted += 1;
     }
     if terminal.evict_target(&id) {
@@ -99,6 +111,12 @@ pub async fn disconnect(ctx: &rmux_app::Ctx, target: TargetRef) -> Result<Discon
         evicted += 1;
     }
     if agent.forget(&id) {
+        evicted += 1;
+    }
+    // DeepSeek Harness views and their loopback forwards: each forward is its
+    // own ssh (`ControlPath=none`), so leaving one would keep this host
+    // connected after the operator asked for it not to be.
+    if ctx.store::<crate::dsh::DshViews>().evict_host(&id).await {
         evicted += 1;
     }
 

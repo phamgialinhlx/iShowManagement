@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { moshAutoInstall, setMoshAutoInstall } from "../lib/mosh-install";
+import { setDefaultTransport, useDefaultTransport } from "../lib/transport-default";
 
 /**
  * What rmux may change on a host, as opposed to what it merely reads.
@@ -14,6 +15,7 @@ import { moshAutoInstall, setMoshAutoInstall } from "../lib/mosh-install";
  */
 export function ConnectionsPanel() {
   const [autoInstall, setAutoInstall] = useState(moshAutoInstall());
+  const transport = useDefaultTransport();
 
   return (
     <div className="flex flex-col gap-5">
@@ -21,6 +23,36 @@ export function ConnectionsPanel() {
         <span className="kicker">CONNECTIONS</span>
         <p className="data text-[11px] leading-[1.6]" style={{ color: "var(--text-soft)" }}>
           What rmux is allowed to change on a machine you connect to.
+        </p>
+      </div>
+
+      <div className="inset flex flex-col gap-3 p-4">
+        <span className="micro">DEFAULT TRANSPORT</span>
+        <div className="flex gap-2">
+          {(["mosh", "ssh"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className="chip"
+              aria-pressed={transport === mode}
+              onClick={() => setDefaultTransport(mode)}
+              style={{
+                flex: "1 1 0",
+                color: transport === mode ? "var(--text)" : "var(--text-faint)",
+                background: transport === mode ? "var(--hover)" : "transparent",
+                textDecoration: transport === mode ? "underline" : "none",
+              }}
+            >
+              {mode === "mosh" ? "LOW LATENCY (MOSH)" : "SSH"}
+            </button>
+          ))}
+        </div>
+        <p className="data text-[10.5px] leading-[1.5]" style={{ color: "var(--text-faint)" }}>
+          What a session uses unless its own TRANSPORT setting says otherwise. Low latency shows
+          each keystroke immediately instead of waiting for the host to echo it, at the cost of
+          scrollback: such a pane keeps a screen, not a history. A host without a usable
+          mosh-server, and this machine itself, use ssh regardless. Applies the next time a
+          session starts.
         </p>
       </div>
 

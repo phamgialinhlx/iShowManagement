@@ -12,6 +12,7 @@ import { AppearancePanel } from "../components/AppearancePanel";
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { EditorPanel } from "../components/EditorPanel";
 import { ConnectionsPanel } from "../components/ConnectionsPanel";
+import { CommandLinePanel } from "../components/CommandLinePanel";
 import { ShortcutSettings } from "../components/ShortcutSettings";
 import { api, isTauri, type SignedIn } from "../lib/api";
 import { SERVER_KEY } from "../components/SignIn";
@@ -40,6 +41,7 @@ type Section =
   | "notifications"
   | "editor"
   | "connections"
+  | "cli"
   | "shortcuts"
   | "appearance"
   | "diagnostics";
@@ -53,6 +55,7 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "notifications", label: "NOTIFICATIONS", blurb: "When a session wants you" },
   { id: "editor", label: "EDITOR", blurb: "Whether edits save themselves" },
   { id: "connections", label: "CONNECTIONS", blurb: "What rmux may change on a host" },
+  { id: "cli", label: "COMMAND LINE", blurb: "Use rmux from any terminal" },
   { id: "shortcuts", label: "SHORTCUTS", blurb: "Move around without the mouse" },
   { id: "appearance", label: "APPEARANCE", blurb: "Colours, backdrop and interface scale" },
   { id: "diagnostics", label: "DIAGNOSTICS", blurb: "Export the log when something breaks" },
@@ -118,7 +121,7 @@ export function Settings() {
               style={{
                 background: section === s.id ? "color-mix(in srgb, var(--text) 6%, transparent)" : "transparent",
                 borderLeft:
-                  section === s.id ? "2px solid rgb(var(--primary))" : "2px solid transparent",
+                  section === s.id ? "2px solid var(--accent)" : "2px solid transparent",
               }}
             >
               <span
@@ -183,6 +186,11 @@ export function Settings() {
           {section === "connections" && (
             <ErrorBoundary label="Connections">
               <ConnectionsPanel />
+            </ErrorBoundary>
+          )}
+          {section === "cli" && (
+            <ErrorBoundary label="Command line">
+              <CommandLinePanel />
             </ErrorBoundary>
           )}
 

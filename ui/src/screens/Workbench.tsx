@@ -9,16 +9,21 @@ import { WorkspaceRail } from "../components/WorkspaceRail";
 import { WidgetRail, type Active } from "../components/WidgetRail";
 import { AlertStack } from "../components/AlertStack";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
-import { DeckPicker } from "../components/DeckPicker";
 import { SavedViews } from "../components/SavedViews";
-import { DECKS, deckCells, deckId, layoutPanes } from "../lib/grid";
+import { TransfersControl } from "../components/Transfers";
+import { visibleLeaves } from "../lib/layout-tree";
 import { readHandsFree, useHandsFree, writeHandsFree } from "../lib/hands-free";
 import type { SessionStatus } from "../lib/workspace-model";
-import { requestTerminalFocus } from "../lib/shortcuts";
 import { useWorkspace } from "../lib/workspace";
 import { startAttentionWatch } from "../lib/attention";
 import { useShortcuts } from "../lib/use-shortcuts";
+import { usePrefixKeys } from "../lib/use-prefix-mode";
+import { prefixOwns } from "../lib/prefix-runtime";
+import { ModeBar, PrefixDialogs, PrefixHelp } from "../components/PrefixOverlays";
+import { QuickSwitch } from "../components/QuickSwitch";
+import { QuickOpen } from "../components/QuickOpen";
 import { startStatusWatch } from "../lib/status-watch";
+import { startChildrenWatch } from "../lib/children-watch";
 import { useAutoBridge } from "../lib/redstone-auto-bridge";
 import { api, isTauri, type LockStatus, type SignedIn } from "../lib/api";
 import { SignIn } from "../components/SignIn";
@@ -45,6 +50,9 @@ export function Workbench({
   // The rail's status for sessions that are not on screen. Started here rather
   // than in a pane, because a pane only exists for a session you can see.
   useEffect(() => startStatusWatch(), []);
+  // Sub-sessions agents spawn on their hosts (`rmux spawn`) appear beside their
+  // parent pane without taking focus. See `lib/children-watch.ts`.
+  useEffect(() => startChildrenWatch(), []);
   // One watcher for the whole app: attention is singular, so counting it per
   // pane would credit every mounted session at once. See `lib/attention.ts`.
   useEffect(() => startAttentionWatch(), []);
@@ -70,10 +78,8 @@ export function Workbench({
   const activeId = useWorkspace((s) => s.activeSession);
   const runtime = useWorkspace((s) => s.runtime);
   const activate = useWorkspace((s) => s.activate);
-  const panes = useWorkspace((s) => s.panes);
-  const focusCell = useWorkspace((s) => s.focusCell);
-  const deck = useWorkspace((s) => s.deck);
-  const setDeck = useWorkspace((s) => s.setDeck);
+  const layout = useWorkspace((s) => s.layout);
+  const selectTabIndex = useWorkspace((s) => s.selectTabIndex);
   const railCollapsed = useWorkspace((s) => s.railCollapsed);
   const toggleRail = useWorkspace((s) => s.toggleRail);
   const widgetsCollapsed = useWorkspace((s) => s.widgetsCollapsed);
@@ -98,6 +104,11 @@ export function Workbench({
   // The keyboard, bound once for the whole workbench. See `use-shortcuts.ts`
   // for why it is one listener and why it bubbles rather than captures.
   useShortcuts({ progressOpen: dashboard, onProgress: setDashboard });
+  // herdr's prefix layer (`ctrl+b` then a key), on top of the Mod chords above.
+  // See `prefix-runtime.ts` for where it intercepts and why.
+  usePrefixKeys({
+    onNewProject: (serverId) => setNewMode(serverId ? { kind: "project", serverId } : { kind: "server" }),
+  });
 
   const active = sessions.find((s) => s.id === activeId) ?? null;
   const activeProject = active ? projectOf(active.id) : undefined;
@@ -124,39 +135,29 @@ export function Workbench({
   }, [sessions, runtime]);
 
   /**
-   * What is **actually on screen**, not what the store has assigned.
-   *
-   * `layoutPanes` auto-fills empty cells with sessions that were never
-   * explicitly placed, so a grid showing four conversations routinely sits on a
-   * `panes` array of `[null]`. Hands-free read the store directly and therefore
-   * found no sessions at all — reported as the mode doing nothing whatsoever.
-   *
-   * This is the same derivation the deck renders from, which is the rule the
-   * rail already follows: two sources for one fact is two chances to drift, and
-   * this was the drift.
+   * What is **actually on screen**: the leaves of the active tab of the active
+   * project (only the focused one while zoomed). The same derivation the deck
+   * renders from and the rail marks from — two sources for one fact is two
+   * chances to drift, and the grid's version of this drifted once already.
    */
-  const onScreen = useMemo(
-    () => layoutPanes(panes, sessions, activeId, deck),
-    [panes, sessions, activeId, deck],
-  );
+  const onScreen = useMemo(() => visibleLeaves(layout).map((l) => l.pane), [layout]);
 
   useHandsFree({
     enabled: handsFree,
     panes: onScreen,
     statuses,
     activeSession: activeId,
-    cells: deckCells(deck),
-    onGo: (id, cell) => {
+    cells: onScreen.length,
+    onGo: (id) => {
+      // `activate` focuses the leaf and hands its terminal the keyboard.
       activate(id);
-      focusCell(cell);
-      requestTerminalFocus(id);
       setWentTo(sessions.find((s) => s.id === id)?.name ?? id);
       window.setTimeout(() => setWentTo(null), 2600);
     },
     // Switching it on and getting silence reads as a broken switch, so say when
     // there was simply nothing to go to.
     onNothingWaiting: (reason) => {
-      setWentTo(reason === "focus-view" ? "needs a grid view" : "nothing waiting");
+      setWentTo(reason === "focus-view" ? "needs a split" : "nothing waiting");
       window.setTimeout(() => setWentTo(null), 3200);
     },
   });
@@ -194,25 +195,28 @@ export function Workbench({
   // Global shortcuts. Pane-scoped ones live in the panes.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (prefixOwns(e)) return;
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
 
-      if (e.key.toLowerCase() === "n") {
+      // Bare Mod+N only: Mod+Shift+N is "new tab" (`shortcuts.ts`), and an
+      // unguarded match here would open the connect dialog on top of it.
+      if (e.key.toLowerCase() === "n" && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         setNewMode({ kind: "server" });
       }
+      // Mod+digit picks the active project's tab by position — what the digit
+      // meant for sessions when each one was a tile, and what it means in
+      // every tabbed program.
       const digit = Number(e.key);
-      if (Number.isInteger(digit) && digit >= 1 && digit <= 9) {
-        const target = sessions[digit - 1];
-        if (target) {
-          e.preventDefault();
-          activate(target.id);
-        }
+      if (Number.isInteger(digit) && digit >= 1 && digit <= 9 && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        selectTabIndex(digit - 1);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [sessions, activate]);
+  }, [selectTabIndex]);
 
   return (
     <>
@@ -341,9 +345,11 @@ export function Workbench({
         )}
 
         <footer
-          className="chrome-black flex shrink-0 items-center gap-4 border-t px-3 py-1"
+          className="chrome-black relative flex shrink-0 items-center gap-4 border-t px-3 py-1"
           style={{ borderColor: "var(--border)" }}
         >
+          {/* PREFIX / NAVIGATE / RESIZE take over this row while active. */}
+          <ModeBar />
           <button
             type="button"
             aria-label={railCollapsed ? "Show the servers panel" : "Hide the servers panel"}
@@ -408,7 +414,7 @@ export function Workbench({
               title={
                 handsFree
                   ? "Hands-free is on — the cursor moves to a session as it finishes or asks. It waits while you are typing."
-                  : "Hands-free: put the cursor in a grid session as soon as it finishes or asks you something"
+                  : "Hands-free: put the cursor in an on-screen pane as soon as its session finishes or asks you something"
               }
               style={{
                 color: handsFree ? "var(--text)" : undefined,
@@ -431,31 +437,9 @@ export function Workbench({
               PROGRESS
             </button>
 
+            <TransfersControl />
+
             <div className="flex items-center gap-1">
-              <span className="micro">VIEW</span>
-              {DECKS.map((d) => {
-                const on = deckId(deck) === d.id;
-                return (
-                  <button
-                    key={d.id}
-                    type="button"
-                    className="data px-[5px] text-[10px]"
-                    onClick={() => setDeck(d.deck)}
-                    title={d.title}
-                    style={{
-                      border: "1px solid var(--border)",
-                      color: on ? "var(--text)" : "var(--text-soft)",
-                      background: on ? "var(--hover)" : "transparent",
-                      // Selection is not carried by tone alone: at 10px a tonal
-                      // step is not a state anyone can see across six chips.
-                      textDecoration: on ? "underline" : "none",
-                    }}
-                  >
-                    {d.label}
-                  </button>
-                );
-              })}
-              <DeckPicker />
               <SavedViews />
             </div>
 
@@ -495,6 +479,11 @@ export function Workbench({
         </footer>
             <AlertStack />
 </div>
+
+      <PrefixHelp />
+      <PrefixDialogs />
+      <QuickSwitch />
+      <QuickOpen />
 
       <ErrorBoundary label="New" onReset={() => setNewMode(null)}>
         <WorkspaceNewSessionLayer mode={newMode} onClose={() => setNewMode(null)} />

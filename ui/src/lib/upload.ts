@@ -1,5 +1,7 @@
 import { listen } from "./bridge";
 import { api, type TargetRef } from "./api";
+import { finish, progress, start, useTransfers } from "./transfers";
+import { UploadCancelled, cancelRequested, notifyIfUnseen, register, settleUploadError } from "./transfer-run";
 
 /**
  * Putting local files onto whichever machine the tree is showing.
@@ -73,26 +75,45 @@ const percent = (part: number, whole: number) =>
  * reading is local disk and takes seconds, sending is the network and takes the
  * rest. A single bar that hit 100% at the end of reading and then sat there for
  * minutes would be a progress report that lies.
+ *
+ * Every step is mirrored into the transfers list (`transfers.ts`), counting
+ * bytes as each chunk is *acknowledged* — not as it is read — so the bar never
+ * runs ahead of what Rust actually holds.
  */
 async function uploadOne(
   target: TargetRef,
   path: string,
   file: File,
+  transfer: string,
   onPhase: (phase: string) => void,
 ): Promise<void> {
+  const { update } = useTransfers.getState();
+  if (cancelRequested(transfer)) throw new UploadCancelled();
+  update(transfer, (e) => start(e, Date.now()));
+
   const id = await api.fsUploadBegin();
+  // Persisted with the row, so a cancel from any window can reach it.
+  update(transfer, (e) => ({ ...e, uploadId: id }));
   let finished = false;
   try {
     for (let offset = 0; offset < file.size; offset += CHUNK_BYTES) {
+      if (cancelRequested(transfer)) throw new UploadCancelled();
       onPhase(`reading ${percent(offset, file.size)}%`);
-      await api.fsUploadChunk(id, await toBase64(file.slice(offset, offset + CHUNK_BYTES)));
+      const chunk = file.slice(offset, offset + CHUNK_BYTES);
+      await api.fsUploadChunk(id, await toBase64(chunk));
+      const acked = Math.min(file.size, offset + chunk.size);
+      update(transfer, (e) => progress(e, acked, file.size, Date.now(), "reading"), false);
     }
+    if (cancelRequested(transfer)) throw new UploadCancelled();
 
     onPhase("sending 0%");
+    update(transfer, (e) => progress(e, 0, file.size, Date.now(), "sending"));
     const unlisten = await listen<{ id: string; sent: number; size: number }>(
       "fs-upload-progress",
       ({ payload }) => {
-        if (payload.id === id) onPhase(`sending ${percent(payload.sent, payload.size)}%`);
+        if (payload.id !== id) return;
+        onPhase(`sending ${percent(payload.sent, payload.size)}%`);
+        useTransfers.getState().update(transfer, (e) => progress(e, payload.sent, payload.size, Date.now(), "sending"), false);
       },
     );
     try {
@@ -117,16 +138,29 @@ export async function uploadFiles(
   const uploaded: string[] = [];
   const failed: UploadFailure[] = [];
 
-  for (const [index, file] of files.entries()) {
+  // Every file is registered up front, queued, so a batch shows its whole size
+  // in the transfers list at once — and a queued one can be cancelled before
+  // it starts.
+  const rows = await Promise.all(
+    files.map(async (file) => {
+      const path = await api.fsJoin(dir, file.name).catch(() => `${dir}/${file.name}`);
+      return { file, path, id: register("up", target, path, file.name, file.size) };
+    }),
+  );
+
+  for (const [index, { file, path, id }] of rows.entries()) {
     onProgress?.(index, files.length, file.name);
 
     try {
-      const path = await api.fsJoin(dir, file.name);
-      await uploadOne(target, path, file, (phase) =>
+      await uploadOne(target, path, file, id, (phase) =>
         onProgress?.(index, files.length, `${file.name} · ${phase}`),
       );
+      useTransfers.getState().update(id, (e) => finish(e, Date.now(), { bytes: file.size }));
+      notifyIfUnseen(id);
       uploaded.push(file.name);
     } catch (e) {
+      settleUploadError(id, e);
+      notifyIfUnseen(id);
       failed.push({ name: file.name, message: e instanceof Error ? e.message : String(e) });
     }
   }

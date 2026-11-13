@@ -90,6 +90,44 @@ async fn git_reads_a_real_repository_through_the_registry() {
 }
 
 #[tokio::test]
+async fn git_branch_names_this_checkout_and_is_null_outside_one() {
+    // The sidebar's branch line. Run against the local target, so this is the
+    // real `git` + `sed` pipeline and the real login-shell marker handling.
+    let here = env!("CARGO_MANIFEST_DIR");
+    let (call1, _, _) = call();
+    let out = rmux_app::registry()
+        .invoke("git_branch", call1, json!({ "target": {}, "folder": here }))
+        .await
+        .unwrap();
+    let branch = out["branch"].as_str().unwrap_or_else(|| panic!("no branch in {out}"));
+    assert!(!branch.is_empty(), "{out}");
+    assert!(out["ahead"].is_i64() && out["behind"].is_i64(), "{out}");
+
+    // Not a repository is an answer (null), not an error.
+    let outside = std::env::temp_dir().join(format!("rmux-not-a-repo-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    let (call2, _, _) = call();
+    let out = rmux_app::registry()
+        .invoke("git_branch", call2, json!({ "target": {}, "folder": outside.to_str().unwrap() }))
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&outside);
+    assert!(out.is_null(), "expected null outside a work tree, got {out}");
+}
+
+#[tokio::test]
+async fn host_children_is_a_list_on_the_local_target() {
+    // A missing `~/.rmux/children.json` is the ordinary case and must be an
+    // empty list, never an error; a present one parses to a list too.
+    let (c, _, _) = call();
+    let out = rmux_app::registry()
+        .invoke("host_children", c, json!({ "target": {} }))
+        .await
+        .unwrap();
+    assert!(out.is_array(), "expected a list, got {out}");
+}
+
+#[tokio::test]
 async fn errors_keep_their_text() {
     // The same string the function produces when called directly, so the UI
     // shows what it always showed.
@@ -204,7 +242,7 @@ fn a_duplicate_name_panics() {
 fn every_command_is_classified_and_the_table_builds() {
     let r = rmux_app::registry();
     let names: Vec<_> = r.commands().map(|c| (c.name(), c.web())).collect();
-    for expected in ["local_target", "git_repo", "git_status", "git_log", "git_commit_files", "git_file_diff"] {
+    for expected in ["local_target", "git_repo", "git_branch", "host_children", "git_status", "git_log", "git_commit_files", "git_file_diff"] {
         assert!(r.contains(expected), "{expected} missing from {names:?}");
     }
     // The exec-shaped one stays off the web.

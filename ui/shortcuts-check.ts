@@ -18,7 +18,6 @@ import {
   hasModifier,
   isTypingTarget,
   match,
-  moveFocus,
   normalise,
   reachesTerminal,
   readBindings,
@@ -184,24 +183,8 @@ const unbound = press({ key: "z", metaKey: mac, ctrlKey: !mac });
 Object.defineProperty(unbound, "target", { value: div });
 check("an unbound chord matches nothing", match(unbound, { ...DEFAULTS }) === null);
 
-// ── moving around the grid ───────────────────────────────────────────────────
-
-// A 2x2: 0 1 / 2 3.
-check("right moves one along", moveFocus(0, "right", 2, 2) === 1);
-check("down moves one row", moveFocus(0, "down", 2, 2) === 2);
-check("left from the middle comes back", moveFocus(1, "left", 2, 2) === 0);
-check("up from the bottom row", moveFocus(3, "up", 2, 2) === 1);
-
-// Clamped, not wrapped: in a 4x4, wrapping "left" at the left edge lands six
-// tiles away, and nothing on screen suggests those are neighbours.
-check("left at the left edge stays put", moveFocus(0, "left", 2, 2) === 0);
-check("right at the right edge stays put", moveFocus(1, "right", 2, 2) === 1);
-check("up on the top row stays put", moveFocus(1, "up", 2, 2) === 1);
-check("down on the bottom row stays put", moveFocus(2, "down", 2, 2) === 2);
-check("a wide 1x4 moves along one row", moveFocus(1, "right", 4, 1) === 2);
-check("a 1x4 has nowhere to go down", moveFocus(1, "down", 4, 1) === 1);
-check("an out-of-range index is clamped, not NaN", moveFocus(99, "left", 2, 2) === 2);
-check("a single tile has no neighbours", moveFocus(0, "right", 1, 1) === 0);
+// Moving between panes is geometric in the split tree now (`neighbour` in
+// `layout-tree.ts`), and its edge/clamp cases live in `layout-tree-check.ts`.
 
 // ── storage ──────────────────────────────────────────────────────────────────
 

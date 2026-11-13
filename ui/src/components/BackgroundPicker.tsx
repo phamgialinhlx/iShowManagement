@@ -33,12 +33,12 @@ export function BackgroundPicker({
   cover,
   onChange,
 }: {
-  mode: "desktop" | "color" | "image";
+  mode: "desktop" | "theme" | "color" | "image";
   color: string;
   image?: string;
   cover: number;
   onChange: (patch: {
-    background?: "desktop" | "color" | "image";
+    background?: "desktop" | "theme" | "color" | "image";
     backgroundColor?: string;
     backgroundImage?: string;
     backgroundCover?: number;
@@ -86,6 +86,9 @@ export function BackgroundPicker({
         <Mode selected={mode === "desktop"} onClick={() => onChange({ background: "desktop" })}>
           DESKTOP
         </Mode>
+        <Mode selected={mode === "theme"} onClick={() => onChange({ background: "theme" })} divider>
+          THEME
+        </Mode>
         <Mode selected={mode === "color"} onClick={() => onChange({ background: "color" })} divider>
           COLOUR
         </Mode>
@@ -97,13 +100,16 @@ export function BackgroundPicker({
       <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
         {mode === "desktop"
           ? "The window is translucent and your own wallpaper shows through."
-          : mode === "color"
+          : mode === "theme"
+            ? "The theme's own background fills the window, and changes with the theme."
+            : mode === "color"
             ? "A flat colour fills the window instead of the desktop."
             : "A picture fills the window. It is copied into rmux, so moving or deleting the original is safe."}
       </span>
 
       {mode !== "desktop" && (
         <>
+          {mode !== "theme" && (
           <label className="flex items-center gap-3">
             <input
               type="color"
@@ -117,6 +123,7 @@ export function BackgroundPicker({
               {color.toUpperCase()}
             </span>
           </label>
+          )}
 
           {mode === "image" && (
             <div className="flex flex-col gap-2">
@@ -183,7 +190,7 @@ export function BackgroundPicker({
               max={100}
               value={cover}
               onChange={(e) => onChange({ backgroundCover: Number(e.target.value) })}
-              style={{ accentColor: "rgb(var(--primary))" }}
+              style={{ accentColor: "var(--accent)" }}
             />
             <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
               Below 100% the desktop shows through, so a colour becomes a wash over your wallpaper.

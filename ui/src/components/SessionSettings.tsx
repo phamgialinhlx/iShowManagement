@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import {
   api,
   isTauri,
+  profileKindFor,
   type JiraProfile,
   type JiraProject,
   type LowLatencyOutcome,
@@ -11,7 +12,10 @@ import {
 } from "../lib/api";
 import { useWorkspace } from "../lib/workspace";
 import { ModelChoice } from "./ModelChoice";
+import { ChainStatus } from "./ChainStatus";
+import { PermissionChoice } from "./PermissionChoice";
 import { PanelLoader } from "./PanelLoader";
+import { effectiveLowLatency, useDefaultTransport } from "../lib/transport-default";
 
 /**
  * Settings for one session.
@@ -37,8 +41,15 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
   const host = useWorkspace((s) => s.serverOf(sessionId)?.target.host);
   const configure = useWorkspace((s) => s.configureSession);
   const setModelProfile = useWorkspace((s) => s.setModelProfile);
+  const setCodexLaunch = useWorkspace((s) => s.setCodexLaunch);
+  const addSession = useWorkspace((s) => s.addSession);
+  const projectOfSession = useWorkspace((s) => s.projectOf(sessionId));
   const setFullscreen = useWorkspace((s) => s.setFullscreen);
   const setLowLatency = useWorkspace((s) => s.setLowLatency);
+  const clearLowLatency = useWorkspace((s) => s.clearLowLatency);
+  const transportDefault = useDefaultTransport();
+  const lowLatencyOn = effectiveLowLatency(session, transportDefault);
+  const followsDefault = session?.lowLatency === undefined;
   const target = useWorkspace((s) => s.targetOf(sessionId));
 
   /**
@@ -72,6 +83,10 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
    */
   const kind = session?.kind;
   const isClaude = kind === "claude";
+  const isCodex = kind === "codex";
+  /** Which profiles this session can run under — claude, deepseek (dsh) or
+   *  openai (Codex). `undefined` for pi and a shell, which take none. */
+  const profileKind = kind ? profileKindFor(kind) : undefined;
   const showJira = kind === "claude" || kind === "pi";
 
   const [profiles, setProfiles] = useState<JiraProfile[] | null>(null);
@@ -319,16 +334,91 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
             with, so a running conversation cannot be moved without restarting
             it. The note says so, because a control that appears to do nothing
             is the same "is this broken?" impression as one that does. */}
-        {isClaude && (
+        {profileKind && (
           <div className="flex flex-col gap-1">
             <ModelChoice
+              kind={profileKind}
               value={session?.modelProfile ?? null}
               onChange={(id) => setModelProfile(sessionId, id ?? undefined)}
             />
             <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
-              Takes effect the next time this session's Claude starts — restart the Claude tab to
-              switch provider. Profiles are managed under Settings › Models.
+              Takes effect the next time this session starts — restart it to switch provider. Only{" "}
+              {profileKind === "claude" ? "Claude" : profileKind === "deepseek" ? "DeepSeek" : "OpenAI"}{" "}
+              profiles are offered: the server hands a profile's variables only to sessions of its
+              own agent. Profiles are managed under Settings › Models.
             </span>
+            {profileKind === "claude" && <ChainStatus sessionId={sessionId} target={target} />}
+          </div>
+        )}
+
+        {/* Codex's launch choices. Applied on the next start, like the provider:
+            they are flags on the line Codex was launched with. The bypass follows
+            the skip-permissions rule exactly — off unless chosen, here, for this
+            session. */}
+        {isCodex && session && (
+          <div
+            className="flex flex-col gap-3"
+            style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}
+          >
+            <div className="flex flex-col gap-[6px]">
+              <span className="micro">CODEX SANDBOX</span>
+              <div className="seg seg-wrap">
+                {(
+                  [
+                    [null, "CODEX DEFAULT"],
+                    ["read-only", "READ-ONLY"],
+                    ["workspace-write", "WORKSPACE-WRITE"],
+                  ] as const
+                ).map(([mode, label]) => (
+                  <button
+                    key={label}
+                    type="button"
+                    aria-pressed={(session.codexSandbox ?? null) === mode}
+                    disabled={!!session.bypassApprovals}
+                    onClick={() => setCodexLaunch(session.id, { codexSandbox: mode })}
+                    style={{ padding: "6px 12px" }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <PermissionChoice
+              agent="codex"
+              value={!!session.bypassApprovals}
+              onChange={(bypass) => setCodexLaunch(session.id, { bypassApprovals: bypass })}
+            />
+            <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+              Both take effect the next time this session's Codex starts. The bypass replaces the
+              sandbox choice — Codex refuses the two together.
+            </span>
+
+            {/* Sign-in is Codex's own, in a real terminal: `codex login
+                --device-auth` prints a link and a code for any browser, which
+                works the same on this machine and on a server. rmux scripts
+                none of it. */}
+            {projectOfSession && (
+              <div className="flex flex-col gap-1">
+                <span className="micro">SIGN IN</span>
+                <button
+                  type="button"
+                  className="chip self-start"
+                  onClick={() =>
+                    addSession(projectOfSession.id, "terminal", {
+                      name: "codex login",
+                      run: "codex-login",
+                    })
+                  }
+                >
+                  SIGN IN TO CODEX ON {(host ?? "this machine").toUpperCase()}
+                </button>
+                <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+                  Opens a terminal running <code>codex login --device-auth</code>: open the link it
+                  prints in your browser and enter the code. Not needed when an OpenAI profile
+                  carries an API key.
+                </span>
+              </div>
+            )}
           </div>
         )}
 
@@ -396,7 +486,9 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
           Shown only under Tauri: in a browser preview there is no connection to
           measure, and a control with nothing behind it is worse than none.
         */}
-        {isTauri() && (
+        {/* Not for dsh: its console is a log and its UI is a webview, so a
+            low-latency transport would change nothing — a dead switch. */}
+        {isTauri() && kind !== "dsh" && (
           <div
             className="flex flex-col gap-1"
             style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}
@@ -480,7 +572,7 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
                     host says no, another one this session is moved to may not,
                     and silently unsetting a preference the operator made is the
                     kind of change nothing on screen would account for. */}
-                {session?.lowLatency && (
+                {lowLatencyOn && (
                   <span
                     className="data text-[10px] leading-relaxed"
                     style={{ color: "var(--text-faint)" }}
@@ -625,16 +717,38 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
                       onClick={() => session && setLowLatency(session.id, mode)}
                       style={{
                         flex: "1 1 0",
-                        color: !!session?.lowLatency === mode ? "var(--text)" : "var(--text-faint)",
+                        color: lowLatencyOn === mode ? "var(--text)" : "var(--text-faint)",
                         background:
-                          !!session?.lowLatency === mode ? "var(--hover)" : "transparent",
-                        textDecoration: !!session?.lowLatency === mode ? "underline" : "none",
+                          lowLatencyOn === mode ? "var(--hover)" : "transparent",
+                        textDecoration: lowLatencyOn === mode ? "underline" : "none",
                       }}
                     >
                       {mode ? "LOW LATENCY" : "SSH"}
                     </button>
                   ))}
                 </div>
+                <span
+                  className="data text-[10px] leading-relaxed"
+                  style={{ color: "var(--text-faint)" }}
+                >
+                  {followsDefault ? (
+                    <>
+                      Following the app default ({transportDefault === "mosh" ? "low latency" : "ssh"})
+                      — change it in Settings › Connections.
+                    </>
+                  ) : (
+                    <>
+                      Set for this session.{" "}
+                      <button
+                        type="button"
+                        className="underline"
+                        onClick={() => session && clearLowLatency(session.id)}
+                      >
+                        use the app default
+                      </button>
+                    </>
+                  )}
+                </span>
                 <span
                   className="data text-[10px] leading-relaxed"
                   style={{ color: "var(--text-soft)" }}

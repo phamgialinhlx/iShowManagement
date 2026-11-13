@@ -20,10 +20,18 @@ export function PermissionChoice({
   value,
   onChange,
   disabled,
+  agent = "claude",
 }: {
   value: boolean;
   onChange: (skip: boolean) => void;
   disabled?: boolean;
+  /**
+   * Whose flag this is. Codex's `--dangerously-bypass-approvals-and-sandbox` is
+   * the same judgement under the same rule — off by default, a deliberate second
+   * click, explained only once chosen — and it removes the sandbox too, which
+   * the consequence line says.
+   */
+  agent?: "claude" | "codex";
 }) {
   return (
     <div className="flex flex-col gap-[6px]">
@@ -40,7 +48,7 @@ export function PermissionChoice({
           selected={value}
           disabled={disabled}
           onClick={() => onChange(true)}
-          label="SKIP PERMISSIONS"
+          label={agent === "codex" ? "BYPASS APPROVALS & SANDBOX" : "SKIP PERMISSIONS"}
           danger
         />
       </div>
@@ -51,8 +59,9 @@ export function PermissionChoice({
           the one moment the operator has the context to weigh it. */}
       {value && (
         <span className="data text-[10.5px] leading-[1.45]" style={{ color: "rgb(var(--primary))" }}>
-          Claude will edit files and run commands without asking. Use it where you would be
-          comfortable rebuilding the machine.
+          {agent === "codex"
+            ? "Codex will run commands without asking and without its sandbox — full access to this machine and its network. Use it where you would be comfortable rebuilding the machine."
+            : "Claude will edit files and run commands without asking. Use it where you would be comfortable rebuilding the machine."}
         </span>
       )}
     </div>
@@ -85,7 +94,7 @@ function Choice({
       style={{
         color: selected ? accent : "var(--text-soft)",
         background: selected ? "var(--app-elev)" : "transparent",
-        borderLeft: label.startsWith("SKIP") ? "1px solid var(--border-strong)" : undefined,
+        borderLeft: danger ? "1px solid var(--border-strong)" : undefined,
         boxShadow: selected ? `inset 0 -2px 0 ${accent}` : undefined,
       }}
     >

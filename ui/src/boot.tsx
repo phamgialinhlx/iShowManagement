@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 
 import "./styles/fonts.css";
 import "./styles/signal-room.css";
+import "./styles/layout.css";
 import { App } from "./App";
 import { Settings } from "./screens/Settings";
 import { applyAppearance } from "./components/AppearancePanel";
@@ -11,6 +12,7 @@ import { applyUserCss } from "./lib/user-css";
 import { applyCachedThemeEarly, initTheme } from "./lib/theme-runtime";
 import { bench, syncDebugLogging } from "./lib/debug-log";
 import { syncMoshAutoInstall } from "./lib/mosh-install";
+import { startServersSync } from "./lib/servers-sync";
 
 // Before the first paint: applying these in an effect would flash the defaults
 // on every launch. The theme applies its localStorage paint-cache synchronously
@@ -81,6 +83,10 @@ if (!isSettingsWindow) syncDebugLogging();
 // before the first host is probed. Workbench only — Settings holds no
 // connections, and a transient window must not race the one that does.
 if (!isSettingsWindow) syncMoshAutoInstall();
+
+// Mirror the server list to `~/.rmux/servers.json` for the `rmux` CLI. The
+// workbench owns the list; Settings would only write a stale copy of it.
+if (!isSettingsWindow) startServersSync();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

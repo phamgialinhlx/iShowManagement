@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { invoke } from "../lib/bridge";
 
 import { onReport, selectionPrompt, type IncomingReport } from "../lib/control";
+import { copyText } from "../lib/clipboard";
 
 /**
  * What the browser sent back.
@@ -138,7 +139,7 @@ export function BrowserReports({
                     type="button"
                     className="chip"
                     onClick={() => {
-                      void navigator.clipboard.writeText(
+                      void copyText(
                         report.report === "har"
                           ? report.har
                           : report.entries.map((e) => `${e.level}: ${e.text}`).join("\n"),

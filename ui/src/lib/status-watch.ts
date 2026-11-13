@@ -190,17 +190,22 @@ export function startStatusWatch(): () => void {
     const { sessions, live, serverOf, setStatus } = useWorkspace.getState();
     await Promise.all(
       sessions.map(async (session) => {
-        if (session.kind !== "claude") return;
+        // Codex publishes nothing to the push stream — its state is read off its
+        // screen, here in the app — so a Codex session is polled whether or not
+        // its host's stream is live. Same cadence and same "a handle, or leave
+        // it alone" rule as Claude's fallback.
+        const codex = session.kind === "codex";
+        if (session.kind !== "claude" && !codex) return;
         const claudeId = live[session.id];
         if (!claudeId) return;
 
         // Covered by the push stream — leave it to the events.
         const label = targetLabel(serverOf(session.id)?.target);
-        if (ready.has(label) && !unsupported.has(label)) return;
+        if (!codex && ready.has(label) && !unsupported.has(label)) return;
 
         try {
           const next = await invoke<{ prompt: unknown; working: boolean; exited?: number }>(
-            "claude_state",
+            codex ? "codex_state" : "claude_state",
             { id: claudeId },
           );
           if (next.exited != null) return;

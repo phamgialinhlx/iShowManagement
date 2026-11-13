@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { parseIndicatorStyle, type IndicatorStyle } from "../lib/agent-state";
+import { refreshIndicatorStyle } from "../lib/agent-indicators";
 import { convertFileSrc } from "../lib/bridge";
 
 
@@ -9,20 +11,28 @@ import { loadUserCss, saveUserCss } from "../lib/user-css";
 import { gpuRendering, setGpuRendering } from "../lib/terminal-theme";
 import {
   type Theme,
+  type SlotKey,
   ANSI_KEYS,
   SPECIAL_KEYS,
   ROLE_KEYS,
+  SLOT_KEYS,
   isBuiltIn,
+  isLight,
+  slots,
 } from "../lib/theme";
 import {
+  type AutoSwitch,
   themeSnapshot,
   subscribeTheme,
   resolve,
   applyTheme,
   setActiveTheme,
+  setAutoSwitch,
   saveTheme,
   deleteTheme,
   copyName,
+  effectiveName,
+  osAppearance,
 } from "../lib/theme-runtime";
 import {
   UI_FONTS,
@@ -97,7 +107,7 @@ type Appearance = {
    * the page covers it. So a non-desktop background switches glass off while it
    * is in effect, without forgetting the preference.
    */
-  background: "desktop" | "color" | "image";
+  background: "desktop" | "theme" | "color" | "image";
   backgroundColor: string;
   /** Absolute path on disk, written by `background_set`. */
   backgroundImage?: string;
@@ -143,6 +153,11 @@ type Appearance = {
    */
   uiFont: string;
   monoFont: string;
+  /**
+   * How the sidebar draws an agent's state: coloured dots, or symbols that
+   * still read without colour (◐ × ✓ ○ ·). Static either way.
+   */
+  agentIndicators: IndicatorStyle;
 };
 
 const DEFAULTS: Appearance = {
@@ -162,7 +177,11 @@ const DEFAULTS: Appearance = {
   // against — the contrast ratios in the design rules assume it. Anyone who
   // wants the desktop is one radio button away, and that choice is theirs to
   // make once they can see the interface.
-  background: "color",
+  //
+  // `theme` is that same opaque floor, painted in the active theme's own
+  // background (`--app-bg`) — so Catppuccin looks like Catppuccin, and a light
+  // theme is not a light UI floating on a black window.
+  background: "theme",
   backgroundColor: "#0b0b0d",
   backgroundCover: 100,
   scale: 100,
@@ -172,12 +191,27 @@ const DEFAULTS: Appearance = {
   // stored appearances.
   uiFont: DEFAULT_UI_FONT,
   monoFont: DEFAULT_MONO_FONT,
+  agentIndicators: "dots",
 };
+
+/** The colour the old default backdrop painted, before `theme` existed. */
+const OLD_DEFAULT_BACKDROP = "#0b0b0d";
 
 function load(): Appearance {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Appearance>) } : DEFAULTS;
+    if (!raw) return DEFAULTS;
+    const a = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Appearance>) };
+    a.agentIndicators = parseIndicatorStyle(a.agentIndicators);
+    // Saving *any* appearance setting wrote the whole object, so a stored
+    // `color` + `#0b0b0d` is overwhelmingly the untouched default rather than a
+    // chosen near-black — and kept, it would paint every theme on black. It
+    // moves to `theme`, which under SIGNAL ROOM is the same near-black anyway.
+    // A colour anyone actually picked is any other value, and is kept.
+    if (a.background === "color" && a.backgroundColor.toLowerCase() === OLD_DEFAULT_BACKDROP) {
+      a.background = "theme";
+    }
+    return a;
   } catch {
     return DEFAULTS;
   }
@@ -237,7 +271,13 @@ export function applyAppearance(a: Appearance = load()) {
 
   // --- what sits behind the app -------------------------------------------
   const cover = Math.min(Math.max(a.backgroundCover, 0), 100) / 100;
-  if (a.background === "color") {
+  if (a.background === "theme") {
+    // A reference, not a value: the backdrop re-colours with the theme (and with
+    // an auto-switch flip) without this function running again.
+    root.style.setProperty("--backdrop-color", "var(--app-bg)");
+    root.style.setProperty("--backdrop-image", "none");
+    root.style.setProperty("--backdrop-opacity", String(cover));
+  } else if (a.background === "color") {
     root.style.setProperty("--backdrop-color", a.backgroundColor);
     root.style.setProperty("--backdrop-image", "none");
     root.style.setProperty("--backdrop-opacity", String(cover));
@@ -354,8 +394,32 @@ export function AppearancePanel() {
   const [origin, setOrigin] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Follow-the-OS, staged like everything else: `autoDraft` against `snap.auto`.
+  const [autoDraft, setAutoDraft] = useState<AutoSwitch>(snap.auto);
 
   useEffect(() => subscribeTheme(() => setSnap(themeSnapshot())), []);
+
+  // While a *staged* FOLLOW SYSTEM is being previewed, an OS flip must move the
+  // preview too — the runtime only follows the committed setting, so without
+  // this the panel would claim "system is dark" over a light preview.
+  const [, setOsTick] = useState(0);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onFlip = () => {
+      setOsTick((n) => n + 1);
+      if (autoDraft.on && !colourDraft) {
+        applyTheme(resolve(effectiveName(selectedName, autoDraft), snap.user));
+      }
+    };
+    mq.addEventListener("change", onFlip);
+    return () => mq.removeEventListener("change", onFlip);
+  }, [autoDraft, colourDraft, selectedName, snap.user]);
+
+  useEffect(() => {
+    setAutoDraft(snap.auto);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snap.auto.on, snap.auto.light, snap.auto.dark]);
 
   // Follow the active theme when it moves under us — a commit here, or a switch
   // from another window — but not while a colour edit is mid-fork, or the
@@ -368,10 +432,12 @@ export function AppearancePanel() {
   const materialDirty = JSON.stringify(draft) !== JSON.stringify(saved);
   const themeStaged = selectedName !== snap.active;
   const colourEdited = colourDraft !== null;
-  const dirty = materialDirty || themeStaged || colourEdited;
+  const autoStaged = JSON.stringify(autoDraft) !== JSON.stringify(snap.auto);
+  const dirty = materialDirty || themeStaged || colourEdited || autoStaged;
 
   // What the editor shows and what previews live on the workbench.
   const preview = colourDraft ?? resolve(selectedName, snap.user);
+  const previewSlots = slots(preview);
   const editingBuiltIn = isBuiltIn(preview.name);
 
   /** Stage a theme switch: preview it live, persist nothing until Apply. */
@@ -382,17 +448,42 @@ export function AppearancePanel() {
     applyTheme(resolve(name, snap.user));
   };
 
+  /**
+   * Stage an auto-switch change and preview what it would put on screen: with
+   * it on, the theme the OS appearance picks; with it off, the selected one.
+   */
+  const stageAuto = (next: AutoSwitch) => {
+    setAutoDraft(next);
+    setColourDraft(null);
+    setOrigin(null);
+    // The selection is left alone — it stays the theme being edited and the
+    // fallback for an engine that cannot report the appearance.
+    applyTheme(resolve(effectiveName(selectedName, next), snap.user));
+  };
+
+  /** Fork the selected theme on first touch (a built-in becomes a copy). */
+  const forkBase = (): { base: Theme; baseOrigin: string | null } => {
+    if (colourDraft) return { base: colourDraft, baseOrigin: origin };
+    const sel = resolve(selectedName, snap.user);
+    return {
+      base: isBuiltIn(sel.name) ? { ...sel, name: copyName(sel.name) } : sel,
+      baseOrigin: sel.name,
+    };
+  };
+
   /** A colour well changed: fork a built-in on first touch, then preview live. */
   const edit = (field: keyof Theme, value: string) => {
-    let base = colourDraft;
-    let baseOrigin = origin;
-    if (!base) {
-      const sel = resolve(selectedName, snap.user);
-      base = sel;
-      baseOrigin = sel.name;
-      if (isBuiltIn(sel.name)) base = { ...sel, name: copyName(sel.name) };
-    }
+    const { base, baseOrigin } = forkBase();
     const next = { ...base, [field]: value } as Theme;
+    setOrigin(baseOrigin);
+    setColourDraft(next);
+    applyTheme(next);
+  };
+
+  /** A UI-palette well changed: an override on top of the derived slot. */
+  const editSlot = (key: SlotKey, value: string) => {
+    const { base, baseOrigin } = forkBase();
+    const next: Theme = { ...base, ui: { ...(base.ui ?? {}), [key]: value } };
     setOrigin(baseOrigin);
     setColourDraft(next);
     applyTheme(next);
@@ -434,6 +525,7 @@ export function AppearancePanel() {
       } else if (themeStaged) {
         await setActiveTheme(selectedName);
       }
+      if (autoStaged) await setAutoSwitch(autoDraft);
       setColourDraft(null);
       setOrigin(null);
 
@@ -442,6 +534,7 @@ export function AppearancePanel() {
       // applies it directly and every other one is told.
       localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
       applyAppearance(draft);
+      refreshIndicatorStyle();
       setSaved(draft);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -457,7 +550,8 @@ export function AppearancePanel() {
     setColourDraft(null);
     setOrigin(null);
     setSelectedName(snap.active);
-    applyTheme(resolve(snap.active, snap.user));
+    setAutoDraft(snap.auto);
+    applyTheme(resolve(effectiveName(snap.active, snap.auto), snap.user));
     // Fonts previewed live, so repaint them back to the saved look too.
     applyFonts(saved.uiFont, saved.monoFont);
   };
@@ -536,7 +630,7 @@ export function AppearancePanel() {
         max={max}
         value={value}
         onChange={(e) => set(Number(e.target.value))}
-        style={{ accentColor: "rgb(var(--primary))" }}
+        style={{ accentColor: "var(--accent)" }}
       />
       <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
         {hint}
@@ -568,9 +662,10 @@ export function AppearancePanel() {
       <div className="flex flex-col gap-1">
         <span className="micro">PALETTE</span>
         <p className="data text-[11px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
-          Pick a theme, or edit its 23 colours — the ANSI 16 plus Background, Text, Bold Text,
-          Selection and Cursor, and two roles the terminal has no slot for: Accent (&ldquo;you
-          must act&rdquo;) and Working. Built-ins are read-only; editing one forks a copy.
+          Pick a theme — herdr&rsquo;s family, Catppuccin Mocha by default, plus SIGNAL ROOM — or
+          edit its colours: the terminal&rsquo;s ANSI 16 and specials, the two roles (Act and
+          Working), and the UI palette the chrome is drawn from. Built-ins are read-only; editing
+          one forks a copy. Glass and the backdrop below work with every theme.
         </p>
       </div>
 
@@ -591,10 +686,19 @@ export function AppearancePanel() {
               <Dot theme={t} />
               {t.name}
               {isBuiltIn(t.name) ? "" : " ·"}
+              <span style={{ color: "var(--text-faint)" }}>{isLight(t) ? "L" : "D"}</span>
             </button>
           ))}
         </div>
       </div>
+
+      {/* Follow the OS (herdr's `auto_switch`). Staged like everything else. */}
+      <AutoSwitchPicker
+        value={autoDraft}
+        themes={snap.all}
+        disabled={busy !== null}
+        onChange={stageAuto}
+      />
 
       {/* Duplicate / delete — instant library ops (ADR-002 §3). */}
       <div className="flex items-center gap-2">
@@ -649,6 +753,24 @@ export function AppearancePanel() {
           <div className="flex flex-wrap gap-2">
             {ROLE_KEYS.map((k) => (
               <Well key={k} label={ROLE_LABELS[k]} value={preview[k]} onChange={(v) => edit(k, v)} />
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <span className="micro">UI PALETTE</span>
+          <span className="data text-[10px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+            The chrome&rsquo;s slots, as herdr names them. Agent states read from five of them:
+            working = YELLOW, needs you = RED, done = TEAL, idle = GREEN, unknown = OVERLAY 0.
+          </span>
+          <div className="flex flex-wrap gap-2">
+            {SLOT_KEYS.map((k) => (
+              <Well
+                key={k}
+                label={SLOT_LABELS[k]}
+                value={previewSlots[k]}
+                onChange={(v) => editSlot(k, v)}
+              />
             ))}
           </div>
         </div>
@@ -707,6 +829,32 @@ export function AppearancePanel() {
               </button>
             ))}
           </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+        <span className="kicker">AGENT STATE</span>
+        <p className="data text-[11px] leading-relaxed" style={{ color: "var(--text-soft)" }}>
+          How the sidebar marks each agent — working, blocked, done, idle, no status yet. Symbols
+          stay readable without colour. Persists on Apply.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {(
+            [
+              ["dots", "● ● ● ○ ·  dots"],
+              ["symbols", "◐ × ✓ ○ ·  symbols"],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className="chip"
+              aria-pressed={draft.agentIndicators === id}
+              onClick={() => setDraft((d) => ({ ...d, agentIndicators: id }))}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -1131,9 +1279,108 @@ const SPECIAL_LABELS: Record<(typeof SPECIAL_KEYS)[number], string> = {
 };
 
 const ROLE_LABELS: Record<(typeof ROLE_KEYS)[number], string> = {
-  accent: "ACCENT · ACT",
+  accent: "ACT",
   working: "WORKING",
 };
+
+const SLOT_LABELS: Record<SlotKey, string> = {
+  accent: "ACCENT",
+  panelBg: "PANEL",
+  sidebarBg: "SIDEBAR",
+  activeRowBg: "ACTIVE ROW",
+  selectionBg: "SELECT",
+  surface0: "SURFACE 0",
+  surface1: "SURFACE 1",
+  surfaceDim: "SURF DIM",
+  overlay0: "OVERLAY 0",
+  overlay1: "OVERLAY 1",
+  text: "TEXT",
+  subtext0: "SUBTEXT",
+  mauve: "MAUVE",
+  green: "GREEN",
+  yellow: "YELLOW",
+  red: "RED",
+  blue: "BLUE",
+  teal: "TEAL",
+  peach: "PEACH",
+};
+
+/**
+ * Follow the OS light/dark appearance (herdr's `[theme] auto_switch`, with
+ * `light_name` / `dark_name`). Each row lists only the themes on its side, so
+ * the choice stays a handful of visible chips rather than a dropdown.
+ */
+function AutoSwitchPicker({
+  value,
+  themes,
+  disabled,
+  onChange,
+}: {
+  value: AutoSwitch;
+  themes: Theme[];
+  disabled: boolean;
+  onChange: (next: AutoSwitch) => void;
+}) {
+  const os = osAppearance();
+  const lights = themes.filter((t) => isLight(t));
+  const darks = themes.filter((t) => !isLight(t));
+  const pickRow = (label: string, list: Theme[], current: string, set: (name: string) => void) => (
+    <div className="flex flex-col gap-1">
+      <span className="micro">{label}</span>
+      <div className="flex flex-wrap gap-2">
+        {list.map((t) => (
+          <button
+            key={t.name}
+            type="button"
+            className="chip"
+            aria-pressed={t.name === current}
+            disabled={disabled}
+            onClick={() => set(t.name)}
+          >
+            <Dot theme={t} />
+            {t.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-3">
+        <span className="micro">LIGHT / DARK</span>
+        <div className="seg">
+          <button
+            type="button"
+            aria-pressed={!value.on}
+            disabled={disabled}
+            onClick={() => onChange({ ...value, on: false })}
+          >
+            ONE THEME
+          </button>
+          <button
+            type="button"
+            aria-pressed={value.on}
+            disabled={disabled}
+            onClick={() => onChange({ ...value, on: true })}
+          >
+            FOLLOW SYSTEM
+          </button>
+        </div>
+        {value.on && (
+          <span className="data text-[10px]" style={{ color: "var(--text-faint)" }}>
+            {os ? `system is ${os}` : "system appearance unknown — using the theme above"}
+          </span>
+        )}
+      </div>
+      {value.on && (
+        <>
+          {pickRow("WHEN LIGHT", lights, value.light, (light) => onChange({ ...value, light }))}
+          {pickRow("WHEN DARK", darks, value.dark, (dark) => onChange({ ...value, dark }))}
+        </>
+      )}
+    </div>
+  );
+}
 
 /** A tiny two-colour swatch — background and accent — to tell themes apart. */
 function Dot({ theme }: { theme: Theme }) {
@@ -1145,7 +1392,7 @@ function Dot({ theme }: { theme: Theme }) {
         height: 10,
         display: "inline-block",
         background: theme.background,
-        boxShadow: `inset 0 0 0 2px ${theme.accent}`,
+        boxShadow: `inset 0 0 0 2px ${slots(theme).accent}`,
       }}
     />
   );

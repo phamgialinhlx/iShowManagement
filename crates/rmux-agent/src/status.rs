@@ -286,7 +286,7 @@ pub fn write_status(w: &StatusWrite) -> anyhow::Result<()> {
 /// `claude`, so a `/proc/<pid>/comm == "claude"` test is the wrong question for
 /// them. Compiled on every target now that it has a production caller on Linux.
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
@@ -295,7 +295,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn pid_alive(_pid: u32) -> bool {
+pub(crate) fn pid_alive(_pid: u32) -> bool {
     true
 }
 

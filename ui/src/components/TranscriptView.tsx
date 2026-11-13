@@ -6,6 +6,7 @@ import { api, hasBackend, type TargetRef, type Transcript, type TranscriptEntry 
 import { MARKDOWN_COMPONENTS } from "../lib/markdown-code";
 import { useWorkspace } from "../lib/workspace";
 import { bench } from "../lib/debug-log";
+import { copyText } from "../lib/clipboard";
 
 /**
  * The conversation, as a document.
@@ -66,12 +67,12 @@ const SPEAKER: Record<TranscriptEntry["speaker"], { label: string; color: string
 /** The assistant is whichever agent produced the transcript — labelling a pi
  *  conversation "claude" is a claim about who is talking, and it is wrong. Every
  *  other speaker is agent-neutral, so only `assistant` moves. */
-function speakerLabel(speaker: TranscriptEntry["speaker"], provider: "claude" | "pi"): string {
-  if (speaker === "assistant") return provider === "pi" ? "pi" : "claude";
+function speakerLabel(speaker: TranscriptEntry["speaker"], provider: "claude" | "pi" | "codex"): string {
+  if (speaker === "assistant") return provider === "pi" ? "pi" : provider === "codex" ? "codex" : "claude";
   return SPEAKER[speaker].label;
 }
 
-function Turn({ entry, provider }: { entry: TranscriptEntry; provider: "claude" | "pi" }) {
+function Turn({ entry, provider }: { entry: TranscriptEntry; provider: "claude" | "pi" | "codex" }) {
   const meta = SPEAKER[entry.speaker];
   const isProse = entry.speaker === "user" || entry.speaker === "assistant";
 
@@ -160,7 +161,7 @@ export function TranscriptView({
   /** Whose transcript this is. pi reads through `pi_transcript` (its `cwd` is
    *  `folder`); Claude keeps its existing `claude_transcript` path unchanged.
    *  The returned `Transcript` shape is identical, so only the fetch forks. */
-  provider?: "claude" | "pi";
+  provider?: "claude" | "pi" | "codex";
 }) {
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -197,7 +198,10 @@ export function TranscriptView({
       const next =
         provider === "pi"
           ? await api.piTranscript(target, folder, resume, tail)
-          : await api.claudeTranscript(target, folder, resume, tail);
+          : provider === "codex"
+            ? // Codex's rollout, tail only; with no id, the newest one for this folder.
+              await api.codexTranscript(target, folder, resume, tail)
+            : await api.claudeTranscript(target, folder, resume, tail);
       // Only swap state when something actually changed. A poll that returns
       // the same bytes used to replace the array anyway, re-rendering every
       // turn — which is invisible when nothing is selected and destroys the
@@ -283,7 +287,7 @@ export function TranscriptView({
       .map((e) => `## ${speakerLabel(e.speaker, provider)}${e.tool ? ` · ${e.tool}` : ""}\n\n${e.text}`)
       .join("\n\n");
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     } catch {

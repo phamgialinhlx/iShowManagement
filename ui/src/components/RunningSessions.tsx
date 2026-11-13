@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { api, hasBackend, type AgentSession, type TargetRef } from "../lib/api";
 import { PanelLoader } from "./PanelLoader";
 import { useWorkspace } from "../lib/workspace";
-import { isClaudeSession, reattachName, type ServerId } from "../lib/workspace-model";
+import { adoptedKind, reattachName, type ServerId } from "../lib/workspace-model";
 
 /**
  * Sessions running on a host, and a way into them.
@@ -182,7 +182,7 @@ export function RunningSessions({
                           {/* The folder first: with several shells on one host
                               it is the only thing that tells them apart. */}
                           {s.cwd ? `${s.cwd} · ` : ""}
-                          {isClaudeSession(s.command) ? "claude" : "shell"} ·{" "}
+                          {adoptedKind(s.command) === "terminal" ? "shell" : adoptedKind(s.command)} ·{" "}
                           {s.attached ? "attached" : "detached"} · {age(s.ageSeconds)}
                         </span>
                       </div>
@@ -202,7 +202,7 @@ export function RunningSessions({
                             adoptServerSession(
                               serverId,
                               s.name,
-                              isClaudeSession(s.command) ? "claude" : "terminal",
+                              adoptedKind(s.command),
                               s.alias,
                               // So the adopted session joins the project for the
                               // folder it is actually in, rather than a bucket

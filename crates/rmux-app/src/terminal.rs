@@ -241,18 +241,27 @@ pub async fn terminal_open(
     // the session for the same reason the model profile is, so a pane that
     // restarts comes back on the transport it was launched with.
     low_latency: Option<bool>,
+    // A named program to run in place of the shell — a closed set, never a
+    // free-form command (see [`Run`]).
+    run: Option<Run>,
     cols: u16,
     rows: u16,
     output: Arc<dyn Sink>,
     lifecycle: Arc<dyn Sink>,
 ) -> Result<OpenedTerminal, String> {
     let resolved = resolve_target(store, &target).await?;
+    let run_line = run.map(Run::line);
 
     // A named terminal runs under the agent so it outlives this connection.
     // Without a name there is nothing to reattach *to*, so a plain login shell
     // is the honest behaviour rather than a session nobody can find again.
     let plain_shell = || {
-        let mut spec = CommandSpec::login_shell();
+        let mut spec = match run_line {
+            // Through the login shell for the same reason the agent path uses
+            // one: `codex` is on a version manager's PATH that exists only there.
+            Some(line) => CommandSpec::login_shell().arg("-c").arg(line),
+            None => CommandSpec::login_shell(),
+        };
         if let Some(cwd) = &cwd {
             spec = spec.cwd(cwd.clone());
         }
@@ -267,7 +276,13 @@ pub async fn terminal_open(
         // connection; that is worth saying, but it is not worth withholding the
         // terminal over.
         Some(name) => match crate::agent::ensure_agent(ctx, resolved.as_ref()).await {
-            Ok(installed) => installed.attach_spec(name, cwd.as_deref(), cols, rows),
+            Ok(installed) => {
+                let spec = installed.attach_spec(name, cwd.as_deref(), cols, rows);
+                match run_line {
+                    Some(line) => spec.arg("--login-command").arg(line),
+                    None => spec,
+                }
+            }
             Err(reason) => {
                 tracing::info!(%reason, "opening a non-persistent terminal");
                 plain_shell()
@@ -489,6 +504,28 @@ pub struct SetMoshAutoInstallArgs {
     pub on: bool,
 }
 
+/// A program a terminal may run instead of a shell.
+///
+/// **A closed set, on purpose.** The UI asks for a *purpose* and the line is
+/// built here from the one definition of it, so the webview never hands a
+/// command string to a remote shell. The first member exists so signing in to
+/// Codex is a real terminal running the real CLI — the operator answers its
+/// device-code prompt themselves, and rmux scripts none of the browser flow.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Run {
+    /// `codex login --device-auth`.
+    CodexLogin,
+}
+
+impl Run {
+    pub fn line(self) -> &'static str {
+        match self {
+            Run::CodexLogin => rmux_claude::codex::login_line(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOpenArgs {
@@ -499,6 +536,8 @@ pub struct TerminalOpenArgs {
     pub session: Option<String>,
     #[serde(default)]
     pub low_latency: Option<bool>,
+    #[serde(default)]
+    pub run: Option<Run>,
     pub cols: u16,
     pub rows: u16,
     pub output: String,
@@ -577,6 +616,7 @@ pub fn register(r: &mut Registry) {
             a.cwd,
             a.session,
             a.low_latency,
+            a.run,
             a.cols,
             a.rows,
             output,

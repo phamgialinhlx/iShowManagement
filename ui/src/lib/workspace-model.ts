@@ -60,7 +60,11 @@ export type Project = {
   running?: boolean;
 };
 
-export type SessionKind = "terminal" | "claude" | "pi";
+/**
+ * `dsh` is DeepSeek Harness: its UI is a Web UI, so its pane is a webview over a
+ * loopback forward rather than a terminal (`DshSessionPane`, `docs/dsh.md`).
+ */
+export type SessionKind = "terminal" | "claude" | "pi" | "dsh" | "codex";
 
 /** Runtime attention state. Claude-only in v1 (a terminal is always `idle`). */
 export type SessionStatus = "waiting" | "working" | "idle";
@@ -93,6 +97,15 @@ export type SessionV3 = {
   hostName?: string;
 
   /**
+   * The app session id of the session whose agent spawned this one on the host
+   * (`rmux spawn`, recorded in `~/.rmux/children.json`). Display only — the
+   * sidebar's `↳ parent` — and optional, so every session saved before it
+   * existed simply has no parent. A parent that has since been closed leaves a
+   * dangling id, which reads as "no parent" rather than an error.
+   */
+  parentId?: string;
+
+  /**
    * A resume-cwd override — **pi resume: run in the conversation's own
    * directory.** pi stores and locates its sessions under a cwd-encoded dir, so
    * a resumed conversation must be launched in the same cwd it recorded. Absent
@@ -104,12 +117,11 @@ export type SessionV3 = {
    * Ask this session's transport to minimise echo latency (Session Settings ›
    * TRANSPORT).
    *
-   * **Absent means off**, and that is deliberate rather than incidental: a
-   * low-latency transport keeps a screen rather than a history, so scrolling
-   * back in such a pane returns nothing. An operator who never chose it must
-   * not lose their scrollback, and every session saved before this existed has
-   * no value here — so the reconciliation is simply that `undefined` is `false`.
-   * Unlike `fullscreen`, nothing seeds it on creation.
+   * **Absent means "follow the app-wide default"** (Settings › Connections › DEFAULT
+   * TRANSPORT, `lib/transport-default.ts`), which is low latency unless the operator
+   * chose ssh. It used to mean off, because a low-latency pane keeps a screen rather than
+   * a history; the operator has since asked for mosh by default and made that trade once,
+   * app-wide. An explicit value here still overrides the default for this session.
    *
    * Kept *with* the session for the same reason the model profile is: which
    * transport a piece of work runs over is a property of that work, and a pane
@@ -125,9 +137,36 @@ export type SessionV3 = {
   fullscreen?: boolean;
   skipPermissions?: boolean;
   modelProfile?: string;
+  /**
+   * When `modelProfile` names a fallback chain: the member the session is on
+   * **now**. The host's daemon switches members on a usage limit (with the app
+   * closed too); this mirror is what a restart from the UI resumes on, so a
+   * pane never quietly goes back to an account that is already spent.
+   */
+  activeProfile?: string;
   claudeAccount?: string;
   jiraProject?: string;
   contextWindow?: number;
+
+  // ── codex-only ───────────────────────────────────────────────────────────
+  // `resume` and `modelProfile` above are shared: a Codex session resumes a
+  // rollout id and runs under an *OpenAI* profile.
+  /**
+   * `--dangerously-bypass-approvals-and-sandbox`. The skip-permissions rule
+   * exactly: chosen per session at launch, defaulting off, never a stored
+   * preference — and kept with the session so a restart comes back the same.
+   */
+  bypassApprovals?: boolean;
+  /** `--sandbox`. Absent is Codex's own default. */
+  codexSandbox?: "read-only" | "workspace-write";
+
+  // ── terminal-only ────────────────────────────────────────────────────────
+  /**
+   * A named program this terminal runs instead of a shell — today only
+   * `codex-login` (Session Settings › SIGN IN TO CODEX ON THIS HOST). A purpose,
+   * never a command line: the backend owns the one definition of what it runs.
+   */
+  run?: "codex-login";
 };
 
 /** What a grid tile points at. A session is one kind of pane, not the only kind. */
@@ -177,12 +216,23 @@ export function projectId(server: ServerId, folder: string): ProjectId {
  * and is used verbatim. Migration therefore preserves ids, and this function
  * yields the identical name it did before the upgrade.
  */
+export function mintStem(kind: SessionKind): string {
+  // A dsh id is bare like pi's (`reattachName` adds `dsh-`), so its stem must
+  // not itself start with `dsh-` or the host name would read `dsh-dsh-…`.
+  if (kind === "dsh") return "dshsession";
+  // Codex likewise: bare id, `codex-` added at reattach.
+  if (kind === "codex") return "codexsession";
+  return kind === "claude" ? "session" : kind === "pi" ? "pisession" : "term";
+}
+
 export function reattachName(s: Pick<SessionV3, "id" | "kind" | "hostName">): string {
   // An adopted session carries the name the host already knows it by. Deriving
   // one instead would name a session that does not exist, and attaching to a
   // name nothing answers to *creates* it — a second shell beside the one being
   // adopted.
   if (s.hostName) return s.hostName;
+  if (s.kind === "dsh") return `dsh-${s.id}`;
+  if (s.kind === "codex") return `codex-${s.id}`;
   return s.kind === "claude" ? `claude-${s.id}` : s.kind === "pi" ? `pi-${s.id}` : s.id;
 }
 
@@ -197,6 +247,20 @@ export function reattachName(s: Pick<SessionV3, "id" | "kind" | "hostName">): st
  */
 export function isClaudeSession(command: string | null | undefined): boolean {
   return command === "claude" || command?.startsWith("claude ") === true;
+}
+
+/** The same test for Codex — `codex` and `codex …`, never a substring. */
+export function isCodexSession(command: string | null | undefined): boolean {
+  return command === "codex" || command?.startsWith("codex ") === true;
+}
+
+/**
+ * What kind an adopted daemon session is, from its command. Codex is told apart
+ * so adopting one opens a Codex pane — read with Codex's rules, ended like one —
+ * rather than a shell that happens to be drawing a TUI.
+ */
+export function adoptedKind(command: string | null | undefined): "claude" | "codex" | "terminal" {
+  return isClaudeSession(command) ? "claude" : isCodexSession(command) ? "codex" : "terminal";
 }
 
 /**

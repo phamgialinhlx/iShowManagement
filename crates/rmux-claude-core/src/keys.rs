@@ -82,6 +82,67 @@ pub fn send_message_pi(text: &str) -> Vec<Vec<u8>> {
     vec![paste, b"\r".to_vec()]
 }
 
+/// Bytes for one named key, as an orchestrating agent spells it.
+///
+/// The vocabulary of `rmux keys SESSION KEY...`: `enter`, `esc`, `tab`,
+/// `shift-tab`, the arrows, `home`/`end`, `pgup`/`pgdn`, `backspace`, `delete`,
+/// `space`, `ctrl-<letter>` (also written `ctrl+<letter>` or `c-<letter>`), and
+/// any single character typed as itself (`y`, `n`, `2`). Names are matched
+/// case-insensitively; a single character is sent exactly as given.
+///
+/// `None` for anything else, so a caller can validate **every** key before
+/// writing any — half a key sequence delivered to a TUI is worse than none,
+/// because the half that landed has already moved a highlight or dismissed a
+/// dialog. Escape is [`interrupt`], the one definition of "stop Claude".
+///
+/// Arrows are sent in normal cursor mode (`ESC [ A`). Every TUI rmux drives
+/// accepts that form in either cursor-key mode, which is why there is no second
+/// table for application mode.
+pub fn named(name: &str) -> Option<Vec<u8>> {
+    // A single character is itself — checked before lowercasing, so `Y` stays `Y`.
+    let mut chars = name.chars();
+    if let (Some(c), None) = (chars.next(), chars.clone().next())
+        && !c.is_control()
+    {
+        return Some(c.to_string().into_bytes());
+    }
+
+    let lower = name.to_ascii_lowercase();
+    let bytes: &[u8] = match lower.as_str() {
+        "enter" | "return" | "cr" => b"\r",
+        "esc" | "escape" => interrupt(),
+        "tab" => b"\t",
+        "shift-tab" | "shift+tab" | "backtab" | "btab" => b"\x1b[Z",
+        "up" => b"\x1b[A",
+        "down" => b"\x1b[B",
+        "right" => b"\x1b[C",
+        "left" => b"\x1b[D",
+        "home" => b"\x1b[H",
+        "end" => b"\x1b[F",
+        "pgup" | "pageup" | "page-up" => b"\x1b[5~",
+        "pgdn" | "pagedown" | "page-down" => b"\x1b[6~",
+        "backspace" | "bs" => b"\x7f",
+        "delete" | "del" => b"\x1b[3~",
+        "space" => b" ",
+        _ => {
+            let letter = lower
+                .strip_prefix("ctrl-")
+                .or_else(|| lower.strip_prefix("ctrl+"))
+                .or_else(|| lower.strip_prefix("c-"))?;
+            let mut it = letter.chars();
+            let (Some(c), None) = (it.next(), it.next()) else { return None };
+            return match c {
+                'a'..='z' => Some(vec![c as u8 - b'a' + 1]),
+                '[' => Some(vec![0x1b]),
+                '\\' => Some(vec![0x1c]),
+                ']' => Some(vec![0x1d]),
+                _ => None,
+            };
+        }
+    };
+    Some(bytes.to_vec())
+}
+
 /// How long to wait between the text and the Enter that submits it.
 ///
 /// The composer needs a moment to finish processing a paste before it will treat
@@ -149,6 +210,31 @@ mod tests {
     #[test]
     fn interrupt_is_escape() {
         assert_eq!(interrupt(), b"\x1b");
+    }
+
+    #[test]
+    fn named_keys_cover_the_orchestration_vocabulary() {
+        assert_eq!(named("enter").unwrap(), b"\r");
+        assert_eq!(named("ESC").unwrap(), interrupt());
+        assert_eq!(named("tab").unwrap(), b"\t");
+        assert_eq!(named("up").unwrap(), b"\x1b[A");
+        assert_eq!(named("down").unwrap(), b"\x1b[B");
+        assert_eq!(named("ctrl-c").unwrap(), vec![0x03]);
+        assert_eq!(named("ctrl+d").unwrap(), vec![0x04]);
+        assert_eq!(named("C-a").unwrap(), vec![0x01]);
+        // A single character is itself, case preserved.
+        assert_eq!(named("y").unwrap(), b"y");
+        assert_eq!(named("Y").unwrap(), b"Y");
+        assert_eq!(named("2").unwrap(), b"2");
+    }
+
+    #[test]
+    fn an_unknown_key_name_is_refused_rather_than_typed() {
+        // A misspelt key typed literally ("entr") would land in the composer as
+        // text — refusing it is what lets the caller validate before writing.
+        for bad in ["entr", "ctrl-", "ctrl-cc", "ctrl-1", "", "\u{7}"] {
+            assert!(named(bad).is_none(), "{bad:?} must be refused");
+        }
     }
 
     #[test]

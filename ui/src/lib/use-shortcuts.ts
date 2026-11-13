@@ -1,16 +1,18 @@
 import { useEffect } from "react";
 
-import { deckCells } from "./grid";
+import { activeTab, findLeaf, tileOf } from "./layout-tree.ts";
 import {
   match,
-  moveFocus,
-  requestTerminalFocus,
   readBindings,
+  requestClose,
   requestView,
   type ActionId,
   type Bindings,
 } from "./shortcuts";
 import { useWorkspace } from "./workspace";
+import { prefixOwns } from "./prefix-runtime.ts";
+import { requestQuickSwitch } from "./quick-switch.ts";
+import { requestQuickOpen } from "./quick-open.ts";
 
 /**
  * Bind the keyboard to the workbench.
@@ -79,35 +81,76 @@ export function useShortcuts(options: {
         case "pane.right":
         case "pane.up":
         case "pane.down": {
-          const { deck, panes } = state;
-          if (deckCells(deck) <= 1) return; // nowhere to go in focus mode
-          const from = state.focusedCell ?? 0;
-          const to = moveFocus(from, action.slice("pane.".length) as "left", deck.cols, deck.rows);
-          if (to === from) return;
-          state.focusCell(to);
-          // Follow the focus with the session, so the rail, the widgets and the
-          // status all describe the tile being looked at. An empty tile is a
-          // real destination — you move into it to open something there — so it
-          // takes the focus and simply leaves the active session alone.
-          const landed = panes[to];
-          if (landed?.kind === "session") {
-            state.activate(landed.id);
-            // **And give it the keyboard.** Moving the focus ring without moving
-            // the cursor means the next thing typed goes to the pane just left,
-            // which is worse than not moving at all — the screen says one thing
-            // and the keystrokes do another.
-            requestTerminalFocus(landed.id);
-          }
+          // Geometric, in the split tree: the pane actually beside this one,
+          // not the next in some list. At an edge nothing moves — the store
+          // treats "no neighbour" as a no-op, as the grid's clamp did. The
+          // store also hands the landed terminal the keyboard: moving the ring
+          // without the cursor is worse than not moving at all.
+          state.focusDirection(action.slice("pane.".length) as "left");
           return;
         }
+
+        case "pane.splitRight":
+          state.splitPane("right");
+          return;
+        case "pane.splitDown":
+          state.splitPane("down");
+          return;
+
+        case "pane.close": {
+          // Never closed from the keyboard directly: a session pane's close
+          // ends its work on the host, so it goes through the same confirmation
+          // the pane's own ✕ does (`ConfirmClose`, mounted by the deck).
+          const at = activeTab(state.layout);
+          const leaf = at ? findLeaf(at.tab.root, at.tab.focus) : null;
+          if (at && leaf) requestClose({ projectId: at.projectId, tabId: at.tab.id, leafId: leaf.id });
+          return;
+        }
+
+        case "pane.zoom":
+          state.toggleZoom();
+          return;
+
+        case "tab.new":
+          state.newTab();
+          return;
+        case "tab.next":
+          state.cycleTab(1);
+          return;
+        case "tab.prev":
+          state.cycleTab(-1);
+          return;
 
         case "progress":
           onProgress(!progressOpen);
           return;
+
+        case "quickSwitch":
+          requestQuickSwitch();
+          return;
+
+        case "quickOpen":
+          requestQuickOpen();
+          return;
+
+        case "tile.openBeside":
+          state.openNextBeside();
+          return;
+        case "tile.close": {
+          // Removes the tile only — nothing ends, so nothing to confirm. With
+          // one tile there is nowhere for the project to go: a no-op.
+          const pid = state.layout.activeProject;
+          const tile = pid && state.layout.view ? tileOf(state.layout, pid) : null;
+          if (tile) state.closeTile(tile.id);
+          return;
+        }
       }
     };
 
     const onKey = (e: KeyboardEvent) => {
+      // The prefix layer took this key, or a prefix/navigate/resize mode owns
+      // the keyboard — a Mod chord must not also fire underneath it.
+      if (prefixOwns(e)) return;
       const action = match(e, bindings);
       if (!action) return;
       e.preventDefault();

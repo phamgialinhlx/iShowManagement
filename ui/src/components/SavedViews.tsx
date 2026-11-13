@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 
 import { useWorkspace } from "../lib/workspace";
+import { leaves } from "../lib/layout-tree";
 
 /**
- * Save the current workbench layout — the grid and what sits in each cell — under
- * a name, and switch back to it in one click. A layout is `{ deck, panes }`; the
- * store owns the snapshot and the restore, this is only the control for it.
+ * Save the active tab's split tree under a name, and open it again in one
+ * click. Recalling a view opens it as a **new tab** in the project its sessions
+ * belong to; panes whose session has since ended are skipped, and sessions it
+ * names are moved into it rather than shown twice. The store owns the snapshot
+ * and the restore (`saveCurrentView`/`applyView`); this is only the control.
  *
- * It sits beside the grid picker in the footer and opens **upward**, because the
- * footer is at the bottom of the window and a menu that grew downward would fall
- * off the screen.
+ * It sits in the footer and opens **upward**, because the footer is at the
+ * bottom of the window and a menu that grew downward would fall off the screen.
  */
 export function SavedViews() {
   const savedViews = useWorkspace((s) => s.savedViews);
@@ -57,7 +59,7 @@ export function SavedViews() {
         type="button"
         className="data px-[5px] text-[10px]"
         onClick={() => setOpen((v) => !v)}
-        title="Saved views — store this layout and switch back to it"
+        title="Saved views — store this tab's layout and open it again as a tab"
         style={{
           ...chipStyle,
           color: open ? "var(--text)" : "var(--text-soft)",
@@ -78,6 +80,9 @@ export function SavedViews() {
             </span>
           )}
 
+          {/* Bounded in the element that scrolls: a personal list has no
+              natural length, and the save field below must stay reachable. */}
+          <div className="flex max-h-[40vh] flex-col gap-[2px] overflow-y-auto">
           {savedViews.map((v) => (
             <div key={v.id} className="flex items-center gap-1">
               <button
@@ -90,7 +95,7 @@ export function SavedViews() {
                 onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover)")}
                 onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                 style={{ color: "var(--text)" }}
-                title={`Switch to “${v.name}” (${v.deck.cols}×${v.deck.rows})`}
+                title={`Open “${v.name}” as a new tab (${leaves(v.root).length} pane${leaves(v.root).length === 1 ? "" : "s"})`}
               >
                 {v.name}
               </button>
@@ -108,6 +113,7 @@ export function SavedViews() {
               </button>
             </div>
           ))}
+          </div>
 
           <div style={{ borderTop: "1px solid var(--border)", margin: "3px 0" }} />
 
@@ -133,7 +139,7 @@ export function SavedViews() {
               className="data px-[6px] py-[3px] text-[10px]"
               onClick={save}
               disabled={!name.trim()}
-              title="Save the current layout under this name"
+              title="Save this tab's layout under this name"
               style={{
                 border: "1px solid var(--border)",
                 color: name.trim() ? "var(--text)" : "var(--text-faint)",

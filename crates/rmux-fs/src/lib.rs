@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod protocol;
 pub mod search;
+pub mod client;
+pub mod serve;
+pub mod wire;
 
 pub use search::{SearchHit, SearchQuery};
 
@@ -53,6 +56,70 @@ pub const MAX_PREVIEW_BYTES: u64 = 24 * 1024 * 1024;
 /// ruinous for an archive. The file tree does not use it: it stages the file in
 /// chunks and calls [`FileSystem::upload_file`], which streams and has no cap.
 pub const MAX_UPLOAD_BYTES: u64 = 64 * 1024 * 1024;
+
+/// One transfer's live state, shared between the code moving the bytes and
+/// whoever reports or cancels it.
+///
+/// Atomics rather than a lock: the mover updates `done` once per chunk and the
+/// reporter reads it a few times a second, and neither should ever wait on the
+/// other. `total` is `u64::MAX` until it is known — a download learns its size
+/// only after asking the far side, and inventing one until then would draw a
+/// progress bar nobody measured.
+pub struct Transfer {
+    done: std::sync::atomic::AtomicU64,
+    total: std::sync::atomic::AtomicU64,
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+impl Default for Transfer {
+    fn default() -> Self {
+        Self {
+            done: std::sync::atomic::AtomicU64::new(0),
+            total: std::sync::atomic::AtomicU64::new(u64::MAX),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl Transfer {
+    pub fn done(&self) -> u64 {
+        self.done.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn set_done(&self, n: u64) {
+        self.done.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn add(&self, n: u64) {
+        self.done.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// `None` until the size is known.
+    pub fn total(&self) -> Option<u64> {
+        match self.total.load(std::sync::atomic::Ordering::Relaxed) {
+            u64::MAX => None,
+            n => Some(n),
+        }
+    }
+    pub fn set_total(&self, n: u64) {
+        self.total.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Ask the mover to stop. It checks between chunks and cleans up after
+    /// itself — a cancelled upload is removed on the far side, a cancelled
+    /// download leaves nothing under any name.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// The error a cancelled transfer returns. Matched by text at the IPC edge,
+/// so the UI can say "cancelled" rather than "failed".
+pub const CANCELLED: &str = "cancelled";
+
+fn bail_if_cancelled(progress: &Transfer) -> anyhow::Result<()> {
+    anyhow::ensure!(!progress.is_cancelled(), CANCELLED);
+    Ok(())
+}
 
 /// A non-text file, encoded for the webview.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -95,12 +162,14 @@ pub trait FileSystem: Send + Sync {
     ///
     /// The path for uploads of any size: nothing holds the whole file in memory,
     /// so there is no ceiling but the far side's disk. Same refusal to clobber.
-    /// `sent` counts bytes as they are handed over, for progress.
+    /// `progress.done` counts bytes as they are handed over. A cancel stops the
+    /// stream and the partial file is removed on the far side — never left
+    /// behind looking complete.
     async fn upload_file(
         &self,
         path: &str,
         local: &std::path::Path,
-        sent: &std::sync::atomic::AtomicU64,
+        progress: &Transfer,
     ) -> anyhow::Result<()>;
 
     /// Copy a file off the target and onto this machine.
@@ -112,7 +181,12 @@ pub trait FileSystem: Send + Sync {
     /// `dest` must not already exist. Refusing to clobber rather than
     /// overwriting is the same rule create and rename follow: the name here is
     /// chosen by the *file*, not typed, so a collision is the likely accident.
-    async fn download(&self, path: &str, dest: &std::path::Path) -> anyhow::Result<u64>;
+    ///
+    /// `progress` learns the size once known and counts bytes written; a cancel
+    /// returns [`CANCELLED`] between chunks. `dest` is a *staging* name — the
+    /// caller renames it into place only on success, so a failed download never
+    /// leaves a truncated file under the name the operator will look for.
+    async fn download(&self, path: &str, dest: &std::path::Path, progress: &Transfer) -> anyhow::Result<u64>;
 
     /// Rename or move. Fails if the destination exists.
     async fn rename(&self, from: &str, to: &str) -> anyhow::Result<()>;
@@ -125,19 +199,44 @@ pub trait FileSystem: Send + Sync {
     /// Find text under `root`. See `search` for why this runs `grep` on the
     /// machine that owns the disk rather than walking the tree from here.
     async fn search(&self, root: &str, query: &SearchQuery) -> anyhow::Result<Vec<SearchHit>>;
+
+    /// [`FileSystem::read_file`] plus a version token for a later
+    /// [`FileSystem::write_versioned`]. `None` where the backend cannot vouch for
+    /// one — the shell path — and then no conflict check is possible.
+    async fn read_versioned(&self, path: &str) -> anyhow::Result<(FileContent, Option<String>)> {
+        Ok((self.read_file(path).await?, None))
+    }
+
+    /// Save, refusing with a conflict when the file's version on disk is no
+    /// longer `expected`. Returns the new version where there is one. The
+    /// default (shell path) cannot check and simply writes.
+    async fn write_versioned(
+        &self,
+        path: &str,
+        contents: &str,
+        expected: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        let _ = expected;
+        self.write_file(path, contents).await?;
+        Ok(None)
+    }
 }
 
 /// The remote half of an upload: `cat` from stdin into a new file.
 ///
 /// `Tty::None` is load-bearing: a PTY would translate the byte stream on its way
 /// through and quietly corrupt anything that is not text.
-fn upload_spec(path: &str) -> CommandSpec {
-    CommandSpec::new("sh").arg("-c").arg(protocol::upload_script(path)).tty(Tty::None)
+fn upload_spec(path: &str, size: u64) -> CommandSpec {
+    CommandSpec::new("sh").arg("-c").arg(protocol::upload_script(path, size)).tty(Tty::None)
 }
 
 /// Read [`protocol::upload_script`]'s one-byte verdict.
 fn upload_outcome(path: &str, out: &rmux_transport::Output) -> anyhow::Result<()> {
     anyhow::ensure!(out.stdout.trim_end() != "X", "{path} already exists");
+    anyhow::ensure!(
+        out.stdout.trim_end() != "S",
+        "{path} was not uploaded — the stream stopped short, and the partial file was removed"
+    );
     anyhow::ensure!(
         out.status == 0 && out.stdout.trim_end() == "O",
         "failed to upload {path}: {}",
@@ -242,24 +341,45 @@ impl<T: Target> FileSystem for TargetFs<T> {
     }
 
     async fn upload(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()> {
-        let out = self.target.exec_with_input(&upload_spec(path), bytes).await?;
+        let out = self.target.exec_with_input(&upload_spec(path, bytes.len() as u64), bytes).await?;
         upload_outcome(path, &out)
     }
 
+    /// A cancel *drops* the stream: our end of the pipe closes, the far `cat`
+    /// sees end-of-input early, and the script's own length check removes the
+    /// short file. The cleanup therefore lives on the side that owns the disk,
+    /// and it covers a connection that dropped as well as a cancel.
     async fn upload_file(
         &self,
         path: &str,
         local: &std::path::Path,
-        sent: &std::sync::atomic::AtomicU64,
+        progress: &Transfer,
     ) -> anyhow::Result<()> {
-        let out = self.target.exec_with_input_file(&upload_spec(path), local, sent).await?;
-        upload_outcome(path, &out)
+        let size = std::fs::metadata(local)?.len();
+        progress.set_total(size);
+        let sent = std::sync::atomic::AtomicU64::new(0);
+        let spec = upload_spec(path, size);
+        let upload = self.target.exec_with_input_file(&spec, local, &sent);
+        tokio::pin!(upload);
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                out = &mut upload => {
+                    progress.set_done(sent.load(std::sync::atomic::Ordering::Relaxed));
+                    return upload_outcome(path, &out?);
+                }
+                _ = tick.tick() => {
+                    progress.set_done(sent.load(std::sync::atomic::Ordering::Relaxed));
+                    bail_if_cancelled(progress)?;
+                }
+            }
+        }
     }
 
     /// Windowed, so peak memory is one chunk rather than the whole file — see
     /// [`protocol::read_chunk_base64_script`] for why a download cannot just
     /// stream raw bytes.
-    async fn download(&self, path: &str, dest: &std::path::Path) -> anyhow::Result<u64> {
+    async fn download(&self, path: &str, dest: &std::path::Path, progress: &Transfer) -> anyhow::Result<u64> {
         use std::io::Write as _;
 
         let size = match protocol::parse_size(&self.run(&protocol::file_size_script(path)).await?)? {
@@ -273,11 +393,14 @@ impl<T: Target> FileSystem for TargetFs<T> {
             }
         };
 
+        progress.set_total(size);
+
         // `create_new`, for the reason the trait states: refuse, never clobber.
         let mut file = std::fs::File::options().write(true).create_new(true).open(dest)?;
 
         let mut written = 0u64;
         while written < size {
+            bail_if_cancelled(progress)?;
             let len = DOWNLOAD_CHUNK.min(size - written);
             let out = self.run(&protocol::read_chunk_base64_script(path, written, len)).await?;
             let encoded: String =
@@ -298,6 +421,7 @@ impl<T: Target> FileSystem for TargetFs<T> {
 
             file.write_all(&bytes)?;
             written += len;
+            progress.set_done(written);
         }
 
         file.flush()?;
@@ -423,17 +547,32 @@ impl FileSystem for LocalFs {
     /// A copy. There is no protocol here and no chunking, because there is no
     /// wire — which is the whole point of the seam: the *feature* asks for a
     /// download and never learns which of these ran.
-    async fn download(&self, path: &str, dest: &std::path::Path) -> anyhow::Result<u64> {
+    async fn download(&self, path: &str, dest: &std::path::Path, progress: &Transfer) -> anyhow::Result<u64> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
         let meta = tokio::fs::metadata(path).await?;
         anyhow::ensure!(!meta.is_dir(), "{path} is a folder — download works on one file at a time");
-        // Refuse rather than clobber, exactly as the remote path does. `copy`
-        // would happily overwrite, so the refusal has to be made here.
-        anyhow::ensure!(
-            tokio::fs::try_exists(dest).await.map(|e| !e).unwrap_or(true),
-            "{} already exists",
-            dest.display()
-        );
-        Ok(tokio::fs::copy(path, dest).await?)
+        progress.set_total(meta.len());
+        // Refuse rather than clobber, exactly as the remote path does —
+        // `create_new` is the atomic form of that refusal.
+        let mut out = tokio::fs::OpenOptions::new().write(true).create_new(true).open(dest).await?;
+        let mut source = tokio::fs::File::open(path).await?;
+        // A loop rather than `fs::copy` so progress moves and a cancel lands
+        // between chunks instead of after the whole file.
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut written = 0u64;
+        loop {
+            bail_if_cancelled(progress)?;
+            let n = source.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n]).await?;
+            written += n as u64;
+            progress.set_done(written);
+        }
+        out.flush().await?;
+        Ok(written)
     }
 
     async fn upload(&self, path: &str, bytes: &[u8]) -> anyhow::Result<()> {
@@ -460,9 +599,9 @@ impl FileSystem for LocalFs {
         &self,
         path: &str,
         local: &std::path::Path,
-        sent: &std::sync::atomic::AtomicU64,
+        progress: &Transfer,
     ) -> anyhow::Result<()> {
-        use tokio::io::AsyncWriteExt as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         // `create_new`, for the same reason as `upload`.
         let mut file = tokio::fs::OpenOptions::new()
@@ -475,11 +614,28 @@ impl FileSystem for LocalFs {
                 _ => e.into(),
             })?;
         let mut source = tokio::fs::File::open(local).await?;
-        let copied = tokio::io::copy(&mut source, &mut file).await?;
-        file.flush().await?;
-        // A local copy is disk speed; one update at the end is all it earns.
-        sent.store(copied, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+        progress.set_total(source.metadata().await?.len());
+        let copy = async {
+            let mut buf = vec![0u8; 1024 * 1024];
+            loop {
+                bail_if_cancelled(progress)?;
+                let n = source.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                file.write_all(&buf[..n]).await?;
+                progress.add(n as u64);
+            }
+            file.flush().await?;
+            anyhow::Ok(())
+        }
+        .await;
+        // The file is ours — `create_new` made it a moment ago — so removing a
+        // partial one cannot touch anything the operator had.
+        if copy.is_err() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        copy
     }
 
     async fn rename(&self, from: &str, to: &str) -> anyhow::Result<()> {
@@ -563,7 +719,9 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 /// Decide whether bytes are editable text.
-fn classify_content(bytes: Vec<u8>) -> FileContent {
+///
+/// Public because `fs-serve`'s client classifies with the same rule.
+pub fn classify_content(bytes: Vec<u8>) -> FileContent {
     if protocol::looks_binary(&bytes) {
         return FileContent::Binary { bytes: bytes.len() as u64 };
     }

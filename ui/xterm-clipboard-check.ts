@@ -10,6 +10,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { attachClipboard, copyAll, copySelection, copyViewport } from "./src/lib/terminal-clipboard";
 import { MouseModeTracker } from "./src/lib/mouse-modes";
+import { replayMouseRepair } from "./src/lib/replay-modes";
 
 const lines: string[] = [];
 const say = (s: string) => lines.push(s);
@@ -329,6 +330,63 @@ setTimeout(async () => {
   drag();
   await new Promise((r) => setTimeout(r, 60));
   say(`mouse reports after restoring: ${reports}`);
+
+  // --- a replay that lost Claude's mouse modes --------------------------------
+  // What an older daemon replays minutes into a fullscreen session: the alt
+  // screen is entered, the `?1002h`/`?1006h` from startup were drained. A fresh
+  // terminal, as an adopting pane builds one.
+  const host2 = document.createElement("div");
+  host2.style.height = "200px";
+  document.body.appendChild(host2);
+  const replayed = new Terminal({ fontSize: 12, scrollback: 100 });
+  replayed.open(host2);
+  let wheelData = "";
+  replayed.onData((d) => {
+    wheelData += d;
+  });
+  const wheel = () => {
+    const el = host2.querySelector(".xterm-screen") as HTMLElement;
+    const r = el.getBoundingClientRect();
+    for (const deltaY of [-120, -120, 120]) {
+      el.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          deltaY,
+          deltaMode: 0,
+          clientX: r.left + 20,
+          clientY: r.top + 20,
+        }),
+      );
+    }
+  };
+  await new Promise<void>((r) => replayed.write("\x1b[?1049h\x1b[H\x1b[2Jclaude composer\r\n", () => r()));
+  wheelData = "";
+  wheel();
+  await new Promise((r) => setTimeout(r, 80));
+  const arrowsBefore = /\x1b(\[|O)[AB]/.test(wheelData);
+  say(`replay: alt screen, no mouse mode → tracking ${replayed.modes.mouseTrackingMode}`);
+  say(`replay: wheel before the repair becomes arrow keys: ${arrowsBefore} ${JSON.stringify(wheelData)}`);
+  const repair = replayMouseRepair({
+    provider: "claude",
+    fullscreen: true,
+    buffer: replayed.buffer.active.type,
+    mouseTracking: replayed.modes.mouseTrackingMode,
+    selectMode: false,
+  });
+  say(`replay: repair decided: ${JSON.stringify(repair)}`);
+  await new Promise<void>((r) => replayed.write(repair, () => r()));
+  wheelData = "";
+  wheel();
+  await new Promise((r) => setTimeout(r, 80));
+  const arrowsAfter = /\x1b(\[|O)[AB]/.test(wheelData);
+  const sgrAfter = /\x1b\[<6[45];/.test(wheelData);
+  say(`replay: after the repair tracking is ${replayed.modes.mouseTrackingMode}`);
+  say(`replay: wheel after the repair: arrows ${arrowsAfter}, SGR wheel reports ${sgrAfter} ${JSON.stringify(wheelData)}`);
+  const replayOk =
+    arrowsBefore && repair !== "" && replayed.modes.mouseTrackingMode !== "none" && !arrowsAfter && sgrAfter;
+  say(`replay repair works: ${replayOk}`);
+  (window as unknown as { __replayRepair: boolean }).__replayRepair = replayOk;
 
   const summary = `[xterm-probe]\n${lines.join("\n")}`;
   document.getElementById("out")!.textContent = summary;

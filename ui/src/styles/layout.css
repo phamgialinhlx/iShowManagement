@@ -1,0 +1,411 @@
+/*
+ * The pane area: herdr's tab bar and split tree (`layout-tree.ts`,
+ * `WorkspaceDeck.tsx`, `TabBar.tsx`).
+ *
+ * Kept out of `signal-room.css` on purpose — that file is the design system and
+ * the theme; this is the structure of one component. Every colour is a token
+ * with a fallback, so a theme that defines herdr's names (`--accent`,
+ * `--surface0`, `--overlay0/1`) restyles this without anyone editing it, and a
+ * theme that does not still renders from the shipped tokens.
+ */
+
+.pane-area {
+  /* Each tile's tab bar is this tall; its active tab is placed below it. One
+     number, because the bar and the panes are positioned separately (see
+     `SplitTab` — tabs are flat so a project moving tile never remounts). */
+  --tile-bar-h: 22px;
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0%;
+  flex-direction: column;
+}
+
+/* ── project grid ────────────────────────────────────────────────────────── */
+
+.tile-grid {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0%;
+}
+.project-tile {
+  position: absolute;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* Unfocused tiles keep their bar but stand back: the active tab is the one loud
+   element on screen, so only the focused tile's wears the accent. Its ground
+   stays distinct from the inactive tabs, so each tile still says which tab it
+   is showing. */
+.tab-bar[data-focused="false"] .tab[data-active="true"] {
+  color: var(--text);
+  background: var(--surface1, var(--hover));
+}
+.tab-bar[data-focused="false"] {
+  opacity: 0.78;
+}
+.tab-bar[data-focused="false"]:hover {
+  opacity: 1;
+}
+.tile-close {
+  margin-left: 2px;
+}
+/* Tile seams are always drawn (a hairline), unlike pane seams: two projects
+   side by side with nothing between them read as one project's split. */
+.tile-divider {
+  z-index: 7;
+}
+.tile-divider::after {
+  background: var(--border-strong, var(--border));
+}
+.tile-grid[data-dragging="true"] .split-leaf,
+.tile-grid[data-dragging="true"] .project-tile {
+  pointer-events: none;
+}
+/* Exists only while a sidebar project is being dragged, so it never sits over a
+   terminal that a file might be dropped on. */
+.tile-drop-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+}
+.tile-drop-line {
+  position: absolute;
+  pointer-events: none;
+  background: var(--accent, rgb(var(--primary)));
+}
+.tile-drop-line[data-side="left"],
+.tile-drop-line[data-side="right"] {
+  width: 3px;
+  margin-left: -1.5px;
+}
+.tile-drop-line[data-side="up"],
+.tile-drop-line[data-side="down"] {
+  height: 3px;
+  margin-top: -1.5px;
+}
+
+/* Drag-to-split: a transparent layer over every visible pane, present only
+   while a session or tab is being dragged (`PaneDropZone`). The half the
+   session will occupy is washed in the accent before release. */
+.pane-drop-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+}
+.pane-drop-layer[data-refused="server"] {
+  cursor: not-allowed;
+  background: color-mix(in srgb, var(--app-bg, #000) 35%, transparent);
+}
+.pane-drop-half {
+  position: absolute;
+  pointer-events: none;
+  border-radius: var(--radius, 0);
+  border: 1px solid var(--accent, rgb(var(--primary)));
+  background: color-mix(in srgb, var(--accent, rgb(var(--primary))) 22%, transparent);
+  transition: left 80ms ease-out, top 80ms ease-out, width 80ms ease-out, height 80ms ease-out;
+}
+.pane-drop-hint {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  padding: 3px 8px;
+  border-radius: var(--radius, 0);
+  white-space: nowrap;
+  color: var(--text);
+  background: var(--surface0, var(--app-bg));
+  border: 1px solid var(--border-strong, var(--overlay0));
+}
+
+/* ── tab bar ─────────────────────────────────────────────────────────────── */
+
+.tab-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-bg, transparent);
+}
+
+/* Overflow scrolls sideways rather than wrapping: a second row of tabs would
+   take a row from every terminal below it, and FitAddon would notice. */
+.tab-strip {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  max-width: 220px;
+  padding: 0 7px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: calc(10px * var(--font-scale, 1));
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--overlay1, var(--text-soft));
+  background: var(--surface0, var(--hover));
+  cursor: default;
+  user-select: none;
+}
+.tab:hover {
+  color: var(--text);
+}
+/* The focused tab: accent ground, dark text — herdr's one loud element. Carried
+   by the ground *and* the weight of contrast, not by tone alone. */
+.tab[data-active="true"] {
+  color: var(--accent-text, var(--app-bg, #11111b));
+  background: var(--accent, rgb(var(--primary)));
+}
+/* A tab someone named is bold; one named by its session is not — so the strip
+   says which labels will stay put and which follow their pane. */
+.tab[data-renamed="true"] {
+  font-weight: 700;
+}
+.tab[data-drop="true"] {
+  box-shadow: inset 2px 0 0 var(--accent, rgb(var(--primary)));
+}
+.tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tab-close {
+  display: inline-grid;
+  width: 10px;
+  height: 10px;
+  place-items: center;
+  opacity: 0;
+  color: inherit;
+}
+.tab:hover .tab-close,
+.tab-close:focus-visible {
+  opacity: 0.7;
+}
+.tab-close:hover {
+  opacity: 1;
+}
+.tab-rename {
+  width: 120px;
+  height: 14px;
+  padding: 0 3px;
+  border: 1px solid var(--border);
+  outline: none;
+  font: inherit;
+  color: var(--text);
+  background: var(--app-bg, #11111b);
+}
+
+.tab-add,
+.pane-tool {
+  display: inline-grid;
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 16px;
+  align-self: center;
+  place-items: center;
+  padding: 0 4px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: calc(10px * var(--font-scale, 1));
+  color: var(--overlay1, var(--text-soft));
+}
+.tab-add:hover,
+.pane-tool:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface0, var(--hover));
+}
+.pane-tool:disabled {
+  opacity: 0.35;
+}
+.pane-tool[aria-pressed="true"] {
+  color: var(--text);
+  background: var(--surface0, var(--hover));
+}
+.pane-tools {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 1px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+}
+
+/* ── split tree ──────────────────────────────────────────────────────────── */
+
+/* Every tab's panes are absolutely placed from their computed rectangles, so a
+   split, a close or a swap moves boxes rather than re-nesting them — React
+   keeps each pane mounted across any reshape, and a terminal is never torn
+   down and replayed because its neighbour changed. */
+.split-tab {
+  position: absolute;
+}
+
+.split-leaf {
+  position: absolute;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* The pane's own frame. The focused one is drawn in the accent; the rest in
+   the plain border. The border is on this wrapper, never on the element
+   FitAddon measures (see CLAUDE.md) — the terminal host sits inside it. */
+.split-leaf > .split-frame {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0%;
+  flex-direction: column;
+  overflow: hidden;
+}
+.split-leaf[data-focused="true"] > .split-frame {
+  border-color: var(--accent, rgb(var(--primary)));
+}
+
+/* Dividers are the drag handles: a few pixels of hit area centred on the seam,
+   drawn only as a hairline when hovered or dragged. */
+.split-divider {
+  position: absolute;
+  z-index: 6;
+  touch-action: none;
+}
+.split-divider[data-dir="row"] {
+  width: 7px;
+  margin-left: -3.5px;
+  cursor: col-resize;
+}
+.split-divider[data-dir="col"] {
+  height: 7px;
+  margin-top: -3.5px;
+  cursor: row-resize;
+}
+.split-divider::after {
+  position: absolute;
+  content: "";
+  background: transparent;
+}
+.split-divider[data-dir="row"]::after {
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+}
+.split-divider[data-dir="col"]::after {
+  top: 3px;
+  right: 0;
+  left: 0;
+  height: 1px;
+}
+.split-divider:hover::after,
+.split-divider[data-dragging="true"]::after {
+  background: var(--accent, rgb(var(--primary)));
+}
+/* While dragging, the panes underneath must not take the pointer — an iframe
+   or a terminal under the cursor would swallow the move events. */
+.split-tab[data-dragging="true"] .split-leaf {
+  pointer-events: none;
+}
+
+.pane-empty {
+  display: grid;
+  height: 100%;
+  flex: 1 1 0%;
+  place-items: center;
+}
+
+/* ── prefix mode bar (`ModeBar`, `prefix-runtime.ts`) ────────────────────── */
+
+/* Takes over the footer row while a mode is active — overlaid rather than
+   swapped in, so the footer keeps its height and no terminal refits because a
+   mode was entered. Opaque on purpose: hints over half-visible footer chips
+   read as one garbled line. */
+.mode-bar {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0 12px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: calc(10px * var(--font-scale, 1));
+  color: var(--subtext0, var(--text-soft));
+  background: var(--surface0, var(--app-bg, #11111b));
+}
+.mode-pill {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--on-accent, var(--app-bg, #11111b));
+  background: var(--accent, rgb(var(--primary)));
+  border-radius: var(--radius, 0);
+}
+.mode-pill[data-mode="resize"] {
+  background: var(--mauve, #cba6f7);
+}
+.mode-hints {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mode-hints b {
+  font-weight: 600;
+  color: var(--text);
+}
+.mode-space {
+  padding: 0 4px;
+  color: var(--overlay1, var(--text-faint));
+}
+.mode-space[data-on="true"] {
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--accent, rgb(var(--primary)));
+}
+.mode-toast {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text);
+}
+
+/* A spawned child that ended on its host: one quiet line above the pane, which
+   is kept so its last output stays readable. Not red — nothing needs acting on
+   now; the work is simply over. */
+.child-ended {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border, var(--surface1));
+  background: var(--surface0, transparent);
+}

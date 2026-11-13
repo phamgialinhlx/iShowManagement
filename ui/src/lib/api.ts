@@ -1,4 +1,4 @@
-import { hasBackend, invoke, isTauri } from "./bridge";
+import { hasBackend, invoke, isTauri, type Channel } from "./bridge";
 
 import type { Theme } from "./theme";
 
@@ -7,7 +7,14 @@ import type { Theme } from "./theme";
  * operator's saved themes. The UI merges its code-defined built-ins on top — a
  * built-in may be `active` without appearing in `userThemes`.
  */
-export type ThemeState = { active: string; userThemes: Theme[] };
+export type ThemeState = {
+  active: string;
+  userThemes: Theme[];
+  /** Follow the OS light/dark appearance. Absent from an older backend. */
+  autoSwitch?: boolean;
+  lightName?: string;
+  darkName?: string;
+};
 
 /** What a Redstone deployment offers. All false on one without the bridge. */
 export type RedstoneCapabilities = {
@@ -94,6 +101,15 @@ export type TargetRef = {
   host?: string;
   user?: string;
   port?: number;
+  /**
+   * Absolute local path of a private key chosen for this server (Connect a
+   * server › KEY FILE). Offered to ssh as one more `-i`, additively — the
+   * operator's own config and rmux's generated key are still tried.
+   *
+   * **Not part of the server's identity**: `serverId` ignores it, so choosing or
+   * changing a key never re-keys the server's projects and sessions.
+   */
+  identity?: string;
 };
 
 /** A port something is listening on, on the target. */
@@ -196,6 +212,34 @@ export type GitStatus = {
   /** Absent when no remote-tracking branch is configured — not the same as 0/0. */
   upstream: string | null;
   changes: GitChange[];
+};
+
+/**
+ * A sub-session an agent spawned on its host (`rmux spawn`), as recorded in the
+ * host's `~/.rmux/children.json` — `host_children`. `session` and `parent` are
+ * daemon session names; `parent` is null for a child with no rmux parent.
+ */
+export type HostChild = {
+  session: string;
+  parent: string | null;
+  kind: "claude" | "pi" | "codex" | "terminal";
+  cwd: string;
+  name: string;
+  createdAt: number;
+  /** The credential set the host bound it to (inherited from its parent). */
+  profile?: string;
+  /** The fallback chain it inherited. */
+  chain?: string;
+};
+
+/** The sidebar's branch line — `git_branch`. `null` outside a work tree. */
+export type GitBranch = {
+  branch: string;
+  ahead: number;
+  behind: number;
+  /** Absent when no remote-tracking branch is configured; the arrows are then
+   *  omitted rather than reading as "in sync". */
+  upstream: string | null;
 };
 
 export type GitCommit = {
@@ -326,8 +370,21 @@ export type ProcessInfo = {
  *  connecting always uses `alias`, which ssh resolves. */
 export type ConfigHost = {
   alias: string;
+  /** Display hints only — never the connection target (ssh resolves the alias). */
   hostname?: string;
   user?: string;
+  port?: string;
+};
+
+/** What `ssh_identity_check` found about a picked key file. Never its contents. */
+export type IdentityCheck = {
+  path: string;
+  exists: boolean;
+  readable: boolean;
+  isPublic: boolean;
+  privateSibling?: string | null;
+  mode?: number | null;
+  tooOpen: boolean;
 };
 
 /** A Claude conversation, resumable by id. */
@@ -444,6 +501,49 @@ export type GlassOptions = {
 export type SearchQuery = { text: string; caseSensitive?: boolean; regex?: boolean };
 export type SearchHit = { path: string; line: number; text: string };
 
+/**
+ * One entry of a worktree mirror (`crates/rmux-app/src/worktree.rs`).
+ *
+ * `path` is relative to the root, `/`-separated. A non-UTF-8 byte in a real
+ * filename arrives as a private-use character that Rust maps back exactly, so
+ * the path is only ever handed back, never edited character by character.
+ * `version` is the mtime in nanoseconds, as a string — compared, never parsed.
+ */
+export type WorktreeEntry = {
+  path: string;
+  kind: "file" | "dir" | "symlink";
+  size: number;
+  version: string;
+  ignored: boolean;
+  /** A directory whose children are not in the mirror — list on demand. */
+  lazy: boolean;
+};
+
+export type WorktreeSnapshot = {
+  id: number;
+  root: string;
+  /** Patches with a `seq` at or below this are already in `entries`. */
+  seq: number;
+  entries: WorktreeEntry[];
+  scanned: boolean;
+  truncated: boolean;
+  watchLimited: boolean;
+};
+
+/** A `fs-worktree` event. */
+export type WorktreeEvent = { id: number; seq: number } & (
+  | { kind: "patch"; upserts?: WorktreeEntry[]; removes?: string[]; renames?: { from: string; to: string }[] }
+  | { kind: "scanned"; truncated: boolean; watchLimited: boolean }
+  | { kind: "git" }
+  | { kind: "down" }
+);
+
+/** A file and the version token a save must quote. `null` on the shell path. */
+export type Versioned = { content: FileContent; version: string | null };
+
+/** How Rust marks a save refused because the file changed on disk. */
+export const CONFLICT_PREFIX = "conflict: ";
+
 export type LogStatus = { path: string; bytes: number; hasPrevious: boolean };
 
 /**
@@ -455,6 +555,9 @@ export type LogStatus = { path: string; bytes: number; hasPrevious: boolean };
  */
 export type Downloaded = { path: string; bytes: number };
 
+/** `fs_download`'s progress channel, ~4/s. `total` is null until the size is known. */
+export type DownloadProgress = { id: string; done: number; total: number | null };
+
 /** One environment variable of a model profile, as the UI is allowed to see it. */
 export type ProfileVar = {
   key: string;
@@ -463,18 +566,93 @@ export type ProfileVar = {
   secret: boolean;
 };
 
+/**
+ * Which agent a profile's credentials are for. The host keeps one credential
+ * environment per kind and gives a session only its own, so a DeepSeek key never
+ * reaches a Claude session. Profiles saved before kinds existed load as `claude`.
+ */
+export type ProfileKind = "claude" | "deepseek" | "openai";
+
+/** The profile kind a session of each agent runs under; `undefined` = none. */
+export function profileKindFor(kind: string): ProfileKind | undefined {
+  if (kind === "claude") return "claude";
+  if (kind === "dsh") return "deepseek";
+  if (kind === "codex") return "openai";
+  return undefined;
+}
+
 export type ModelProfile = {
   id: string;
   name: string;
+  kind: ProfileKind;
   /**
-   * Where this profile sends requests — and the token — to. Absent means
-   * Anthropic. Shown rather than inferred from the name: a profile called
-   * "GLM" can carry any URL at all.
+   * Where this profile sends requests — and the token — to. Absent means the
+   * kind's own provider (Anthropic, DeepSeek, OpenAI). Shown rather than
+   * inferred from the name: a profile called "GLM" can carry any URL at all.
    */
   endpoint?: string;
   hasCredential: boolean;
   vars: ProfileVar[];
 };
+
+/** A fallback chain: Claude profiles tried in order on a usage limit. */
+export type ProfileChain = {
+  /** Always starts `chain-`, so it never collides with a profile id. */
+  id: string;
+  name: string;
+  kind: ProfileKind;
+  members: string[];
+  /** Also switch on 529 / overloaded. Off by default — overload is not the account. */
+  switchOnOverloaded: boolean;
+};
+
+export type ChainsView = {
+  chains: ProfileChain[];
+  /** Kind → profile id: what a child of a different kind binds to. */
+  defaults: Partial<Record<ProfileKind, string>>;
+};
+
+/** Whether a session's `modelProfile` names a chain rather than one profile. */
+export const isChainId = (id: string | undefined | null): id is string => !!id && id.startsWith("chain-");
+
+/** One account switch recorded on a host (`~/.rmux/fallback.json`). */
+export type FallbackRecord = {
+  session: string;
+  chain: string;
+  from: string;
+  fromLabel?: string;
+  to?: string;
+  toLabel?: string;
+  /** `usage limit`, `rate limit`, `overloaded`, `operator`. */
+  reason: string;
+  pattern?: string;
+  line?: string;
+  source?: string;
+  /** `switched`, `switched_back`, `end_of_chain…`, `failed: …`. */
+  outcome: string;
+  /** Unix seconds. */
+  at: number;
+  resetsAt?: number;
+};
+
+export type FallbackBinding = {
+  session: string;
+  binding?: {
+    kind: ProfileKind;
+    set: string;
+    chain?: {
+      id: string;
+      members: string[];
+      active: string;
+      exhausted?: Record<string, { at: number; resetsAt?: number }>;
+      switchOnOverloaded?: boolean;
+    };
+  };
+  labels?: Record<string, string>;
+  since: number;
+};
+
+export type FallbackLog = { switches: FallbackRecord[]; bindings: FallbackBinding[] };
 
 export type ParsedProfile = {
   vars: Record<string, string>;
@@ -683,6 +861,23 @@ export const api = {
   fsSearch: (target: TargetRef, root: string, query: SearchQuery) =>
     call<SearchHit[]>("fs_search", { target, root, query }),
 
+  /**
+   * Open (or join) the live mirror of a folder: the whole tree now, then
+   * `fs-worktree` patches as the disk changes. Rejects with `unsupported: …` on
+   * a host that is on the shell path (Windows, an older agent) — list lazily.
+   */
+  fsWorktreeOpen: (target: TargetRef, root: string) =>
+    call<WorktreeSnapshot>("fs_worktree_open", { target, root }),
+  /** Read with a version token, for an editor that will save the file back. */
+  fsReadVersioned: (target: TargetRef, path: string) =>
+    call<Versioned>("fs_read_versioned", { target, path }),
+  /**
+   * Save, refusing (with an error starting `CONFLICT_PREFIX`) when the file
+   * changed on disk since `expected` was read. Resolves to the new version.
+   */
+  fsWriteVersioned: (target: TargetRef, path: string, contents: string, expected: string | null) =>
+    call<string | null>("fs_write_versioned", { target, path, contents, expected }),
+
   /** Relaunch. Sessions survive it — they run under the agent on the target. */
   restartApp: () => call<void>("restart_app"),
 
@@ -698,6 +893,8 @@ export const api = {
   /** Create or update a user theme. Rust refuses a built-in name. */
   themeSave: (theme: Theme) => call<ThemeState>("theme_save", { theme }),
   themeSetActive: (name: string) => call<ThemeState>("theme_set_active", { name }),
+  themeSetAuto: (autoSwitch: boolean, lightName: string, darkName: string) =>
+    call<ThemeState>("theme_set_auto", { autoSwitch, lightName, darkName }),
   themeDelete: (name: string) => call<ThemeState>("theme_delete", { name }),
 
   jiraProfiles: () => call<JiraProfile[]>("jira_profiles"),
@@ -817,8 +1014,18 @@ export const api = {
    * otherwise be built, copied and parsed as one JavaScript string on the way to
    * a disk it never needed to bounce off.
    */
-  fsDownload: (target: TargetRef, path: string) =>
-    call<Downloaded>("fs_download", { target, path }),
+  fsDownload: (
+    target: TargetRef,
+    path: string,
+    transfer?: string,
+    progress?: Channel<DownloadProgress>,
+  ) => call<Downloaded>("fs_download", { target, path, transfer, progress }),
+
+  /** Stop a running download by the id it was started under; its staging file is removed. */
+  fsDownloadCancel: (transfer: string) => call<boolean>("fs_download_cancel", { transfer }),
+
+  /** Show a finished download in Finder (elsewhere: open its folder). Downloads folder only. */
+  fsRevealDownload: (path: string) => call<void>("fs_reveal_download", { path }),
 
   /**
    * Saved model configurations — Kimi, GLM, a gateway, a reseller.
@@ -830,12 +1037,42 @@ export const api = {
   modelProfiles: () => call<ModelProfile[]>("model_profiles"),
 
   /** What a pasted block would become, before anything is saved. */
-  modelProfileParse: (text: string) => call<ParsedProfile>("model_profile_parse", { text }),
+  modelProfileParse: (text: string, kind: ProfileKind = "claude") =>
+    call<ParsedProfile>("model_profile_parse", { text, kind }),
 
-  modelProfileSave: (id: string | null, name: string, text: string) =>
-    call<ModelProfile[]>("model_profile_save", { id, name, text }),
+  modelProfileSave: (id: string | null, name: string, text: string, kind: ProfileKind = "claude") =>
+    call<ModelProfile[]>("model_profile_save", { id, name, text, kind }),
 
   modelProfileDelete: (id: string) => call<ModelProfile[]>("model_profile_delete", { id }),
+
+  /**
+   * A Claude account profile from a subscription token (`claude setup-token`).
+   * Checked by prefix in Rust: an admin key or an API key is refused, with why.
+   */
+  modelProfileSaveToken: (id: string | null, name: string, token: string) =>
+    call<ModelProfile[]>("model_profile_save_token", { id, name, token }),
+
+  /** Fallback chains and each kind's default profile. */
+  modelChains: () => call<ChainsView>("model_chains"),
+  modelChainSave: (id: string | null, name: string, members: string[], switchOnOverloaded: boolean) =>
+    call<ChainsView>("model_chain_save", { id, name, members, switchOnOverloaded }),
+  modelChainDelete: (id: string) => call<ChainsView>("model_chain_delete", { id }),
+  modelProfileDefaultSet: (kind: ProfileKind, id: string | null) =>
+    call<ChainsView>("model_profile_default_set", { kind, id }),
+
+  /**
+   * Finish `claude setup-token` and save the token as a profile named `name`.
+   * The token goes from the CLI into the keychain; only the redacted view
+   * comes back.
+   */
+  claudeLoginSubmitProfile: (code: string, name: string) =>
+    call<ModelProfile[]>("claude_login_submit_profile", { code, name }),
+
+  /** Every account switch a chain made on this host, and current bindings. */
+  claudeFallbackLog: (target: TargetRef) => call<FallbackLog>("claude_fallback_log", { target }),
+  /** Move a chained session to `member` and relaunch it ("switch back"). */
+  claudeFallbackSwitch: (target: TargetRef, session: string, member: string) =>
+    call<void>("claude_fallback_switch", { target, session, member }),
 
   logStatus: () => call<LogStatus>("log_status"),
 
@@ -851,6 +1088,9 @@ export const api = {
   metricsSample: (target: TargetRef) => call<MetricsSample>("metrics_sample", { target }),
 
   /** Is this folder a checkout, and where is its root? */
+  /** Branch + ahead/behind for a project folder; `null` when it is not a repo. */
+  gitBranch: (target: TargetRef, folder: string) =>
+    call<GitBranch | null>("git_branch", { target, folder }),
   gitRepo: (target: TargetRef, folder: string) =>
     call<{ root: string | null }>("git_repo", { target, folder }),
   gitStatus: (target: TargetRef, root: string) => call<GitStatus>("git_status", { target, root }),
@@ -873,8 +1113,36 @@ export const api = {
     call<string>("docker_action", { target, id, action }),
   /** Sessions `rmux-agent` is holding on a host — the abandoned ones included. */
   hostSessions: (target: TargetRef) => call<AgentSession[]>("host_sessions", { target }),
+  /** Sub-sessions agents spawned on a host. A missing or unreadable file is
+   *  `[]`; only an unreachable host rejects. */
+  hostChildren: (target: TargetRef) => call<HostChild[]>("host_children", { target }),
 
   sshConfigHosts: () => call<ConfigHost[]>("ssh_config_hosts"),
+  /** Inspect a key file before offering it: public half? readable? too open? */
+  sshIdentityCheck: (path: string) => call<IdentityCheck>("ssh_identity_check", { path }),
+  /** TEST CONNECTION: one `uname -s` over a fresh connection with these settings. */
+  sshConnectionTest: (target: TargetRef) => call<string>("ssh_connection_test", { target }),
+  /** Generate rmux's key for this host if needed and install its public half. */
+  sshKeyInstall: (target: TargetRef) => call<string>("ssh_key_install", { target }),
+  /**
+   * The native file picker, for a private key. Opens in `~/.ssh`.
+   *
+   * Invoked as the plugin command directly rather than through
+   * `@tauri-apps/plugin-dialog`, which would be a JS dependency for one call.
+   * Needs `dialog:allow-open` in `capabilities/default.json` — without it the
+   * promise rejects and nothing appears.
+   */
+  pickKeyFile: (defaultPath?: string) =>
+    call<string | null>("plugin:dialog|open", {
+      options: {
+        title: "Choose a private key",
+        defaultPath,
+        multiple: false,
+        directory: false,
+        // A key has no extension; a filter would hide exactly the files wanted.
+        canCreateDirectories: false,
+      },
+    }),
 
   claudeSessions: (target: TargetRef, folder: string) =>
     call<ClaudeSessionInfo[]>("claude_list_sessions", { target, folder }),
@@ -895,6 +1163,14 @@ export const api = {
    *  conversation id (omit for the newest). Same shape as `claude_transcript`. */
   piTranscript: (target: TargetRef, cwd: string, session?: string, tailBytes?: number) =>
     call<Transcript>("pi_transcript", { target, cwd, session, tailBytes }),
+
+  /** Every recorded Codex conversation on a host, newest first — the resume list. */
+  codexListAllSessions: (target: TargetRef) =>
+    call<PiConversation[]>("codex_list_all_sessions", { target }),
+
+  /** A Codex conversation's rollout, tail only, parsed tolerantly. */
+  codexTranscript: (target: TargetRef, cwd: string, session?: string, tailBytes?: number) =>
+    call<Transcript>("codex_transcript", { target, cwd, session, tailBytes }),
 
   claudeEndSession: (target: TargetRef, sessionName: string) =>
     call<void>("claude_end_session", { target, sessionName }),

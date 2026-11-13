@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel, invoke } from "../lib/bridge";
 import "@xterm/xterm/css/xterm.css";
 
@@ -10,14 +9,16 @@ import { settleResize } from "../lib/terminal-resize";
 import { record } from "../lib/activity";
 import { attachImeReplace } from "../lib/ime-replace";
 import { attachClipboard } from "../lib/terminal-clipboard";
-import { gpuRendering, terminalTheme } from "../lib/terminal-theme";
+import { terminalTheme } from "../lib/terminal-theme";
 import { FOCUS_EVENT } from "../lib/shortcuts";
+import { registerPrefixTarget } from "../lib/prefix-runtime";
 import { readMonoStack } from "../lib/fonts";
 import { scaledFontSize, remeasureOnFontLoad } from "../lib/terminal-font";
 
 /** The size at 100%. Scaled by TEXT SIZE through xterm's own option. */
 const TERM_FONT_BASE = 13;
 import { PanelLoader } from "./PanelLoader";
+import { loadGpuRenderer } from "../lib/gpu-renderer";
 
 /**
  * A terminal.
@@ -44,6 +45,7 @@ export function TerminalView({
   session,
   sessionId,
   lowLatency,
+  run,
   ptyId,
   generation = 0,
   onOpened,
@@ -82,6 +84,11 @@ export function TerminalView({
    * than a history and an operator who never chose it must not lose scrollback.
    */
   lowLatency?: boolean;
+  /**
+   * A named program to run instead of the shell — a closed set the backend
+   * builds the line for (`terminal::Run`); the webview never sends a command.
+   */
+  run?: "codex-login";
   /** Existing PTY to reattach to. Absent means open a new one. */
   ptyId?: string;
   /**
@@ -190,14 +197,9 @@ export function TerminalView({
     // Skipped entirely when the operator has turned GPU rendering off — see
     // `gpuRendering`. Loading the addon and disposing it still creates and
     // loses a WebGL context, which is worse than never loading it.
-    try {
-      if (!gpuRendering()) throw new Error("gpu rendering is off");
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      xterm.loadAddon(webgl);
-    } catch {
-      // Canvas/DOM fallback is automatic.
-    }
+    // See `lib/gpu-renderer.ts`: also repaints after a wake, which can
+      // corrupt the glyph atlas without any context-loss event.
+      const gpu = loadGpuRenderer(xterm);
 
     // Returns a disposer: it also installs a window-level fallback for Ctrl+C
     // arriving while focus is off the terminal, which must come off with the
@@ -276,6 +278,7 @@ export function TerminalView({
             cwd,
             session,
             lowLatency,
+            run,
             cols: xterm.cols,
             rows: xterm.rows,
             output,
@@ -412,6 +415,7 @@ export function TerminalView({
       window.removeEventListener("rmux-theme", onTheme);
       onData.dispose();
       termRef.current = null;
+      gpu();
       xterm.dispose();
       // The PTY is deliberately left running. This view may be remounting, and
       // killing the shell here is what made the terminal flash and reset. It is
@@ -436,7 +440,14 @@ export function TerminalView({
       requestAnimationFrame(() => requestAnimationFrame(() => termRef.current?.focus()));
     };
     window.addEventListener(FOCUS_EVENT, onFocus);
-    return () => window.removeEventListener(FOCUS_EVENT, onFocus);
+    // The same terminal answers a literal prefix sent from outside any
+    // terminal (`prefix-runtime.ts`) — through `input`, so it takes onData's
+    // path to the pty like a typed key.
+    const unregister = registerPrefixTarget(sessionId, (d) => termRef.current?.input(d, true));
+    return () => {
+      window.removeEventListener(FOCUS_EVENT, onFocus);
+      unregister();
+    };
   }, [answersFocusRequests, sessionId]);
 
   return (

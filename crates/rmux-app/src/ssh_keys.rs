@@ -78,10 +78,47 @@ pub async fn ssh_key_install(target: TargetRef) -> Result<String, String> {
     })
 }
 
+/// What the connect dialog shows beside a picked key file. Never its contents.
+pub async fn ssh_identity_check(path: String) -> Result<keys::IdentityCheck, String> {
+    let p = std::path::PathBuf::from(path.trim());
+    if !p.is_absolute() {
+        return Err("choose the key with the file picker — the path must be absolute".into());
+    }
+    Ok(keys::check_identity(&p))
+}
+
+/// TEST CONNECTION: one `uname -s` over a fresh connection with exactly these
+/// settings — host verbatim, user, port, the chosen key and rmux's own.
+///
+/// **Builds the host id by hand rather than through `TargetRef::id`**, which
+/// registers the chosen key for every later connection. A test the operator
+/// then cancels must leave nothing behind.
+pub async fn ssh_connection_test(target: TargetRef) -> Result<String, String> {
+    let Some(alias) = target.host.clone().filter(|h| !h.trim().is_empty()) else {
+        return Ok("this machine needs no connection".into());
+    };
+    let host = rmux_transport::SshHostId { alias, user: target.user.clone(), port: target.port };
+    if let Some(raw) = target.identity.as_deref().filter(|r| !r.trim().is_empty()) {
+        if target.identity_path().is_none() {
+            return Err("the key path must be absolute".into());
+        }
+        if !std::path::Path::new(raw.trim()).is_file() {
+            return Err(format!("{raw} does not exist"));
+        }
+    }
+    rmux_ssh::probe::test_connection(&host, target.identity_path().as_deref()).await
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetArgs {
     pub target: TargetRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathArgs {
+    pub path: String,
 }
 
 pub fn register(r: &mut Registry) {
@@ -89,4 +126,8 @@ pub fn register(r: &mut Registry) {
     // ssh client there, so a key it generates is the key its connections offer.
     r.add("ssh_key_status", Web::Yes, |_, a: TargetArgs| ssh_key_status(a.target));
     r.add("ssh_key_install", Web::Yes, |_, a: TargetArgs| ssh_key_install(a.target));
+    // Desktop only: a key *file* is chosen with the native picker, and on the web
+    // these would let a browser probe paths on the machine rmux-web runs on.
+    r.add("ssh_identity_check", Web::No, |_, a: PathArgs| ssh_identity_check(a.path));
+    r.add("ssh_connection_test", Web::No, |_, a: TargetArgs| ssh_connection_test(a.target));
 }

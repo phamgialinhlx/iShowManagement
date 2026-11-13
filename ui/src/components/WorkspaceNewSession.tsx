@@ -3,7 +3,9 @@ import { motion, AnimatePresence } from "motion/react";
 
 import { api, type ClaudeSessionInfo, type ConfigHost, type TargetRef } from "../lib/api";
 import { FolderBrowser } from "./FolderBrowser";
+import { KeyChoiceField, TestConnection } from "./ConnectionFields";
 import { useWorkspace } from "../lib/workspace";
+import { formTarget, parsePort, targetLabel, type ConnectForm } from "../lib/connect-form";
 
 /**
  * Connect a Server, or add a Project to one.
@@ -11,8 +13,9 @@ import { useWorkspace } from "../lib/workspace";
  * The v3 split of the old `NewSession` wizard (which produced a fused session).
  * Two modes:
  *
- * - **server** — pick a host (`~/.ssh/config` aliases, or type one), connect to
- *   surface a bad alias / credential prompt, then register the Server.
+ * - **server** — pick a host (`~/.ssh/config` aliases, or type one), optionally
+ *   a user, a port and a key, connect to surface a bad alias / credential
+ *   prompt, then register the Server.
  * - **project** — on a Server already chosen, browse and pick a folder, then
  *   register the Project.
  *
@@ -40,11 +43,16 @@ export type NewMode = { kind: "server" } | { kind: "project"; serverId: string }
 type Step =
   | { kind: "host" }
   | { kind: "connecting"; label: string }
+  /** GENERATE AN RMUX KEY: connected and registered; now installing the key. */
+  | { kind: "installing"; label: string }
+  /** The outcome of the key install, said before the dialog closes. */
+  | { kind: "done"; label: string; text: string; ok: boolean }
   | { kind: "folder"; target: TargetRef; label: string; home: string; serverId: string };
 
 export function WorkspaceNewSession({ mode, onClose }: { mode: NewMode; onClose: () => void }) {
   const servers = useWorkspace((s) => s.servers);
   const connectServer = useWorkspace((s) => s.connectServer);
+  const setServerIdentity = useWorkspace((s) => s.setServerIdentity);
   const createProject = useWorkspace((s) => s.createProject);
   const addSession = useWorkspace((s) => s.addSession);
   const openSession = useWorkspace((s) => s.openSession);
@@ -53,7 +61,11 @@ export function WorkspaceNewSession({ mode, onClose }: { mode: NewMode; onClose:
   const [step, setStep] = useState<Step>({ kind: "host" });
   const [configHosts, setConfigHosts] = useState<ConfigHost[]>([]);
   const [filter, setFilter] = useState("");
-  const [typed, setTyped] = useState("");
+  const [form, setForm] = useState<ConnectForm>({ host: "", user: "", port: "", key: "default", keyPath: "" });
+  /** The config host the form was filled from — its HostName/User/Port are *hints*. */
+  const [hinted, setHinted] = useState<ConfigHost | null>(null);
+  const [keyBlocked, setKeyBlocked] = useState(false);
+  const hostRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Resume first: coming back to work is the common case, starting somewhere
@@ -75,8 +87,22 @@ export function WorkspaceNewSession({ mode, onClose }: { mode: NewMode; onClose:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const serverLabelOf = (t: TargetRef) =>
-    t.host ? `${t.user ? `${t.user}@` : ""}${t.host}${t.port ? `:${t.port}` : ""}` : "this machine";
+  const serverLabelOf = targetLabel;
+  const parsed = formTarget(form);
+  const portError = parsePort(form.port).error;
+  const setField = (patch: Partial<ConnectForm>) => setForm((f) => ({ ...f, ...patch }));
+
+  /**
+   * Fill the form from a `~/.ssh/config` host. **Only the alias is copied** —
+   * ssh resolves it with the operator's own config. HostName/User/Port become
+   * placeholders in the empty fields, display hints that never reach the
+   * target (CLAUDE.md: never resolve `~/.ssh/config` ourselves).
+   */
+  const pickConfigHost = (h: ConfigHost) => {
+    setForm((f) => ({ ...f, host: h.alias, user: "", port: "" }));
+    setHinted(h);
+    setError(null);
+  };
 
   // Project mode: connect to the chosen server (resolving home) as soon as we open.
   useEffect(() => {
@@ -115,23 +141,51 @@ export function WorkspaceNewSession({ mode, onClose }: { mode: NewMode; onClose:
     projects.filter((p) => p.serverId === serverId).map((p) => p.folder);
 
   /** Register the Server, then (server mode) close, or (project mode) browse folders. */
-  const connect = async (target: TargetRef, label: string) => {
+  const connect = async (target: TargetRef, label: string, generateKey = false) => {
     setError(null);
     setStep({ kind: "connecting", label });
+    let serverId: string;
+    let home: string;
     try {
       // Resolving home establishes the connection — a bad alias or credential
       // prompt surfaces here, before anything is registered.
-      const home = await api.fsHome(target);
-      const serverId = connectServer(target);
-      if (mode.kind === "server") {
-        onClose();
-        return;
-      }
-      setStep({ kind: "folder", target, label, home, serverId });
+      home = await api.fsHome(target);
+      serverId = connectServer(target);
+      // Re-adding a server that exists is how its key choice is changed here
+      // too: the dialog's choice is the one the operator just made.
+      if (target.host) setServerIdentity(serverId, target.identity);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setStep({ kind: "host" });
+      return;
     }
+    if (generateKey && target.host) {
+      // Over the connection just authenticated — the password typed a moment
+      // ago is what authorises writing `authorized_keys`, once.
+      setStep({ kind: "installing", label });
+      try {
+        const text = await api.sshKeyInstall(target);
+        setStep({ kind: "done", label, ok: true, text: `${text} · later connections use the key` });
+      } catch (e) {
+        setStep({
+          kind: "done",
+          label,
+          ok: false,
+          text: `connected and added, but the key was not installed: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+      return;
+    }
+    if (mode.kind === "server") {
+      onClose();
+      return;
+    }
+    setStep({ kind: "folder", target, label, home, serverId });
+  };
+
+  const connectForm = () => {
+    if (!parsed.target || keyBlocked) return;
+    void connect(parsed.target, serverLabelOf(parsed.target), form.key === "generate");
   };
 
   /** Project mode: connect to a known server and land on the folder browser. */
@@ -207,8 +261,11 @@ export function WorkspaceNewSession({ mode, onClose }: { mode: NewMode; onClose:
         animate={{ opacity: 1, y: 0 }}
         transition={{ type: "spring", stiffness: 300, damping: 28 }}
         onClick={(e) => e.stopPropagation()}
-        className="menu corner flex w-full max-w-[560px] flex-col gap-4 p-5"
-        style={{ height: 520 }}
+        className="menu corner flex w-full max-w-[560px] flex-col gap-4 overflow-y-auto p-5"
+        // A ceiling of its own, not only on the host list: the form under the
+        // list can outgrow a short window by itself (CLAUDE.md, "A dialog needs
+        // its own max-h").
+        style={{ height: projectMode ? 520 : 640, maxHeight: "calc(91vh - 16px)" }}
         onKeyDown={(e) => {
           if (e.key === "Escape") onClose();
         }}
@@ -220,7 +277,9 @@ export function WorkspaceNewSession({ mode, onClose }: { mode: NewMode; onClose:
               ? "choose a machine"
               : step.kind === "connecting"
                 ? "connecting"
-                : "choose a folder"}
+                : step.kind === "installing" || step.kind === "done"
+                  ? "rmux key"
+                  : "choose a folder"}
           </span>
           {existingServer && (
             <span className="micro ml-auto" style={{ color: "var(--text-soft)" }}>
@@ -236,12 +295,17 @@ export function WorkspaceNewSession({ mode, onClose }: { mode: NewMode; onClose:
               className="field"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="filter hosts…"
+              placeholder="filter ~/.ssh/config hosts…"
               spellCheck={false}
               autoComplete="off"
             />
 
-            <div className="inset min-h-0 flex-1 overflow-y-auto" style={{ border: "1px solid var(--border)" }}>
+            {/* The ceiling is on the element that scrolls, not on a wrapper: a
+                config with sixty hosts must not push the form off the dialog. */}
+            <div
+              className="inset min-h-[96px] flex-1 overflow-y-auto"
+              style={{ border: "1px solid var(--border)", maxHeight: 210 }}
+            >
               <button
                 type="button"
                 onClick={() => void connect({}, "this machine")}
@@ -257,11 +321,16 @@ export function WorkspaceNewSession({ mode, onClose }: { mode: NewMode; onClose:
                 <button
                   key={h.alias}
                   type="button"
-                  onClick={() => void connect({ host: h.alias }, h.alias)}
+                  // One click fills the form (port and key are still to choose);
+                  // a double click connects with the defaults, as it used to.
+                  onClick={() => pickConfigHost(h)}
+                  onDoubleClick={() => void connect({ host: h.alias }, h.alias)}
                   className="flex w-full flex-col px-2 py-[6px] text-left"
-                  title={`ssh ${h.alias}`}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover)")}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                  title={`ssh ${h.alias} — click to fill in, double-click to connect`}
+                  aria-pressed={hinted?.alias === h.alias && form.host === h.alias}
+                  style={{
+                    background: hinted?.alias === h.alias && form.host === h.alias ? "var(--hover)" : "transparent",
+                  }}
                 >
                   <span className="data truncate text-[12px]">
                     {h.alias}
@@ -273,31 +342,129 @@ export function WorkspaceNewSession({ mode, onClose }: { mode: NewMode; onClose:
                   </span>
                   <span className="micro truncate">
                     {[h.user, h.hostname].filter(Boolean).join("@") || "—"}
+                    {h.port ? `:${h.port}` : ""}
                   </span>
                 </button>
               ))}
             </div>
 
             <form
-              className="flex gap-2"
+              className="flex flex-col gap-3"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (typed.trim()) void connect({ host: typed.trim() }, typed.trim());
+                connectForm();
               }}
             >
-              <input
-                className="field flex-1"
-                value={typed}
-                onChange={(e) => setTyped(e.target.value)}
-                placeholder="or type an alias / user@host"
-                spellCheck={false}
-                autoComplete="off"
+              <div className="grid gap-2" style={{ gridTemplateColumns: "minmax(0,1fr) 120px 76px" }}>
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="micro">HOST</span>
+                  <input
+                    ref={hostRef}
+                    className="field"
+                    value={form.host}
+                    onChange={(e) => {
+                      setField({ host: e.target.value });
+                      if (hinted && e.target.value !== hinted.alias) setHinted(null);
+                    }}
+                    placeholder="alias or hostname"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="micro">USER</span>
+                  <input
+                    className="field"
+                    value={form.user}
+                    onChange={(e) => setField({ user: e.target.value })}
+                    // A hint from the config, never a value: left empty, ssh
+                    // applies the config's own User.
+                    placeholder={hinted?.user ? `${hinted.user} (config)` : "optional"}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="micro">PORT</span>
+                  <input
+                    className="field"
+                    value={form.port}
+                    onChange={(e) => setField({ port: e.target.value })}
+                    placeholder={hinted?.port ? `${hinted.port}` : "22"}
+                    inputMode="numeric"
+                    aria-invalid={portError ? true : undefined}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </label>
+              </div>
+              {portError && (
+                <p role="alert" className="data -mt-2 text-[11px]" style={{ color: "rgb(var(--primary))" }}>
+                  {portError}
+                </p>
+              )}
+              {hinted?.hostname && form.host === hinted.alias && (
+                <p className="micro -mt-2" style={{ color: "var(--text-faint)" }}>
+                  from ~/.ssh/config: {[hinted.user, hinted.hostname].filter(Boolean).join("@")}
+                  {hinted.port ? `:${hinted.port}` : ""} — ssh resolves the alias itself
+                </p>
+              )}
+
+              <KeyChoiceField
+                choice={form.key}
+                path={form.keyPath}
+                onChoice={(key) => setField({ key })}
+                onPath={(keyPath) => setField({ keyPath })}
+                onBlockingChange={setKeyBlocked}
               />
-              <button className="btn" type="submit" disabled={!typed.trim()}>
-                Connect
-              </button>
+
+              <div className="flex items-center gap-2">
+                <TestConnection target={parsed.target} disabled={keyBlocked} />
+                <button
+                  className="btn-primary btn"
+                  type="submit"
+                  disabled={!parsed.target || keyBlocked}
+                  title={parsed.error ?? (keyBlocked ? "the chosen key cannot be used" : undefined)}
+                >
+                  Connect
+                </button>
+              </div>
             </form>
           </>
+        )}
+
+        {step.kind === "installing" && (
+          <div className="grid min-h-0 flex-1 place-items-center">
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex h-[16px] items-end gap-[3px]">
+                <div className="eq-bar" />
+                <div className="eq-bar" />
+                <div className="eq-bar" />
+                <div className="eq-bar" />
+              </div>
+              <span className="micro">connected to {step.label} · installing rmux's key</span>
+              <span className="micro" style={{ color: "var(--text-faint)" }}>
+                only the public half is sent; the private key stays on this machine
+              </span>
+            </div>
+          </div>
+        )}
+
+        {step.kind === "done" && (
+          <div className="grid min-h-0 flex-1 place-items-center">
+            <div className="flex max-w-[440px] flex-col items-center gap-3 text-center">
+              <span
+                role={step.ok ? "status" : "alert"}
+                className="data text-[12px]"
+                style={{ color: step.ok ? "var(--text)" : "rgb(var(--primary))" }}
+              >
+                {step.text}
+              </span>
+              <button type="button" className="btn" onClick={onClose} autoFocus>
+                Done
+              </button>
+            </div>
+          </div>
         )}
 
         {step.kind === "connecting" && (

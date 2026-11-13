@@ -13,6 +13,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Native clipboard writes — see src/clipboard.rs for why not navigator.clipboard.
+arboard = { version = "3.7", default-features = false }
 rmux-app.workspace = true
 rmux-transport.workspace = true
 rmux-ssh.workspace = true
@@ -43,11 +45,15 @@ notify.workspace = true
 # `protocol-asset` is required by the `assetProtocol` block in tauri.conf.json —
 # the build script refuses to proceed if the two disagree. It is what lets the
 # webview load the downloaded face models off disk.
-tauri = { version = "2", features = ["macos-private-api", "protocol-asset"] }
+# `unstable` is Tauri's multiwebview (`Window::add_child`): the DeepSeek Harness
+# pane is a second webview over the pane's rectangle, because dsh's Web UI
+# cannot authenticate inside an <iframe> (see `src/dsh.rs`).
+tauri = { version = "2", features = ["macos-private-api", "protocol-asset", "unstable"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tauri-plugin-notification = "2.3.3"
+tauri-plugin-dialog = "2.8.0"
 
 # Native Liquid Glass. See `src/glass.rs` for why `NSGlassEffectView` is looked
 # up by name at runtime rather than linked — these bindings are compiled on every

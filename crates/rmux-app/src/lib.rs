@@ -29,10 +29,13 @@ mod registry;
 
 pub mod agent;
 pub mod bench;
+pub mod children;
 pub mod claude;
 pub mod claude_account;
 pub mod claude_status;
+pub mod codex;
 pub mod commands;
+pub mod dsh;
 pub mod files;
 pub mod git;
 pub mod metrics;
@@ -43,6 +46,7 @@ pub mod services;
 pub mod ssh_keys;
 pub mod target;
 pub mod terminal;
+pub mod worktree;
 
 pub use ctx::Ctx;
 pub use host::{Host, SecretStore, Sink, SinkResolver};
@@ -63,10 +67,13 @@ pub fn registry() -> Registry {
     ssh_keys::register(&mut r);
     metrics::register(&mut r);
     services::register(&mut r);
+    children::register(&mut r);
     claude::register(&mut r);
     claude_status::register(&mut r);
+    codex::register(&mut r);
     paste::register(&mut r);
     model_profile::register(&mut r);
     claude_account::register(&mut r);
+    dsh::register(&mut r);
     r
 }

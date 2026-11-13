@@ -3,6 +3,7 @@ import { invoke } from "./bridge";
 import { isTauri } from "./api";
 import { raiseAlert } from "./alerts";
 import { useWorkspace } from "./workspace";
+import { visibleLeaves } from "./layout-tree.ts";
 import type { SessionStatus } from "./workspace-model";
 
 /**
@@ -158,7 +159,13 @@ export function startNotifications(): void {
   }
 
   useWorkspace.subscribe((state) => {
-    const active = state.activeSession;
+    // "Watched" is **on screen**, not only the focused pane: with the panes of
+    // several tiles in view, a finish in the one beside the cursor is in plain
+    // sight. The same derivation the deck draws from and the rail marks from.
+    const onScreen = new Set(
+      visibleLeaves(state.layout).flatMap((l) => (l.pane.kind === "session" ? [l.pane.id] : [])),
+    );
+    if (state.activeSession) onScreen.add(state.activeSession);
     // `document.hasFocus()` rather than `visibilityState`: a window that is open
     // but behind something else is still one the operator is not reading.
     const watching = document.hasFocus();
@@ -177,7 +184,7 @@ export function startNotifications(): void {
       // Read per event, not captured once: the operator can change it in
       // Settings while sessions are running, and a subscription installed at
       // startup would hold the old value for the life of the app.
-      if (quietWhenWatching() && watching && session.id === active) continue;
+      if (quietWhenWatching() && watching && onScreen.has(session.id)) continue;
 
       const where = state.serverOf(session.id)?.target.host ?? "this machine";
       const message = describe(session.name, where, status);
@@ -186,7 +193,7 @@ export function startNotifications(): void {
       // "Unwatched" is both halves: the window is not frontmost, or it is but
       // this session is not the one on screen. Either way the operator is not
       // looking at the thing that needs them.
-      const unwatched = !watching || session.id !== active;
+      const unwatched = !watching || !onScreen.has(session.id);
       if (unwatched && alertWhenUnwatched()) {
         raiseAlert({
           sessionId: session.id,

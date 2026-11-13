@@ -30,6 +30,8 @@ use rmux_transport::ResolvedCommand;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+mod modes;
+
 /// How much output to retain for replay on reattach.
 ///
 /// A reattaching view needs enough context to look continuous, not the entire
@@ -81,10 +83,24 @@ pub enum TerminalEvent {
     Exited { code: i32 },
 }
 
-/// A bounded ring of recent output.
+/// After a drain, how far to look for a sequence boundary before giving up and
+/// keeping the ring as it is.
+const RESYNC_LIMIT: usize = 4 * 1024;
+
+/// A bounded ring of recent output, plus the terminal modes in force at its
+/// first byte.
+///
+/// The ring alone is not enough to replay a fullscreen program: it sets its
+/// modes (alternate screen, mouse tracking, …) once and then redraws, so after
+/// a few minutes those bytes have been drained and a late view replays a
+/// stream that never turns them on. See [`modes`]. Every drained byte goes
+/// through the tracker, and [`Scrollback::snapshot`] puts the state back in
+/// front of the ring.
 #[derive(Debug, Default)]
 struct Scrollback {
     buf: Vec<u8>,
+    /// Mode state as of `buf[0]` — fed exactly the bytes that left the ring.
+    base: modes::ModeTracker,
 }
 
 impl Scrollback {
@@ -92,18 +108,29 @@ impl Scrollback {
         self.buf.extend_from_slice(chunk);
 
         if self.buf.len() > SCROLLBACK_BYTES {
-            // Drop from the front. This can cut an escape sequence in half, which
-            // would leave a replaying view briefly mis-styled — acceptable, and
-            // far cheaper than parsing the stream to find a safe boundary. The
-            // alternative (retaining everything) is an unbounded leak on a
-            // terminal that has been streaming logs for hours.
-            let excess = self.buf.len() - SCROLLBACK_BYTES;
-            self.buf.drain(..excess);
+            // Drop from the front. The cut can land inside an escape sequence,
+            // and a replay that began with its tail (`8;5;200m`) would print
+            // it as text and could swallow the mode prefix written before it.
+            // So keep dropping to the next ESC or line start — bounded, and
+            // every byte dropped still passes through the tracker.
+            let mut cut = self.buf.len() - SCROLLBACK_BYTES;
+            let limit = (cut + RESYNC_LIMIT).min(self.buf.len());
+            if let Some(i) = self.buf[cut..limit]
+                .iter()
+                .position(|&b| b == 0x1b || b == b'\n')
+            {
+                cut += i + usize::from(self.buf[cut + i] == b'\n');
+            }
+            self.base.feed(&self.buf[..cut]);
+            self.buf.drain(..cut);
         }
     }
 
     fn snapshot(&self) -> Bytes {
-        Bytes::copy_from_slice(&self.buf)
+        let mut out = Vec::with_capacity(modes::MAX_PREFIX + self.buf.len());
+        self.base.prefix(&mut out);
+        out.extend_from_slice(&self.buf);
+        Bytes::from(out)
     }
 }
 
@@ -496,6 +523,103 @@ mod tests {
         }
         // A terminal streaming logs for hours must not grow without limit.
         assert!(sb.snapshot().len() <= SCROLLBACK_BYTES, "scrollback grew past its cap");
+    }
+
+    /// The mode state a fresh terminal ends in after replaying `bytes`.
+    fn replayed_modes(bytes: &[u8]) -> modes::ModeTracker {
+        let mut t = modes::ModeTracker::default();
+        t.feed(bytes);
+        t
+    }
+
+    /// A fullscreen redraw: cursor home, clear, styled text — no mode changes.
+    fn redraw(i: usize) -> Vec<u8> {
+        format!("\x1b[H\x1b[2J\x1b[1;34mframe {i}\x1b[0m {}\r\n", "x".repeat(900)).into_bytes()
+    }
+
+    #[test]
+    fn modes_set_at_startup_survive_the_ring_draining() {
+        let mut sb = Scrollback::default();
+        sb.push(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l");
+        for i in 0..400 {
+            sb.push(&redraw(i)); // ~370 KiB, past the 256 KiB ring
+        }
+        let snap = sb.snapshot();
+        let m = replayed_modes(&snap);
+        for mode in [1049, 1002, 1006, 2004] {
+            assert_eq!(m.mode(mode), Some(true), "mode {mode} lost from the replay");
+        }
+        assert_eq!(m.mode(25), Some(false), "hidden cursor lost from the replay");
+        assert_eq!(m.mode(1000), None, "a mode never touched must not be mentioned");
+    }
+
+    #[test]
+    fn modes_turned_off_later_are_not_re_enabled() {
+        let mut sb = Scrollback::default();
+        sb.push(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h");
+        for i in 0..400 {
+            sb.push(&redraw(i));
+        }
+        sb.push(b"\x1b[?1002l\x1b[?1049l");
+        for i in 0..400 {
+            sb.push(&redraw(i));
+        }
+        let m = replayed_modes(&sb.snapshot());
+        assert_eq!(m.mode(1002), Some(false));
+        assert_eq!(m.mode(1049), Some(false));
+        assert_eq!(m.mode(1006), Some(true));
+    }
+
+    #[test]
+    fn a_mode_sequence_split_across_pushes_at_the_drain_point_is_tracked() {
+        let mut sb = Scrollback::default();
+        sb.push(b"\x1b[?10");
+        sb.push(b"02h");
+        for i in 0..400 {
+            sb.push(&redraw(i));
+        }
+        assert_eq!(replayed_modes(&sb.snapshot()).mode(1002), Some(true));
+    }
+
+    #[test]
+    fn nothing_is_prefixed_when_no_mode_was_set() {
+        let mut sb = Scrollback::default();
+        for i in 0..400 {
+            sb.push(&redraw(i));
+        }
+        let snap = sb.snapshot();
+        assert!(!snap.starts_with(b"\x1b[?"), "unexpected prefix: {:?}", &snap[..16]);
+        let mut small = Scrollback::default();
+        small.push(b"hello");
+        assert_eq!(&small.snapshot()[..], b"hello");
+    }
+
+    #[test]
+    fn a_cut_sequence_does_not_swallow_the_prefix() {
+        // Drain so the cut lands inside a long SGR sequence: what follows the
+        // prefix must start at a sequence boundary, never mid-parameter.
+        let mut sb = Scrollback::default();
+        sb.push(b"\x1b[?1002h");
+        let mut chunk = Vec::new();
+        while chunk.len() < SCROLLBACK_BYTES * 2 {
+            chunk.extend_from_slice(b"\x1b[38;2;10;20;30mab");
+        }
+        sb.push(&chunk);
+        let snap = sb.snapshot();
+        let prefix = b"\x1b[?1002h";
+        assert!(snap.starts_with(prefix), "prefix missing: {:?}", &snap[..24]);
+        assert_eq!(snap[prefix.len()], 0x1b, "ring resumes mid-sequence: {:?}", &snap[..24]);
+    }
+
+    #[test]
+    fn snapshot_with_prefix_stays_bounded() {
+        let mut sb = Scrollback::default();
+        sb.push(b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1005h\x1b[?1006h");
+        sb.push(b"\x1b[?1015h\x1b[?1004h\x1b[?2004h\x1b[?1h\x1b[?25l\x1b[?1047h\x1b[?47h");
+        for i in 0..400 {
+            sb.push(&redraw(i));
+        }
+        assert!(sb.snapshot().len() <= SCROLLBACK_BYTES + modes::MAX_PREFIX);
     }
 
     #[test]

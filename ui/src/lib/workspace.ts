@@ -2,11 +2,60 @@ import { create } from "zustand";
 
 import { invoke } from "./bridge";
 
-import { api, hasBackend, type TargetRef } from "./api";
+import { api, CONFLICT_PREFIX, hasBackend, type TargetRef } from "./api";
+import { isUnseen } from "./agent-state";
 import { bufferKey, type Buffer, type BufferKey } from "./buffers";
 import { companionKey, companionName, forget as forgetCompanion } from "./companion";
-import { clampDeck, deckId, isFocusDeck, parseDeck, type Deck, type SavedView } from "./grid";
 import { isPrimaryWindow, scopedKey } from "./window-scope";
+import { requestTerminalFocus } from "./shortcuts";
+import {
+  activeTab as layoutActiveTab,
+  addTab,
+  addTreeTab,
+  cloneTree,
+  closeLeaf as lCloseLeaf,
+  cycleTab as lCycleTab,
+  findLeaf,
+  focusInDirection,
+  focusLeaf as lFocusLeaf,
+  focusedLeaf,
+  locatePane,
+  locateSession,
+  closeTile as lCloseTile,
+  nextUnshown,
+  openBeside as lOpenBeside,
+  placeTile as lPlaceTile,
+  setViewRatio as lSetViewRatio,
+  migrateLayoutV3,
+  placeBeside,
+  migrateV3toV4,
+  moveTab as lMoveTab,
+  moveBeside as lMoveBeside,
+  canMoveBeside,
+  resolveMoveSource,
+  leaves as treeLeaves,
+  normalizeLayout,
+  parseLayout,
+  parseSavedViews,
+  removeSessionLeaves,
+  removeTab,
+  renameTab as lRenameTab,
+  selectProject as lSelectProject,
+  selectTab as lSelectTab,
+  selectTabIndex as lSelectTabIndex,
+  sessionsInTab,
+  setTabRatio,
+  splitFocused,
+  swapInDirection,
+  tabsOf,
+  toggleZoom as lToggleZoom,
+  type Direction,
+  type Layout,
+  type MoveSource,
+  type MoveTarget,
+  type PersistedV4,
+  type SavedView,
+} from "./layout-tree.ts";
 import {
   autosaveDecision,
   autosaveEnabled,
@@ -16,12 +65,11 @@ import {
   RETRY_DELAY,
 } from "./autosave";
 import {
-  EMPTY_V3,
+  mintStem,
   reattachName,
   resolveWorkspace,
   serverId as deriveServerId,
   type PaneRef,
-  type PersistedV3,
   type Project,
   type ProjectId,
   type Server,
@@ -30,12 +78,12 @@ import {
   type SessionStatus,
   type SessionV3,
 } from "./workspace-model.ts";
+import type { ChildDecision } from "./children.ts";
 import {
   addProject as rAddProject,
   addServer as rAddServer,
+  setServerIdentity as rSetServerIdentity,
   addSession as rAddSession,
-  assignPane as rAssignPane,
-  closePane as rClosePane,
   removeSession as rRemoveSession,
   type Core,
 } from "./workspace-reducers.ts";
@@ -56,19 +104,28 @@ import {
 // every window: a second workbench should carry all your servers and sessions,
 // not open blank. So these keys are *unscoped*, and a cross-window `storage`
 // listener (below) keeps each open window's pool in step.
+//
+// v4 replaced the grid with tabs and split trees (`layout-tree.ts`). The v3 and
+// v2 blobs are read for migration and then left in place, unwritten, as a
+// downgrade fallback — exactly what v3 did with v2.
+const V4_KEY = "rmux.workspace.v4";
 const V3_KEY = "rmux.workspace.v3";
 const V2_KEY = "rmux.workspace.v2";
-// The **layout** — which sessions are placed in which tiles, and the grid — is
-// per-window, so each desktop can show a different view of the same pool without
-// the windows fighting over one another's panes. Scoped by window label (see
-// `window-scope.ts`); the primary window keeps the bare keys, so existing
-// installs keep the layout they already have.
-const LAYOUT_KEY = scopedKey("rmux.workspace.layout");
-const DECK_KEY = scopedKey("rmux.deck");
-const GRID_KEY = scopedKey("rmux.grid");
+// The **layout** — the active project, each project's tabs and their split
+// trees, the active session — is per-window, so each desktop can show a
+// different view of the same pool without the windows fighting over one
+// another's panes. Scoped by window label (see `window-scope.ts`); the primary
+// window keeps the bare key.
+const LAYOUT_KEY = scopedKey("rmux.workspace.layout.v4");
+/** The v3 per-window layout (grid panes + active session) — read once, so an
+ *  extra window migrating to v4 keeps the session it had in front of it. */
+const LAYOUT_V3_KEY = scopedKey("rmux.workspace.layout");
 /** The instruments-rail collapse flag, persisted on its own since before the rail
  *  moved into this store. Kept out of the v3 snapshot so existing installs keep it. */
 const WIDGETS_COLLAPSED_KEY = "rmux.widgetRail.collapsed";
+/** The sidebar's compact mode (herdr's collapsed rail), persisted on its own key
+ *  for the same reason as the widgets flag. */
+const RAIL_COLLAPSED_KEY = "rmux.rail.collapsed";
 
 /** Guarded so importing this module in a non-browser context (a test) is inert. */
 const storage: Pick<Storage, "getItem" | "setItem"> | null =
@@ -126,20 +183,11 @@ const SAVED_VIEWS_KEY = "rmux.savedViews";
 function loadSavedViews(): SavedView[] {
   try {
     const raw = storage?.getItem(SAVED_VIEWS_KEY);
-    const parsed = raw ? JSON.parse(raw) : null;
     // Shape-checked, because a hand-edited or older value must degrade to "no
-    // saved views" rather than crash the workbench on boot.
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (v): v is SavedView =>
-        !!v &&
-        typeof v.id === "string" &&
-        typeof v.name === "string" &&
-        !!v.deck &&
-        typeof v.deck.cols === "number" &&
-        typeof v.deck.rows === "number" &&
-        Array.isArray(v.panes),
-    );
+    // saved views" rather than crash the workbench on boot. A view saved from
+    // the old grid (`{ deck, panes }`) is carried forward as an equal-share
+    // tree, not dropped.
+    return parseSavedViews(raw ? JSON.parse(raw) : null, mint);
   } catch {
     return [];
   }
@@ -161,10 +209,7 @@ export const isSessionUnseen = (
   runtime: Record<string, Runtime>,
   seen: Record<string, number>,
   id: string,
-): boolean => {
-  const r = runtime[id];
-  return !!r && r.status === "idle" && (r.lastStatusAt ?? 0) > (seen[id] ?? 0);
-};
+): boolean => isUnseen(runtime[id], seen[id]);
 
 /** A single stable empty target. `targetOf`/`targetOfProject` return this rather
  *  than a fresh `{}`, so a selector reading them keeps a stable reference — a new
@@ -194,10 +239,18 @@ type State = Core & {
   openOrder: Record<ProjectId, BufferKey[]>;
   activeBuffer: Record<ProjectId, BufferKey | null>;
 
-  deck: Deck;
-  focusedCell: number | null;
-  /** Named layouts the operator saved — grid plus what sits in each cell —
-   *  persisted so they survive relaunch. See `saveCurrentView`/`applyView`. */
+  /**
+   * This window's arrangement: the active project, each project's tabs and
+   * their split trees (`layout-tree.ts`). Kept in step with the pool by
+   * `normalizeLayout` — every session in exactly one leaf of one tab of its own
+   * project — on load and on every pool change.
+   */
+  layout: Layout;
+  /** Tab ids most-recently shown first — feeds the warm set (`warmTabs`).
+   *  Runtime only; a relaunch starts warm with just the active tab. */
+  recentTabs: string[];
+  /** Named split trees the operator saved, persisted so they survive relaunch.
+   *  See `saveCurrentView`/`applyView`. */
   savedViews: SavedView[];
   railCollapsed: boolean;
   /** The instruments (right) rail collapsed to a strip. Unlike the servers rail
@@ -214,6 +267,8 @@ type State = Core & {
 
   // ── structure ──────────────────────────────────────────────────────────────
   connectServer: (target: TargetRef) => ServerId;
+  /** Change which key a Server offers — in place; its id never changes. */
+  setServerIdentity: (id: ServerId, identity: string | undefined) => void;
   createProject: (server: ServerId, folder: string, label?: string) => ProjectId;
   addSession: (
     projectId: ProjectId,
@@ -228,11 +283,15 @@ type State = Core & {
         | "fullscreen"
         | "skipPermissions"
         | "modelProfile"
+        | "activeProfile"
         | "claudeAccount"
         | "jiraProject"
         | "contextWindow"
         | "renamed"
         | "hostName"
+        | "bypassApprovals"
+        | "codexSandbox"
+        | "run"
       >
     >,
   ) => string;
@@ -253,6 +312,23 @@ type State = Core & {
     /** The session's real working directory on the host, when known. */
     cwd?: string | null,
   ) => string;
+  /**
+   * Adopt a sub-session an agent spawned on the host (`children.ts` decided
+   * it): create its row and place it **beside its parent without moving the
+   * focus or the keyboard** — a split of the parent's pane when the parent is in
+   * a tab of the child's project, else a new tab there, not activated. Unlike
+   * `addSession` nothing is activated: the operator may be mid-sentence in
+   * another pane. Idempotent by daemon name. Returns the row's id, or null when
+   * the decision no longer applies.
+   */
+  adoptChild: (serverId: ServerId, decision: ChildDecision, aspect?: number) => string | null;
+  /**
+   * Move every adopted child that sits in a different project from its parent
+   * back beside the parent, and drop a project that move left empty. Repairs
+   * children placed by the old folder rule (a `~/x` → `/data/x` symlink put the
+   * child in a second project of the same name). Returns the ids it moved.
+   */
+  rehomeChildren: (aspect?: number) => string[];
   removeProject: (id: ProjectId) => void;
   removeServer: (id: ServerId) => void;
 
@@ -264,9 +340,20 @@ type State = Core & {
     settings: { claudeAccount?: string; jiraProject?: string; contextWindow?: number },
   ) => void;
   setFullscreen: (id: string, fullscreen: boolean) => void;
-  /** Session Settings › TRANSPORT. Absent is off — see `SessionV3.lowLatency`. */
+  /** Session Settings › TRANSPORT. Absent follows the app default — see `SessionV3.lowLatency`. */
   setLowLatency: (id: string, lowLatency: boolean) => void;
+  /** Forget this session's own choice, so it follows the app-wide default again. */
+  clearLowLatency: (id: string) => void;
   setModelProfile: (id: string, profile: string | undefined) => void;
+  setActiveProfile: (id: string, activeProfile: string | undefined) => void;
+  /**
+   * Session Settings › CODEX: the sandbox mode and the explicit bypass. Kept
+   * with the session (a restart comes back the same), never an app default.
+   */
+  setCodexLaunch: (
+    id: string,
+    launch: { bypassApprovals?: boolean; codexSandbox?: "read-only" | "workspace-write" | null },
+  ) => void;
   setResume: (id: string, resume: string) => void;
 
   // ── attention ────────────────────────────────────────────────────────────
@@ -275,23 +362,87 @@ type State = Core & {
    *  stamped with the local clock, preserving the old edge-based behaviour. */
   setStatus: (id: string, status: SessionStatus, at?: number) => void;
   setSessionError: (id: string, error: string | null) => void;
-  activate: (id: string) => void;
+  /**
+   * Bring a session in front of the operator: select its project and tab,
+   * focus its pane, mark it seen — and, unless `keyboard: false`, give its
+   * terminal the keyboard. Hands-free, the waiting chip, notifications, alerts
+   * and the rail all mean this. A click *inside* a pane passes
+   * `keyboard: false`, because the click already placed the cursor and taking
+   * it would pull focus off whatever control was pressed.
+   */
+  activate: (id: string, opts?: { keyboard?: boolean }) => void;
 
-  // ── panes / grid ───────────────────────────────────────────────────────────
-  setDeck: (deck: Deck) => void;
-  focusCell: (index: number | null) => void;
-  assignPane: (index: number, ref: PaneRef | null) => void;
-  closePane: (index: number) => void;
+  // ── projects / tabs / panes (herdr's model, `layout-tree.ts`) ─────────────
+  selectProject: (projectId: ProjectId) => void;
+  selectTab: (projectId: ProjectId, tabId: string) => void;
+  /** The active project's tab at a 0-based index. */
+  selectTabIndex: (index: number) => void;
+  /** Next (+1) / previous (-1) tab in the active project, wrapping. */
+  cycleTab: (delta: number) => void;
+  /** A new tab holding a new terminal in `projectId` (default: the active
+   *  project). Returns the new session's id, or null with no project. */
+  newTab: (projectId?: ProjectId) => string | null;
+  /** Rename a tab; an empty name gives the label back to its focused session. */
+  renameTab: (projectId: ProjectId, tabId: string, name: string) => void;
+  /** Close a tab. **Ends every session in it** (as the rail's ✕ does) — the
+   *  caller confirms first and names what ends. */
+  closeTab: (projectId: ProjectId, tabId: string) => void;
+  moveTab: (projectId: ProjectId, from: number, to: number) => void;
+  /**
+   * Can `source` be dropped beside `target`? `null` when it can; `"noop"` for a
+   * drop on itself or inside its own subtree (no zone is shown); `"server"` when
+   * it would cross to another server (refused — a project belongs to one).
+   */
+  moveRefusal: (source: MoveSource, target: MoveTarget) => "noop" | "server" | null;
+  /**
+   * Drag-to-split: put `source` on `side` of the `target` pane
+   * (`layout-tree.ts` `moveBeside`). **Moving is never closing** — structural
+   * only, no session ends. A session dropped into another project of the same
+   * server is re-homed there in the same write as the layout. Returns whether it
+   * moved.
+   */
+  moveBeside: (source: MoveSource, target: MoveTarget, side: Direction) => boolean;
+  focusLeaf: (projectId: ProjectId, tabId: string, leafId: string, opts?: { keyboard?: boolean }) => void;
+  /** Move the focus to the geometric neighbour, keyboard included. */
+  focusDirection: (dir: Direction) => void;
+  /** Split the focused pane; the new half is a new terminal in the same
+   *  project. Returns its session id, or null when nothing is focused. */
+  splitPane: (dir: "right" | "down") => string | null;
+  /** Close a pane. A session pane **ends that session** (as the rail's ✕) — the
+   *  caller confirms first; a host or files pane just closes. */
+  closeLeaf: (projectId: ProjectId, tabId: string, leafId: string) => void;
+  toggleZoom: () => void;
+  swapPane: (dir: Direction) => void;
+  /** Commit a divider position (clamped 0.1–0.9). Called on release, not on
+   *  every pointer move — see `SplitTab`. */
+  setSplitRatio: (projectId: ProjectId, tabId: string, splitId: string, ratio: number) => void;
+
+  // ── the project grid (`layout-tree.ts`, "the project grid") ──────────────
+  /** Open a project in a new tile beside the focused one (right when that tile
+   *  is wider than tall, else below). Already on screen: focus its tile. */
+  openBeside: (projectId: ProjectId) => void;
+  /** Open the next sidebar project not on screen beside the focused tile.
+   *  Returns false when every project is already shown. */
+  openNextBeside: () => boolean;
+  /** Place a project on one side of a tile (a sidebar drag onto a tile edge);
+   *  a project already shown moves there. */
+  placeProject: (projectId: ProjectId, tileId: string, side: Direction) => void;
+  /** Remove a tile. **Ends nothing** — its sessions keep running and its tabs
+   *  stay; the project is one click away in the sidebar. */
+  closeTile: (tileId: string) => void;
+  /** Commit a tile divider position, on release. */
+  setViewRatio: (splitId: string, ratio: number) => void;
 
   // ── saved views ──────────────────────────────────────────────────────────
-  /** Save the current grid + placement under a name (replaces one of the same
+  /** Save the active tab's split tree under a name (replaces one of the same
    *  name, so re-saving updates it). */
   saveCurrentView: (name: string) => void;
-  /** Switch the workbench to a saved view. Cells whose session no longer exists
-   *  come back empty rather than broken. */
+  /** Open a saved view as a new tab. Panes whose session no longer exists are
+   *  skipped; sessions it names are *moved* into it, never mounted twice. */
   applyView: (id: string) => void;
   deleteView: (id: string) => void;
-  /** The rail's "open into the focused tile" verb, for each openable node. */
+  /** The rail's open verbs. A session is activated where it lives; a host or
+   *  files pane is focused where one already is, else opened as a new tab. */
   openSession: (id: string) => void;
   openHost: (serverId: ServerId) => void;
   openFiles: (projectId: ProjectId) => void;
@@ -313,41 +464,69 @@ type State = Core & {
   restoreFiles: (projectId: ProjectId) => void;
 };
 
-/** The per-window layout: which sessions sit in which tiles. */
-type Layout = { panes: (PaneRef | null)[]; activeSession: string | null };
+/** The per-window layout blob. */
+type WindowLayout = { version: 4; layout: Layout; activeSession: string | null };
 
-function loadLayout(): Layout | null {
-  const raw = storage?.getItem(LAYOUT_KEY);
+function readJson(key: string): unknown {
+  const raw = storage?.getItem(key);
   if (!raw) return null;
   try {
-    const l = JSON.parse(raw) as Partial<Layout>;
-    return { panes: l.panes ?? [...EMPTY_V3.panes], activeSession: l.activeSession ?? null };
+    return JSON.parse(raw);
   } catch {
     return null;
   }
 }
 
-function load(): PersistedV3 {
-  const pool = resolveWorkspace(storage?.getItem(V3_KEY) ?? null, storage?.getItem(V2_KEY) ?? null);
+/**
+ * Resolve the shared pool: a v4 blob wins; otherwise v3 (itself migrated from
+ * v2 when that is all there is) is **migrated**, never dropped — every id kept,
+ * every session given a tab. Exported shape-checking lives in the pure module.
+ */
+function resolvePool(): PersistedV4 {
+  const v4 = readJson(V4_KEY) as Partial<PersistedV4> | null;
+  if (v4 && typeof v4 === "object") {
+    const base = resolveWorkspace(null, null);
+    return {
+      version: 4,
+      servers: v4.servers ?? base.servers,
+      projects: v4.projects ?? base.projects,
+      sessions: v4.sessions ?? base.sessions,
+      activeSession: v4.activeSession ?? null,
+      openPaths: v4.openPaths ?? {},
+      activePath: v4.activePath ?? {},
+      layout: parseLayout(v4.layout),
+    };
+  }
+  const v3 = resolveWorkspace(storage?.getItem(V3_KEY) ?? null, storage?.getItem(V2_KEY) ?? null);
+  return migrateV3toV4(v3, mint);
+}
 
-  const layout = loadLayout();
-  if (layout) {
+function load(): PersistedV4 {
+  const pool = resolvePool();
+  const own = readJson(LAYOUT_KEY) as Partial<WindowLayout> | null;
+  if (own && typeof own === "object" && own.layout) {
     // This window has its own saved layout — the pool comes from the shared key,
     // the arrangement from the scoped one.
-    pool.panes = layout.panes;
-    pool.activeSession = layout.activeSession;
+    pool.layout = parseLayout(own.layout);
+    pool.activeSession = own.activeSession ?? null;
+  } else if (!isPrimaryWindow()) {
+    // An extra window upgrading from v3 keeps the session it had in front of
+    // it. Otherwise a fresh extra window opens as a **duplicate** of the
+    // primary's layout (the shared blob's) and diverges as it is rearranged —
+    // rmux's daemon multiplexes several clients per session, so two *windows*
+    // showing one session is safe; two panes in one window is not.
+    const old = readJson(LAYOUT_V3_KEY) as { activeSession?: string | null } | null;
+    if (old && typeof old === "object" && old.activeSession) {
+      pool.activeSession = old.activeSession;
+      pool.layout = migrateLayoutV3(pool, mint);
+    }
   }
-  // No scoped layout yet: keep the panes the shared blob carries. For the
-  // primary window that is its own saved layout; for a fresh extra window it is
-  // the primary's, so a **new window opens as a duplicate** — same sessions on
-  // screen — and then diverges as it is rearranged, because its layout is
-  // written to its own scoped key. rmux's daemon multiplexes several clients per
-  // session, so two windows showing the same session is safe.
+  pool.layout = normalizeLayout(pool.layout, pool, mint);
   return pool;
 }
 
-/** Snapshot the persisted subset. The old `rmux.workspace.v2` blob is left in
- *  place as a downgrade fallback — v3 wins on load, so it is inert but not lost. */
+/** Snapshot the persisted subset. The old v3/v2 blobs are left in place as a
+ *  downgrade fallback — v4 wins on load, so they are inert but not lost. */
 function persist(state: State) {
   if (!storage) return;
   // Open files are derived from the live buffers for projects that have been
@@ -366,37 +545,36 @@ function persist(state: State) {
 
   // The layout is this window's own — always written to the scoped key.
   try {
-    const layout: Layout = { panes: state.panes, activeSession: state.activeSession };
-    storage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+    const own: WindowLayout = { version: 4, layout: state.layout, activeSession: state.activeSession };
+    storage.setItem(LAYOUT_KEY, JSON.stringify(own));
   } catch {
     // A full or disabled localStorage must never stop the app working.
   }
 
-  // The pool is shared. The primary window owns the panes/activeSession still
-  // carried in the shared blob (for downgrade, and to seed a first extra
-  // window); an extra window must **not** stamp its own view there, or it would
-  // overwrite the layout the primary saved. So an extra window preserves
-  // whatever the shared blob already holds for those two fields.
-  let poolPanes = state.panes;
+  // The pool is shared. The primary window owns the layout/activeSession still
+  // carried in the shared blob (to seed a first extra window); an extra window
+  // must **not** stamp its own view there, or it would overwrite the layout the
+  // primary saved. So an extra window preserves what the shared blob holds.
+  let poolLayout = state.layout;
   let poolActive = state.activeSession;
   if (!isPrimaryWindow()) {
-    const prev = resolveWorkspace(storage.getItem(V3_KEY) ?? null, null);
-    poolPanes = prev.panes;
-    poolActive = prev.activeSession;
+    const prev = readJson(V4_KEY) as Partial<PersistedV4> | null;
+    poolLayout = parseLayout(prev?.layout);
+    poolActive = prev?.activeSession ?? null;
   }
 
-  const snapshot: PersistedV3 = {
-    version: 3,
+  const snapshot: PersistedV4 = {
+    version: 4,
     servers: state.servers,
     projects: state.projects,
     sessions: state.sessions,
-    panes: poolPanes,
+    layout: poolLayout,
     activeSession: poolActive,
     openPaths,
     activePath,
   };
   try {
-    storage.setItem(V3_KEY, JSON.stringify(snapshot));
+    storage.setItem(V4_KEY, JSON.stringify(snapshot));
   } catch {
     // A full or disabled localStorage must never stop the app working.
   }
@@ -423,28 +601,147 @@ let seq = 0;
  * would see a malformed name).
  */
 const mintSessionId = (kind: SessionKind): string =>
-  `${kind === "claude" ? "session" : kind === "pi" ? "pisession" : "term"}-${Date.now().toString(36)}-${++seq}`;
+  `${mintStem(kind)}-${Date.now().toString(36)}-${++seq}`;
+
+
+/** Layout node ids. Unlike session ids nothing on a host is named after these,
+ *  so a clock plus a counter is all the uniqueness they need. */
+let layoutSeq = 0;
+function mint(prefix: "tab" | "leaf" | "split" | "tile"): string {
+  return `${prefix}-${Date.now().toString(36)}-${++layoutSeq}`;
+}
 
 const restored = load();
+
+/** The pane area's width / height — a new tile goes the way the focused tile
+ *  is long on screen, which a unit-square tree cannot know by itself. */
+function paneAreaAspect(): number {
+  if (typeof document === "undefined") return 16 / 9;
+  const r = document.querySelector(".pane-area")?.getBoundingClientRect();
+  return r && r.width > 0 && r.height > 0 ? r.width / r.height : 16 / 9;
+}
 
 /** Just the reducer core, for handing to a reducer and merging its result back. */
 const coreOf = (s: State): Core => ({
   servers: s.servers,
   projects: s.projects,
   sessions: s.sessions,
-  panes: s.panes,
   activeSession: s.activeSession,
 });
 
-/** The cell a rail "open" should fill: cell 0 in focus mode (the only visible
- *  one), else the focused cell, else cell 0. */
-const openCell = (s: State): number => (isFocusDeck(s.deck) ? 0 : (s.focusedCell ?? 0));
+/**
+ * Give a session's terminal the keyboard — now, and again once the pane has had
+ * a chance to mount. Switching to a tab that was not warm mounts its panes
+ * *after* this store update renders, so a single event would reach no listener
+ * and the cursor would stay in the pane just left: the "screen says one thing,
+ * keys do another" failure. A repeat to an already-focused terminal is a no-op.
+ */
+function focusKeyboard(sessionId: string) {
+  if (typeof window === "undefined") return;
+  requestTerminalFocus(sessionId);
+  requestAnimationFrame(() => requestAnimationFrame(() => requestTerminalFocus(sessionId)));
+}
 
-export const useWorkspace = create<State>((set, get) => ({
+/** The profile an adopted child records — see `adoptChild`. */
+function childProfile(
+  parent: { kind: string; modelProfile?: string; activeProfile?: string },
+  kind: string,
+  child: { profile?: string; chain?: string },
+): { modelProfile?: string; activeProfile?: string } {
+  if (parent.kind === kind && parent.modelProfile) {
+    return { modelProfile: parent.modelProfile, activeProfile: parent.activeProfile };
+  }
+  if (child.chain) return { modelProfile: child.chain, activeProfile: child.profile };
+  if (child.profile && child.profile !== "default" && child.profile !== "none") {
+    return { modelProfile: child.profile };
+  }
+  return {};
+}
+
+export const useWorkspace = create<State>((set, get) => {
+  /**
+   * Commit a layout change and everything that follows from what is now in
+   * front of the operator: the focused session becomes the active one (the
+   * instruments, notifications and control socket all read `activeSession`),
+   * looking at it acknowledges it up to its latest status change, and its tab
+   * goes to the front of the warm set. `keyboard` also hands it the cursor.
+   */
+  const land = (next: Layout, opts: { keyboard?: boolean } = {}, extra: Partial<State> = {}) => {
+    const s = get();
+    const patch: Partial<State> = { ...extra, layout: next };
+    const at = layoutActiveTab(next);
+    if (at && s.recentTabs[0] !== at.tab.id) {
+      patch.recentTabs = [at.tab.id, ...s.recentTabs.filter((id) => id !== at.tab.id)].slice(0, 12);
+    }
+    const leaf = focusedLeaf(next);
+    if (leaf?.pane.kind === "session") {
+      const id = leaf.pane.id;
+      patch.activeSession = id;
+      const mark = s.runtime[id]?.lastStatusAt ?? Date.now();
+      if ((s.seen[id] ?? 0) < mark) {
+        const seen = { ...s.seen, [id]: mark };
+        persistSeen(seen);
+        patch.seen = seen;
+      }
+    }
+    set(patch);
+    schedulePersist(get);
+    if (opts.keyboard && leaf?.pane.kind === "session") focusKeyboard(leaf.pane.id);
+  };
+
+  /** Re-run the invariant after a pool change (normalize is a no-op — same
+   *  reference — when nothing needed repair). */
+  const renormalize = () => {
+    const s = get();
+    const next = normalizeLayout(s.layout, s, mint);
+    if (next !== s.layout) set({ layout: next });
+  };
+
+  /** Create a session in `projectId` without placing it — `addSession` and
+   *  `splitPane` each place it their own way. */
+  const createSession = (
+    projectId: ProjectId,
+    kind: SessionKind,
+    opts?: Parameters<State["addSession"]>[2],
+  ): string => {
+    const id = mintSessionId(kind);
+    const project = get().projects.find((p) => p.id === projectId);
+    // A pi session is named after its project like Claude (not "shell"); only a
+    // plain terminal defaults to "shell".
+    const name = opts?.name?.trim() || (kind === "terminal" ? "shell" : (project?.label ?? kind));
+    // Claude renders fullscreen by default (the native TUI); the per-session
+    // INLINE toggle overrides it and persists with the session. Seeded here so a
+    // brand-new session carries an explicit value while existing persisted
+    // sessions keep whatever they already have. `...opts` still wins if a caller
+    // passes `fullscreen` explicitly.
+    const defaults = kind === "claude" ? { fullscreen: true } : {};
+    // `opts` first, then the authoritative fields — so a computed `name` and the
+    // real id/kind/projectId win over anything the caller passed loosely.
+    const ws = rAddSession(coreOf(get()), { ...defaults, ...opts, id, projectId, kind, name });
+    // A dsh session starts with *no* runtime, so the rail reads "unknown" until
+    // its server answers — seeding idle would claim a measurement nobody made.
+    set({ ...ws, runtime: kind === "dsh" ? get().runtime : { ...get().runtime, [id]: { ...IDLE } } });
+    return id;
+  };
+
+  /** Where a host or files pane should go: focus an existing one in `pid`, else
+   *  open it as a new tab there. */
+  const openPaneIn = (pid: ProjectId, pane: PaneRef, name: string) => {
+    const layout = get().layout;
+    const same = (p: PaneRef) =>
+      p.kind === pane.kind &&
+      (p.kind === "host"
+        ? pane.kind === "host" && p.serverId === pane.serverId
+        : p.kind === "files" && pane.kind === "files" && p.projectId === pane.projectId);
+    const hit = locatePane({ activeProject: pid, projects: { [pid]: tabsOf(layout, pid) } }, same);
+    if (hit) return land(lFocusLeaf(layout, pid, hit.tabId, hit.leafId));
+    land(addTab(layout, pid, pane, name, mint).layout);
+  };
+
+  return {
   servers: restored.servers,
   projects: restored.projects,
   sessions: restored.sessions,
-  panes: restored.panes,
   activeSession: restored.activeSession,
   openPaths: restored.openPaths,
   activePath: restored.activePath,
@@ -462,21 +759,10 @@ export const useWorkspace = create<State>((set, get) => ({
   openOrder: {},
   activeBuffer: {},
 
-  // `rmux.deck` is the new key; `rmux.grid` is the old bare number every
-  // existing install still has. Reading both means an upgrade keeps the
-  // layout instead of silently dropping everyone into focus mode.
-  // A fresh extra window has no scoped deck yet, so it falls through to the
-  // primary's (`rmux.deck`) — opening with the same grid it duplicated, then
-  // keeping its own once changed.
-  deck: parseDeck(
-    storage?.getItem(DECK_KEY) ??
-      storage?.getItem(GRID_KEY) ??
-      storage?.getItem("rmux.deck") ??
-      storage?.getItem("rmux.grid"),
-  ),
-  focusedCell: null,
+  layout: restored.layout,
+  recentTabs: [],
   savedViews: loadSavedViews(),
-  railCollapsed: false,
+  railCollapsed: storage?.getItem(RAIL_COLLAPSED_KEY) === "1",
   widgetsCollapsed: storage?.getItem(WIDGETS_COLLAPSED_KEY) === "1",
 
   // ── selectors ──────────────────────────────────────────────────────────────
@@ -502,6 +788,11 @@ export const useWorkspace = create<State>((set, get) => ({
     return id;
   },
 
+  setServerIdentity: (id, identity) => {
+    set(rSetServerIdentity(coreOf(get()), id, identity));
+    schedulePersist(get);
+  },
+
   createProject: (server, folder, label) => {
     const { ws, id } = rAddProject(coreOf(get()), server, folder, label);
     set(ws);
@@ -509,23 +800,18 @@ export const useWorkspace = create<State>((set, get) => ({
     return id;
   },
 
+  /**
+   * Create a session **and place it**: a new tab in its project, focused.
+   *
+   * Placing it here rather than at each caller is the point — the rail's
+   * [+]/[✦], quick-add, the new-session dialogs, adoption and the resume
+   * pickers all come through this, and a session created without a tab is one
+   * the pane area cannot reach.
+   */
   addSession: (projectId, kind, opts) => {
-    const id = mintSessionId(kind);
-    const project = get().projects.find((p) => p.id === projectId);
-    // A pi session is named after its project like Claude (not "shell"); only a
-    // plain terminal defaults to "shell".
-    const name = opts?.name?.trim() || (kind === "terminal" ? "shell" : (project?.label ?? kind));
-    // Claude renders fullscreen by default (the native TUI); the per-session
-    // INLINE toggle overrides it and persists with the session. Seeded here so a
-    // brand-new session carries an explicit value while existing persisted
-    // sessions keep whatever they already have. `...opts` still wins if a caller
-    // passes `fullscreen` explicitly.
-    const defaults = kind === "claude" ? { fullscreen: true } : {};
-    // `opts` first, then the authoritative fields — so a computed `name` and the
-    // real id/kind/projectId win over anything the caller passed loosely.
-    const ws = rAddSession(coreOf(get()), { ...defaults, ...opts, id, projectId, kind, name });
-    set({ ...ws, runtime: { ...get().runtime, [id]: { ...IDLE } } });
-    schedulePersist(get);
+    const id = createSession(projectId, kind, opts);
+    const name = get().sessions.find((x) => x.id === id)?.name ?? kind;
+    land(addTab(get().layout, projectId, { kind: "session", id }, name, mint).layout);
     return id;
   },
 
@@ -538,7 +824,9 @@ export const useWorkspace = create<State>((set, get) => ({
       // same way an attach does, so the right session on the right host dies.
       const target = state.targetOf(id);
       const name = reattachName(session);
-      if (session.kind === "claude") {
+      // Codex is hosted exactly like Claude — a Claude-store attach under the
+      // agent, with a companion shell — so it ends exactly like Claude.
+      if (session.kind === "claude" || session.kind === "codex") {
         void api.claudeEndSession(target, name).catch(() => {});
         // **And its companion shell**, which is a real terminal under the agent
         // and survives the app. It is not in the rail, so nothing else would
@@ -552,6 +840,13 @@ export const useWorkspace = create<State>((set, get) => ({
         }).catch(() => {});
         forgetCompanion(id);
       } else {
+        if (session.kind === "dsh") {
+          // The view half lives on this machine only: the child webview and the
+          // loopback forward. The server itself dies with the agent kill below.
+          void invoke("dsh_view_close", { sessionId: id }).catch(() => {});
+          const pty = state.live[id];
+          if (pty) void api.claudeStop(pty).catch(() => {});
+        }
         void invoke("terminal_close", {
           id: state.live[id] ?? "",
           target,
@@ -567,7 +862,8 @@ export const useWorkspace = create<State>((set, get) => ({
     const { [id]: _s, ...seen } = state.seen;
     if (Object.keys(seen).length !== Object.keys(state.seen).length) persistSeen(seen);
     set({ ...ws, runtime, live, seen });
-    schedulePersist(get);
+    // Its pane goes with it: the split collapses, an emptied tab is removed.
+    land(removeSessionLeaves(get().layout, id));
   },
 
   /**
@@ -608,9 +904,14 @@ export const useWorkspace = create<State>((set, get) => ({
       // to the far side, and no path that could end a shell.
       const pty = state.live[id];
       if (pty) {
-        if (session.kind === "claude") void api.claudeStop(pty).catch(() => {});
+        // A dsh console is a Claude-store attach, like Claude's.
+        if (session.kind === "claude" || session.kind === "dsh" || session.kind === "codex")
+          void api.claudeStop(pty).catch(() => {});
         else void api.terminalDetach(pty).catch(() => {});
       }
+      // Detaching stops *looking*: the dsh view and its forward go, the server
+      // keeps running under the agent.
+      if (session.kind === "dsh") void invoke("dsh_view_close", { sessionId: id }).catch(() => {});
       const companion = state.live[companionKey(id)];
       if (companion) void api.terminalDetach(companion).catch(() => {});
     }
@@ -624,7 +925,8 @@ export const useWorkspace = create<State>((set, get) => ({
     const { [id]: _s, ...seen } = state.seen;
     if (Object.keys(seen).length !== Object.keys(state.seen).length) persistSeen(seen);
     set({ ...ws, runtime, live, seen });
-    schedulePersist(get);
+    // The pane closes like any other — structurally only. Nothing here kills.
+    land(removeSessionLeaves(get().layout, id));
   },
 
   adoptServerSession: (serverId, hostName, kind, alias, cwd) => {
@@ -668,14 +970,117 @@ export const useWorkspace = create<State>((set, get) => ({
     // person chose, possibly on another machine — and by the raw session name
     // otherwise. `renamed` latches so a Claude title cannot overwrite it.
     const label = alias?.trim();
+    // `addSession` places it — a new tab in its project, focused.
     const id = get().addSession(projectId, kind, {
       name: label || hostName,
       renamed: !!label,
       hostName,
     });
-    get().openSession(id);
+    get().activate(id);
+    return id;
+  },
+
+  adoptChild: (serverId, decision, aspect) => {
+    const state = get();
+    const { child } = decision;
+    const onServer = new Set(state.projects.filter((p) => p.serverId === serverId).map((p) => p.id));
+    // Already here (a race with a manual adopt, or another window's write) —
+    // two rows on one daemon session would mount it twice.
+    const existing = state.sessions.find((x) => onServer.has(x.projectId) && reattachName(x) === child.session);
+    if (existing) return existing.id;
+    const parent = state.sessions.find((x) => x.id === decision.parentId);
+    if (!parent) return null;
+
+    let core = coreOf(state);
+    let projectId = decision.projectId;
+    if (decision.create) {
+      const made = rAddProject(core, serverId, decision.create.folder);
+      core = made.ws;
+      projectId = made.id;
+    }
+    if (!core.projects.some((p) => p.id === projectId)) return null;
+
+    const id = mintSessionId(decision.kind);
+    const keepActive = core.activeSession;
+    core = rAddSession(core, {
+      id,
+      projectId,
+      kind: decision.kind,
+      name: decision.name,
+      // Named by whoever spawned it — a Claude title must not overwrite that.
+      renamed: true,
+      // Attach by the host's name, verbatim: deriving one would name a session
+      // that does not exist, and attaching to it would *create* a second one.
+      hostName: child.session,
+      parentId: parent.id,
+      ...(decision.kind === "claude" ? { fullscreen: true } : {}),
+      // The host bound the child to its parent's credential set (CLAUDE.md,
+      // children inherit), so the adopted row names the same profile — a
+      // restart from the UI must not move it to another provider. A child of a
+      // different kind took that kind's default on the host; the record names
+      // the profile id when it is a real one.
+      ...childProfile(parent, decision.kind, child),
+    });
+    // `rAddSession` makes the new session active; adoption must not.
+    core = { ...core, activeSession: keepActive };
+
+    const placed = placeBeside(
+      state.layout,
+      projectId,
+      parent.id,
+      { kind: "session", id },
+      mint,
+      aspect,
+      decision.name,
+    );
+    // Pool and layout in one write, so nothing ever renders the session unplaced.
+    set({ ...core, layout: placed.layout, runtime: { ...state.runtime, [id]: { ...IDLE } } });
     schedulePersist(get);
     return id;
+  },
+
+  rehomeChildren: (aspect) => {
+    const state = get();
+    let layout = state.layout;
+    let sessions = state.sessions;
+    const moved: string[] = [];
+    const left = new Set<ProjectId>();
+    for (const child of state.sessions) {
+      if (!child.parentId) continue;
+      const parent = sessions.find((x) => x.id === child.parentId);
+      if (!parent || parent.projectId === child.projectId) continue;
+      const home = state.projects.find((p) => p.id === parent.projectId);
+      const away = state.projects.find((p) => p.id === child.projectId);
+      // A parent in the adopted-sessions bucket places children by folder on
+      // purpose (see `chooseProject`); and never move work across servers.
+      if (!home || home.running || !away || away.serverId !== home.serverId) continue;
+      layout = removeSessionLeaves(layout, child.id);
+      layout = placeBeside(layout, home.id, parent.id, { kind: "session", id: child.id }, mint, aspect, child.name).layout;
+      sessions = sessions.map((x) => (x.id === child.id ? { ...x, projectId: home.id } : x));
+      left.add(away.id);
+      moved.push(child.id);
+    }
+    if (!moved.length) return moved;
+    // Only a project this move emptied, and only when nothing else of it is
+    // open (no session, no file buffer) — it existed solely to hold the child.
+    const emptied = new Set(
+      [...left].filter(
+        (pid) => !sessions.some((x) => x.projectId === pid) && !Object.values(state.buffers).some((b) => b.projectId === pid),
+      ),
+    );
+    let activeProject = layout.activeProject;
+    if (activeProject && emptied.has(activeProject)) {
+      const firstMoved = state.sessions.find((x) => x.id === moved[0]);
+      activeProject = sessions.find((x) => x.id === firstMoved?.parentId)?.projectId ?? activeProject;
+    }
+    set({
+      sessions,
+      projects: state.projects.filter((p) => !emptied.has(p.id)),
+      layout: { ...layout, activeProject },
+    });
+    renormalize();
+    schedulePersist(get);
+    return moved;
   },
 
   removeProject: (id) => {
@@ -691,12 +1096,15 @@ export const useWorkspace = create<State>((set, get) => ({
       const { [id]: _a, ...activeBuffer } = s.activeBuffer;
       return { projects: s.projects.filter((p) => p.id !== id), buffers, openOrder, activeBuffer };
     });
+    // Its tabs (and any files pane of it elsewhere) go with it.
+    renormalize();
     schedulePersist(get);
   },
 
   removeServer: (id) => {
     for (const p of get().projects.filter((x) => x.serverId === id)) get().removeProject(p.id);
     set((s) => ({ servers: s.servers.filter((sv) => sv.id !== id) }));
+    renormalize();
     schedulePersist(get);
   },
 
@@ -784,13 +1192,49 @@ export const useWorkspace = create<State>((set, get) => ({
     set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? { ...x, lowLatency } : x)) }));
     schedulePersist(get);
   },
+  clearLowLatency: (id) => {
+    set((s) => ({
+      sessions: s.sessions.map((x) => {
+        if (x.id !== id) return x;
+        const { lowLatency: _drop, ...rest } = x;
+        return rest;
+      }),
+    }));
+    schedulePersist(get);
+  },
 
   setFullscreen: (id, fullscreen) => {
     set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? { ...x, fullscreen } : x)) }));
     schedulePersist(get);
   },
   setModelProfile: (id, modelProfile) => {
-    set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? { ...x, modelProfile } : x)) }));
+    // A new choice starts a chain at its first member again.
+    set((s) => ({
+      sessions: s.sessions.map((x) => (x.id === id ? { ...x, modelProfile, activeProfile: undefined } : x)),
+    }));
+    schedulePersist(get);
+  },
+  setActiveProfile: (id, activeProfile) => {
+    set((s) => ({ sessions: s.sessions.map((x) => (x.id === id ? { ...x, activeProfile } : x)) }));
+    schedulePersist(get);
+  },
+  setCodexLaunch: (id, launch) => {
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === id
+          ? {
+              ...x,
+              ...(launch.bypassApprovals === undefined
+                ? {}
+                : { bypassApprovals: launch.bypassApprovals || undefined }),
+              // `null` clears back to Codex's own default; undefined leaves alone.
+              ...(launch.codexSandbox === undefined
+                ? {}
+                : { codexSandbox: launch.codexSandbox ?? undefined }),
+            }
+          : x,
+      ),
+    }));
     schedulePersist(get);
   },
   setResume: (id, resume) => {
@@ -813,7 +1257,9 @@ export const useWorkspace = create<State>((set, get) => ({
             ? Date.now()
             : cur.lastStatusAt;
 
-      if (cur.status === status && lastStatusAt === cur.lastStatusAt) return s;
+      // A session with no runtime yet (a starting dsh) gets one on its first
+      // report even when that report is the default `idle`.
+      if (s.runtime[id] && cur.status === status && lastStatusAt === cur.lastStatusAt) return s;
 
       const runtime = { ...s.runtime, [id]: { status, error: cur.error, lastStatusAt } };
 
@@ -836,49 +1282,188 @@ export const useWorkspace = create<State>((set, get) => ({
       return { runtime: { ...s.runtime, [id]: { ...cur, error } } };
     }),
 
-  activate: (id) => {
-    // Looking at a session acknowledges it up to its latest status change — never
-    // on a timer. Advancing the watermark to now-known time clears the unseen mark.
-    set((s) => {
-      const mark = s.runtime[id]?.lastStatusAt ?? Date.now();
-      if ((s.seen[id] ?? 0) >= mark) return { activeSession: id };
-      const seen = { ...s.seen, [id]: mark };
-      persistSeen(seen);
-      return { activeSession: id, seen };
+  activate: (id, opts) => {
+    let layout = get().layout;
+    let loc = locateSession(layout, id);
+    if (!loc) {
+      // Normalize guarantees a place; this is the backstop if a caller races it.
+      layout = normalizeLayout(layout, get(), mint);
+      loc = locateSession(layout, id);
+    }
+    if (!loc) {
+      // Not a session we hold (an unknown id) — nothing to bring forward.
+      return;
+    }
+    land(lFocusLeaf(layout, loc.projectId, loc.tabId, loc.leafId), {
+      keyboard: opts?.keyboard ?? true,
     });
+  },
+
+  // ── projects / tabs / panes ──────────────────────────────────────────────
+  selectProject: (projectId) => {
+    if (!get().projects.some((p) => p.id === projectId)) return;
+    land(lSelectProject(get().layout, projectId), { keyboard: true });
+  },
+  selectTab: (projectId, tabId) => land(lSelectTab(get().layout, projectId, tabId), { keyboard: true }),
+  selectTabIndex: (index) => land(lSelectTabIndex(get().layout, index), { keyboard: true }),
+  cycleTab: (delta) => land(lCycleTab(get().layout, delta), { keyboard: true }),
+
+  newTab: (projectId) => {
+    const pid = projectId ?? get().layout.activeProject;
+    if (!pid || !get().projects.some((p) => p.id === pid)) return null;
+    const id = get().addSession(pid, "terminal");
+    focusKeyboard(id);
+    return id;
+  },
+
+  renameTab: (projectId, tabId, name) => {
+    set({ layout: lRenameTab(get().layout, projectId, tabId, name) });
     schedulePersist(get);
   },
 
-  // ── panes / grid ───────────────────────────────────────────────────────────
-  setDeck: (requested) => {
-    const deck = clampDeck(requested);
-    storage?.setItem(DECK_KEY, deckId(deck));
-    // A cell selected under the old layout may not exist under the new one.
-    set({ deck, focusedCell: null });
+  closeTab: (projectId, tabId) => {
+    const tab = tabsOf(get().layout, projectId).tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    // Each session ends exactly as the rail's ✕ ends it — `removeSession` sends
+    // the kill and drops its leaf; the tab goes when its last pane does.
+    for (const sid of sessionsInTab(tab)) get().removeSession(sid);
+    land(removeTab(get().layout, projectId, tabId), { keyboard: true });
   },
-  focusCell: (index) => set({ focusedCell: index }),
-  assignPane: (index, ref) => {
-    set(rAssignPane(coreOf(get()), index, ref));
+
+  moveTab: (projectId, from, to) => {
+    set({ layout: lMoveTab(get().layout, projectId, from, to) });
     schedulePersist(get);
   },
-  closePane: (index) => {
-    set(rClosePane(coreOf(get()), index));
+
+  moveRefusal: (source, target) => {
+    const s = get();
+    if (!canMoveBeside(s.layout, source, target)) return "noop";
+    const src = resolveMoveSource(s.layout, source)!;
+    const serverOfProject = (pid: ProjectId) => s.projects.find((p) => p.id === pid)?.serverId;
+    const to = serverOfProject(target.projectId);
+    // Every pane being moved must already be on the target's server: a session
+    // runs on one host, and a project is a folder on one host.
+    for (const l of treeLeaves(src.node)) {
+      const pane = l.pane;
+      const from =
+        pane.kind === "session"
+          ? serverOfProject(s.sessions.find((x) => x.id === pane.id)?.projectId ?? "")
+          : pane.kind === "host"
+            ? pane.serverId
+            : serverOfProject(pane.projectId);
+      if (!to || from !== to) return "server";
+    }
+    return null;
+  },
+
+  moveBeside: (source, target, side) => {
+    if (get().moveRefusal(source, target)) return false;
+    const s = get();
+    const r = lMoveBeside(s.layout, source, target, side, mint);
+    if (!r) return false;
+    // Same server, other project: the sessions now belong to the target's
+    // project — changed in the same write as the layout, so `normalizeLayout`
+    // never sees a session placed outside its own project (it would pull it
+    // straight back out). The source project stays even if this emptied it:
+    // the operator opened it. Modelled on `rehomeChildren`, minus the removal.
+    const moving = new Set(r.sessions);
+    const extra: Partial<State> = {};
+    if (r.fromProject !== target.projectId && moving.size) {
+      extra.sessions = s.sessions.map((x) => (moving.has(x.id) ? { ...x, projectId: target.projectId } : x));
+    }
+    // The dropped pane takes the focus and the keyboard — the operator just put
+    // it there on purpose.
+    land(r.layout, { keyboard: true }, extra);
+    renormalize();
+    return true;
+  },
+
+  focusLeaf: (projectId, tabId, leafId, opts) =>
+    land(lFocusLeaf(get().layout, projectId, tabId, leafId), { keyboard: opts?.keyboard ?? true }),
+
+  focusDirection: (dir) => {
+    // Crossing into an empty tile moves the focus with no pane to land on, so
+    // the test is "did anything change", not "is there a leaf".
+    const { layout } = focusInDirection(get().layout, dir);
+    if (layout === get().layout) return;
+    land(layout, { keyboard: true });
+  },
+
+  splitPane: (dir) => {
+    const at = layoutActiveTab(get().layout);
+    if (!at) return null;
+    // A new terminal in the same project — what [+] and a new tab create.
+    const id = createSession(at.projectId, "terminal");
+    const split = splitFocused(get().layout, dir, { kind: "session", id }, mint);
+    if (!split) {
+      // Cannot happen with an active tab, but a session must never be left
+      // unplaced: give it a tab rather than nothing.
+      land(addTab(get().layout, at.projectId, { kind: "session", id }, "shell", mint).layout, { keyboard: true });
+      return id;
+    }
+    land(split.layout, { keyboard: true });
+    return id;
+  },
+
+  closeLeaf: (projectId, tabId, leafId) => {
+    const tab = tabsOf(get().layout, projectId).tabs.find((t) => t.id === tabId);
+    const node = tab ? findLeaf(tab.root, leafId) : null;
+    if (!node) return;
+    if (node.pane.kind === "session") {
+      // Ends the session's work — the same call as the rail's ✕, which also
+      // removes this leaf. Closing a view of work *is* ending it here; the way
+      // to step away without killing is Detach, in the rail's menu.
+      get().removeSession(node.pane.id);
+      const heir = focusedLeaf(get().layout);
+      if (heir?.pane.kind === "session") focusKeyboard(heir.pane.id);
+      return;
+    }
+    land(lCloseLeaf(get().layout, projectId, tabId, leafId), { keyboard: true });
+  },
+
+  toggleZoom: () => land(lToggleZoom(get().layout)),
+  swapPane: (dir) => land(swapInDirection(get().layout, dir), { keyboard: true }),
+
+  setSplitRatio: (projectId, tabId, splitId, ratio) => {
+    set({ layout: setTabRatio(get().layout, projectId, tabId, splitId, ratio) });
+    schedulePersist(get);
+  },
+
+  openBeside: (projectId) => {
+    if (!get().projects.some((p) => p.id === projectId)) return;
+    land(lOpenBeside(get().layout, projectId, mint, paneAreaAspect()), { keyboard: true });
+  },
+  openNextBeside: () => {
+    const s = get();
+    const order = s.servers.flatMap((sv) => s.projects.filter((p) => p.serverId === sv.id).map((p) => p.id));
+    const pid = nextUnshown(s.layout, order);
+    if (!pid) return false;
+    get().openBeside(pid);
+    return true;
+  },
+  placeProject: (projectId, tileId, side) => {
+    if (!get().projects.some((p) => p.id === projectId)) return;
+    land(lPlaceTile(get().layout, projectId, tileId, side, mint), { keyboard: true });
+  },
+  closeTile: (tileId) => land(lCloseTile(get().layout, tileId), { keyboard: true }),
+  setViewRatio: (splitId, ratio) => {
+    set({ layout: lSetViewRatio(get().layout, splitId, ratio) });
     schedulePersist(get);
   },
 
   saveCurrentView: (name) => {
     const trimmed = name.trim();
-    if (!trimmed) return;
-    const { deck, panes, savedViews } = get();
+    const at = layoutActiveTab(get().layout);
+    if (!trimmed || !at) return;
+    const { savedViews } = get();
     const view: SavedView = {
       // Re-saving under an existing name updates that view in place; otherwise a
       // fresh id keyed on the clock, which is unique enough for a personal list.
       id: savedViews.find((v) => v.name === trimmed)?.id ?? `view-${Date.now().toString(36)}`,
       name: trimmed,
-      deck,
-      // A copy, not a live reference — a later grid edit must not rewrite a view
-      // the operator already saved.
-      panes: panes.map((p) => (p ? { ...p } : null)),
+      // A copy, not a live reference — a later edit must not rewrite a view the
+      // operator already saved.
+      root: JSON.parse(JSON.stringify(at.tab.root)) as SavedView["root"],
     };
     const next = [...savedViews.filter((v) => v.id !== view.id), view];
     persistSavedViews(next);
@@ -888,18 +1473,37 @@ export const useWorkspace = create<State>((set, get) => ({
     const state = get();
     const view = state.savedViews.find((v) => v.id === id);
     if (!view) return;
-    // A saved cell whose target no longer exists comes back empty rather than
-    // pointing a pane at a session/server/project that was since removed.
-    const alive = (p: PaneRef | null): PaneRef | null => {
-      if (!p) return null;
-      if (p.kind === "session") return state.sessions.some((s) => s.id === p.id) ? p : null;
-      if (p.kind === "host") return state.servers.some((s) => s.id === p.serverId) ? p : null;
-      if (p.kind === "files") return state.projects.some((pr) => pr.id === p.projectId) ? p : null;
-      return p;
+    const sessionById = new Map(state.sessions.map((x) => [x.id, x]));
+    // The view opens in the project its sessions belong to — a session may only
+    // live in its own project's tabs — else in the active project.
+    const firstSession = (function first(n: SavedView["root"]): string | null {
+      if (n.kind === "leaf") return n.pane.kind === "session" && sessionById.has(n.pane.id) ? n.pane.id : null;
+      return first(n.a) ?? first(n.b);
+    })(view.root);
+    const pid = (firstSession && sessionById.get(firstSession)?.projectId) || state.layout.activeProject;
+    if (!pid) return;
+    // A saved pane whose target no longer exists is skipped rather than pointing
+    // at a session/server/project that was since removed.
+    const alive = (p: PaneRef): boolean => {
+      if (p.kind === "session") return sessionById.get(p.id)?.projectId === pid;
+      if (p.kind === "host") return state.servers.some((s) => s.id === p.serverId);
+      return state.projects.some((pr) => pr.id === p.projectId);
     };
-    storage?.setItem(DECK_KEY, deckId(view.deck));
-    set({ deck: view.deck, panes: view.panes.map(alive), focusedCell: null });
-    schedulePersist(get);
+    const root = cloneTree(view.root, alive, mint);
+    if (!root) return;
+    // Its sessions are *moved* here, never shown twice: two panes on one Claude
+    // conversation both write to it.
+    let layout = state.layout;
+    const walk = (n: SavedView["root"]) => {
+      if (n.kind === "leaf") {
+        if (n.pane.kind === "session") layout = removeSessionLeaves(layout, n.pane.id);
+        return;
+      }
+      walk(n.a);
+      walk(n.b);
+    };
+    walk(root);
+    land(addTreeTab(layout, pid, root, view.name, mint).layout, { keyboard: true });
   },
   deleteView: (id) => {
     const next = get().savedViews.filter((v) => v.id !== id);
@@ -907,15 +1511,24 @@ export const useWorkspace = create<State>((set, get) => ({
     set({ savedViews: next });
   },
 
-  // Focus mode (grid 1) only ever *shows* cell 0, so opening must target it —
-  // a stale `focusedCell` left from a grid interaction would otherwise send the
-  // pane to a hidden cell and the view would appear not to change.
-  openSession: (id) => {
-    get().activate(id);
-    get().assignPane(openCell(get()), { kind: "session", id });
+  openSession: (id) => get().activate(id),
+  openHost: (serverId) => {
+    const s = get();
+    // A host pane goes in the active project when that project is on this
+    // server; otherwise in the server's first project. A server with no
+    // project yet borrows the active one — the pane is about the machine.
+    const active = s.projects.find((p) => p.id === s.layout.activeProject);
+    const pid =
+      active?.serverId === serverId
+        ? active.id
+        : (s.projects.find((p) => p.serverId === serverId)?.id ?? active?.id);
+    if (!pid) return;
+    openPaneIn(pid, { kind: "host", serverId }, "host");
   },
-  openHost: (serverId) => get().assignPane(openCell(get()), { kind: "host", serverId }),
-  openFiles: (projectId) => get().assignPane(openCell(get()), { kind: "files", projectId }),
+  openFiles: (projectId) => {
+    if (!get().projects.some((p) => p.id === projectId)) return;
+    openPaneIn(projectId, { kind: "files", projectId }, "files");
+  },
 
   // ── runtime handles ──────────────────────────────────────────────────────
   setLive: (id, handle) => set((s) => ({ live: { ...s.live, [id]: handle } })),
@@ -924,7 +1537,16 @@ export const useWorkspace = create<State>((set, get) => ({
       const { [id]: _gone, ...live } = s.live;
       return { live };
     }),
-  toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
+  toggleRail: () =>
+    set((s) => {
+      const railCollapsed = !s.railCollapsed;
+      try {
+        storage?.setItem(RAIL_COLLAPSED_KEY, railCollapsed ? "1" : "0");
+      } catch {
+        // A full localStorage costs the preference, not the toggle.
+      }
+      return { railCollapsed };
+    }),
   toggleWidgets: () =>
     set((s) => {
       const widgetsCollapsed = !s.widgetsCollapsed;
@@ -981,12 +1603,14 @@ export const useWorkspace = create<State>((set, get) => ({
     schedulePersist(get);
 
     try {
-      const content = await api.fsRead(target, path);
+      // Versioned: the token comes back with the bytes, so a later save can be
+      // refused if the file changed on disk in between (see `buffers.ts`).
+      const { content, version } = await api.fsReadVersioned(target, path);
       set((s) => {
         const b = s.buffers[key];
         if (!b) return s;
         const text = content.kind === "text" ? content.text : "";
-        return { buffers: { ...s.buffers, [key]: { ...b, content, text, saved: text, loading: false } } };
+        return { buffers: { ...s.buffers, [key]: { ...b, content, text, saved: text, loading: false, version } } };
       });
     } catch (e) {
       set((s) => {
@@ -1051,26 +1675,35 @@ export const useWorkspace = create<State>((set, get) => ({
   save: async (key) => {
     const buffer = get().buffers[key];
     if (!buffer || buffer.saving || buffer.content?.kind !== "text") return;
+    // The disk moved and the operator has not chosen yet — writing now would
+    // decide for them. `keepMine` clears this and saves.
+    if (buffer.disk) return;
     const target = get().targetOfProject(buffer.projectId);
 
     set((s) => ({ buffers: { ...s.buffers, [key]: { ...s.buffers[key]!, saving: true, saveError: null } } }));
     // Captured before the await: the user may keep typing during the write.
     const written = buffer.text;
     try {
-      await api.fsWrite(target, buffer.path, written);
+      // Quotes the version it was read at: a file an agent rewrote since is
+      // refused with a conflict, never silently overwritten.
+      const version = await api.fsWriteVersioned(target, buffer.path, written, buffer.version ?? null);
       set((s) => {
         const cur = s.buffers[key];
         if (!cur) return s;
-        return { buffers: { ...s.buffers, [key]: { ...cur, saved: written, saving: false } } };
+        return { buffers: { ...s.buffers, [key]: { ...cur, saved: written, saving: false, version } } };
       });
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      const conflict = message.startsWith(CONFLICT_PREFIX);
       set((s) => {
         const cur = s.buffers[key];
         if (!cur) return s;
         return {
           buffers: {
             ...s.buffers,
-            [key]: { ...cur, saving: false, saveError: e instanceof Error ? e.message : String(e) },
+            [key]: conflict
+              ? { ...cur, saving: false, disk: { kind: "conflict" } }
+              : { ...cur, saving: false, saveError: message },
           },
         };
       });
@@ -1095,7 +1728,8 @@ export const useWorkspace = create<State>((set, get) => ({
       if (activePath) get().activateBuffer(projectId, bufferKey(projectId, activePath));
     })();
   },
-}));
+  };
+});
 
 /**
  * Keep every open window's **pool** in step.
@@ -1109,17 +1743,28 @@ export const useWorkspace = create<State>((set, get) => ({
  */
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
-    if (e.key !== V3_KEY || e.newValue === null) return;
-    const pool = resolveWorkspace(e.newValue, null);
+    if (e.key !== V4_KEY || e.newValue === null) return;
+    let pool: Partial<PersistedV4>;
+    try {
+      pool = JSON.parse(e.newValue) as Partial<PersistedV4>;
+    } catch {
+      return;
+    }
+    const cur = useWorkspace.getState();
+    const servers = pool.servers ?? cur.servers;
+    const projects = pool.projects ?? cur.projects;
+    const sessions = pool.sessions ?? cur.sessions;
     useWorkspace.setState({
-      servers: pool.servers,
-      projects: pool.projects,
-      sessions: pool.sessions,
-      openPaths: pool.openPaths,
-      activePath: pool.activePath,
-      // Panes and activeSession are this window's own — deliberately untouched,
-      // so a rearrangement in another window does not reach across and move
-      // these tiles.
+      servers,
+      projects,
+      sessions,
+      openPaths: pool.openPaths ?? cur.openPaths,
+      activePath: pool.activePath ?? cur.activePath,
+      // The layout and activeSession are this window's own — a rearrangement in
+      // another window does not reach across and move these panes. But the
+      // invariant is re-run against the new pool: a session another window
+      // started gets a tab here (unfocused), and one it ended loses its pane.
+      layout: normalizeLayout(cur.layout, { servers, projects, sessions }, mint),
     });
   });
 }

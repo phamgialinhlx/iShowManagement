@@ -34,6 +34,50 @@ const KIND_WRITE: u8 = 8;
 const KIND_ACK: u8 = 9;
 const KIND_READ: u8 = 10;
 const KIND_SCROLLBACK: u8 = 11;
+const KIND_SET_KIND_ENV: u8 = 12;
+const KIND_SET_NAMED_ENV: u8 = 13;
+const KIND_HELLO_BOUND: u8 = 14;
+const KIND_REFUSED: u8 = 15;
+const KIND_GET_BINDING: u8 = 16;
+const KIND_BINDING: u8 = 17;
+const KIND_SWITCH: u8 = 18;
+
+/// Which credential set a session runs on — named per session, not per daemon.
+///
+/// The per-kind set ([`Frame::SetKindEnv`]) is one environment shared by every
+/// session of that kind on the host, which cannot express two Claude sessions
+/// on two accounts, a child inheriting its parent's provider, or one session
+/// moving to another account without moving everyone. A binding names the set
+/// (a profile id delivered with [`Frame::SetNamedEnv`], or one of the reserved
+/// names in `rmux_claude_core::env_kind`) and, for a fallback chain, carries the
+/// chain's state so the daemon can switch members itself while the app is
+/// closed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Binding {
+    /// `claude`, `deepseek` or `openai` — must match the session's name prefix.
+    pub kind: String,
+    /// The set this session spawns with. For a chain, the active member.
+    pub set: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<rmux_claude_core::fallback::ChainState>,
+}
+
+/// What [`Frame::GetBinding`] answers: the binding plus what the daemon knows
+/// about it. Names and labels only — never a value from a set.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingReport {
+    pub session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<Binding>,
+    /// Display names for the set names that appear above.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// When the current set was bound (unix seconds).
+    #[serde(default)]
+    pub since: u64,
+}
 
 /// What an attaching client asks for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +135,57 @@ pub enum Frame {
     /// travels over the agent's `0600` socket, and the daemon keeps it in memory
     /// only — nothing is written to disk.
     SetEnv(std::collections::BTreeMap<String, String>),
+    /// Client → daemon: **replace** the credential environment for one agent
+    /// kind (`claude`, `deepseek`, `openai` — see
+    /// `rmux_claude_core::env_kind`). Applied only to sessions of that kind at
+    /// spawn, so one provider's credentials never reach another agent.
+    ///
+    /// Answered with [`Frame::Ack`] during the handshake — `ok: false` for a
+    /// kind the daemon does not know. The answer is the point: a daemon from
+    /// before this frame existed fails to decode it and drops the connection,
+    /// so a client that sees no `Ack` knows the credentials did **not** land
+    /// and says so, instead of starting a session that silently falls back to
+    /// whatever provider the host defaults to. `SetEnv` is fire-and-forget and
+    /// could never have told it.
+    SetKindEnv { kind: String, env: std::collections::BTreeMap<String, String> },
+    /// Client → daemon: store one **named** credential set for `kind`, replacing
+    /// any set of that name. A session bound to it ([`Frame::HelloBound`]) gets
+    /// exactly this set at spawn — and nothing from the per-kind set.
+    ///
+    /// An empty value is a **removal**: the key is taken out of the environment
+    /// the session would otherwise inherit (the shared account, the host's shell
+    /// profile). That is how a subscription-token profile clears
+    /// `ANTHROPIC_API_KEY`. Answered with [`Frame::Ack`]; an older daemon drops
+    /// the connection instead, and the client reports that loudly.
+    SetNamedEnv {
+        kind: String,
+        set: String,
+        label: Option<String>,
+        env: std::collections::BTreeMap<String, String>,
+    },
+    /// Client → daemon: a [`Hello`] that also binds the session to a set.
+    ///
+    /// **A separate frame kind, not a field on `Hello`, and that is the safety
+    /// property.** `Hello` is parsed leniently so old daemons accept new
+    /// clients; a binding field there would be *ignored* by an older daemon,
+    /// which would then start the session on whatever provider the host
+    /// defaults to while the app named another — the silent mis-routing this
+    /// whole design exists to prevent. An older daemon cannot decode this frame
+    /// and drops the connection, and the client refuses to start.
+    ///
+    /// Answered with `Ack { ok: true }` before the replay, or [`Frame::Refused`]
+    /// (unknown set, wrong kind) and a close.
+    HelloBound { hello: Hello, binding: Binding },
+    /// Daemon → client: a [`Frame::HelloBound`] or [`Frame::Switch`] was refused,
+    /// and why — said in the session's own terminal, where the operator looks.
+    Refused { reason: String },
+    /// Client → daemon: which set is this session on? Handshake-only.
+    GetBinding { session: String },
+    /// Daemon → client: the answer to [`Frame::GetBinding`].
+    BindingIs(BindingReport),
+    /// Client → daemon: move a chained session to `member` now and relaunch it —
+    /// the operator's "switch back". Answered `Ack` or `Refused`.
+    Switch { session: String, member: String },
     /// Client → daemon: end this session for good.
     ///
     /// Closing a tab has to say so explicitly. The whole design is that dropping
@@ -151,6 +246,37 @@ pub enum Frame {
     /// buffer by the [`Frame::Ack`] that is *not* sent, i.e. a caller that needs
     /// the distinction uses `Write`/`Ack`; a reader just takes what it gets.
     Scrollback(Vec<u8>),
+}
+
+/// The payload of [`Frame::SetNamedEnv`].
+#[derive(Serialize, Deserialize)]
+struct NamedEnv {
+    kind: String,
+    set: String,
+    #[serde(default)]
+    label: Option<String>,
+    env: std::collections::BTreeMap<String, String>,
+}
+
+/// The payload of [`Frame::HelloBound`].
+#[derive(Serialize, Deserialize)]
+struct HelloBoundWire {
+    hello: Hello,
+    binding: Binding,
+}
+
+/// The payload of [`Frame::Switch`].
+#[derive(Serialize, Deserialize)]
+struct SwitchWire {
+    session: String,
+    member: String,
+}
+
+/// The payload of [`Frame::SetKindEnv`].
+#[derive(Serialize, Deserialize)]
+struct KindEnv {
+    kind: String,
+    env: std::collections::BTreeMap<String, String>,
 }
 
 /// One session, as the daemon sees it.
@@ -218,6 +344,11 @@ impl Frame {
                 KIND_SET_ENV,
                 serde_json::to_vec(env).expect("an env map is always serialisable"),
             ),
+            Frame::SetKindEnv { kind, env } => (
+                KIND_SET_KIND_ENV,
+                serde_json::to_vec(&KindEnv { kind: kind.clone(), env: env.clone() })
+                    .expect("a kind env is always serialisable"),
+            ),
             // `[name_len: u16 LE][name][data]`, not JSON. The data is arbitrary
             // bytes — a pasted message runs to kilobytes — and a JSON array of
             // numbers inflates that by roughly four times for no gain, on a
@@ -231,6 +362,32 @@ impl Frame {
                 (KIND_WRITE, p)
             }
             Frame::Ack { ok } => (KIND_ACK, vec![u8::from(*ok)]),
+            Frame::SetNamedEnv { kind, set, label, env } => (
+                KIND_SET_NAMED_ENV,
+                serde_json::to_vec(&NamedEnv {
+                    kind: kind.clone(),
+                    set: set.clone(),
+                    label: label.clone(),
+                    env: env.clone(),
+                })
+                .expect("a named env is always serialisable"),
+            ),
+            Frame::HelloBound { hello, binding } => (
+                KIND_HELLO_BOUND,
+                serde_json::to_vec(&HelloBoundWire { hello: hello.clone(), binding: binding.clone() })
+                    .expect("a bound hello is always serialisable"),
+            ),
+            Frame::Refused { reason } => (KIND_REFUSED, reason.as_bytes().to_vec()),
+            Frame::GetBinding { session } => (KIND_GET_BINDING, session.as_bytes().to_vec()),
+            Frame::BindingIs(report) => (
+                KIND_BINDING,
+                serde_json::to_vec(report).expect("a binding report is always serialisable"),
+            ),
+            Frame::Switch { session, member } => (
+                KIND_SWITCH,
+                serde_json::to_vec(&SwitchWire { session: session.clone(), member: member.clone() })
+                    .expect("a switch is always serialisable"),
+            ),
             Frame::Read { session } => (KIND_READ, session.as_bytes().to_vec()),
             Frame::Scrollback(bytes) => (KIND_SCROLLBACK, bytes.clone()),
         };
@@ -280,6 +437,10 @@ impl Frame {
             }
             KIND_KILL => Frame::Kill { session: String::from_utf8(payload.to_vec())? },
             KIND_SET_ENV => Frame::SetEnv(serde_json::from_slice(payload)?),
+            KIND_SET_KIND_ENV => {
+                let KindEnv { kind, env } = serde_json::from_slice(payload)?;
+                Frame::SetKindEnv { kind, env }
+            }
             KIND_LIST => Frame::List,
             KIND_SESSIONS => Frame::Sessions(serde_json::from_slice(payload)?),
             KIND_WRITE => {
@@ -303,6 +464,21 @@ impl Frame {
                 Frame::Ack { ok: payload[0] != 0 }
             }
             KIND_READ => Frame::Read { session: String::from_utf8(payload.to_vec())? },
+            KIND_SET_NAMED_ENV => {
+                let NamedEnv { kind, set, label, env } = serde_json::from_slice(payload)?;
+                Frame::SetNamedEnv { kind, set, label, env }
+            }
+            KIND_HELLO_BOUND => {
+                let HelloBoundWire { hello, binding } = serde_json::from_slice(payload)?;
+                Frame::HelloBound { hello, binding }
+            }
+            KIND_REFUSED => Frame::Refused { reason: String::from_utf8_lossy(payload).into_owned() },
+            KIND_GET_BINDING => Frame::GetBinding { session: String::from_utf8(payload.to_vec())? },
+            KIND_BINDING => Frame::BindingIs(serde_json::from_slice(payload)?),
+            KIND_SWITCH => {
+                let SwitchWire { session, member } = serde_json::from_slice(payload)?;
+                Frame::Switch { session, member }
+            }
             KIND_SCROLLBACK => Frame::Scrollback(payload.to_vec()),
             other => anyhow::bail!("unknown frame kind {other}"),
         };
@@ -337,6 +513,35 @@ mod tests {
             Frame::Exited { code: 3 },
             Frame::Kill { session: "api".into() },
             Frame::SetEnv([("A".to_owned(), "b".to_owned())].into_iter().collect()),
+            Frame::SetKindEnv {
+                kind: "openai".into(),
+                env: [("OPENAI_API_KEY".to_owned(), "k".to_owned())].into_iter().collect(),
+            },
+            Frame::SetNamedEnv {
+                kind: "claude".into(),
+                set: "7".into(),
+                label: Some("Work Max".into()),
+                env: [("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), "t".to_owned()), ("ANTHROPIC_API_KEY".to_owned(), String::new())]
+                    .into_iter()
+                    .collect(),
+            },
+            Frame::HelloBound {
+                hello: hello(),
+                binding: Binding {
+                    kind: "claude".into(),
+                    set: "2".into(),
+                    chain: Some(rmux_claude_core::fallback::ChainState {
+                        id: "c1".into(),
+                        members: vec!["2".into(), "3".into()],
+                        active: "2".into(),
+                        ..Default::default()
+                    }),
+                },
+            },
+            Frame::Refused { reason: "no set called 9".into() },
+            Frame::GetBinding { session: "claude-x".into() },
+            Frame::BindingIs(BindingReport { session: "claude-x".into(), since: 5, ..Default::default() }),
+            Frame::Switch { session: "claude-x".into(), member: "2".into() },
         ] {
             let encoded = frame.encode();
             let (decoded, used) = Frame::decode(&encoded).unwrap().unwrap();
@@ -435,6 +640,38 @@ mod tests {
         let (decoded, used) = Frame::decode(&encoded).unwrap().unwrap();
         assert_eq!(decoded, Frame::Data(Vec::new()));
         assert_eq!(used, 5);
+    }
+
+    #[test]
+    fn the_kind_env_frame_keeps_the_old_frames_wire_format() {
+        // `SetEnv` is unchanged on the wire, so an older client still talks to
+        // this daemon; the per-kind frame is a new kind number, which an older
+        // daemon rejects outright (`an_unknown_kind_is_…` below) rather than
+        // misreading as the global environment.
+        let old = Frame::SetEnv([("A".to_owned(), "b".to_owned())].into_iter().collect()).encode();
+        assert_eq!(old[0], KIND_SET_ENV);
+        assert_eq!(&old[5..], br#"{"A":"b"}"#);
+        let new = Frame::SetKindEnv { kind: "claude".into(), env: Default::default() }.encode();
+        assert_eq!(new[0], KIND_SET_KIND_ENV);
+        assert_ne!(new[0], KIND_SET_ENV);
+    }
+
+    #[test]
+    fn a_bound_hello_is_a_new_kind_so_an_old_daemon_cannot_ignore_the_binding() {
+        // The compatibility rule: an older daemon parses `Hello` leniently and
+        // would *drop* an unknown field, starting the session on the host's
+        // default provider. A new frame kind is rejected outright instead.
+        let bound = Frame::HelloBound {
+            hello: hello(),
+            binding: Binding { kind: "claude".into(), set: "1".into(), chain: None },
+        }
+        .encode();
+        assert_eq!(bound[0], KIND_HELLO_BOUND);
+        assert_ne!(bound[0], KIND_HELLO);
+        // And a plain Hello is byte-for-byte what it always was.
+        let plain = Frame::Hello(hello()).encode();
+        assert_eq!(plain[0], KIND_HELLO);
+        assert!(!String::from_utf8_lossy(&plain[5..]).contains("binding"));
     }
 
     #[test]

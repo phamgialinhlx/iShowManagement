@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { api, type TargetRef } from "../lib/api";
 import { MenuItem, MenuSurface } from "./Menu";
 import { describe, uploadFiles } from "../lib/upload";
+import { startDownload } from "../lib/transfer-run";
+import { copyText } from "../lib/clipboard";
 
 export type MenuTarget = {
   x: number;
@@ -90,13 +92,13 @@ export function TreeMenu({
 
   const copy = async (value: string, which: "full" | "relative") => {
     try {
-      await navigator.clipboard.writeText(value);
+      await copyText(value);
       setCopied(which);
       // Long enough to read, short enough that the menu is not left standing
       // open on top of the tree.
       setTimeout(onClose, 900);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "could not write to the clipboard");
+      setError(e instanceof Error ? e.message : typeof e === "string" ? e : "could not write to the clipboard");
     }
   };
 
@@ -112,7 +114,7 @@ export function TreeMenu({
     setDownloading(true);
     setError(null);
     try {
-      const result = await api.fsDownload(target, menu.path);
+      const result = await startDownload(target, menu.path);
       // The folder, not the whole path: the menu is 240px wide and the leaf name
       // is already the thing they right-clicked.
       const folder = result.path.slice(0, Math.max(0, result.path.lastIndexOf("/")));

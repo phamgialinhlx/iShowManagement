@@ -96,6 +96,27 @@ fn forward_command_args(host: &str, port: u16, identity: &[String]) -> Vec<Strin
     args
 }
 
+/// `ssh -N -L 127.0.0.1:<local>:127.0.0.1:<remote> <host>`, with the host's key.
+///
+/// The *app-owned* forward, for a server rmux started itself (DeepSeek
+/// Harness's Web UI). Both ends are spelled `127.0.0.1` on purpose:
+///
+/// - the **bind** side, because a bare `-L <port>:` binds per `GatewayPorts`, and
+///   an authenticated agent UI reachable from the LAN is a hole;
+/// - the **dial** side, because `localhost` may resolve to `::1` first on the
+///   host while the server listens on IPv4 loopback only.
+///
+/// Unlike [`forward_command_args`] the local port is *not* the remote port: the
+/// operator never types this address, rmux navigates to it, so a free port is
+/// chosen rather than colliding with whatever the operator runs locally.
+fn loopback_command_args(host: &str, local: u16, remote: u16, identity: &[String]) -> Vec<String> {
+    let mut args = base_forward_options(identity);
+    args.push("-L".into());
+    args.push(format!("127.0.0.1:{local}:127.0.0.1:{remote}"));
+    args.push(host.into());
+    args
+}
+
 /// `ssh -N -D 127.0.0.1:port <host>`, with the host's key.
 ///
 /// `127.0.0.1:` is not decoration: a bare `-D <port>` binds per the host's
@@ -138,6 +159,11 @@ struct Running {
 #[derive(Default)]
 pub struct Forwards {
     running: Mutex<HashMap<(String, u16), Running>>,
+    /// App-owned loopback forwards, keyed by `(host, remote port)`; the
+    /// [`Forward::port`] inside is the *local* end. A separate map so an
+    /// operator's own `-L 3000` and rmux's forward to the same remote port can
+    /// never be mistaken for one another.
+    loopbacks: Mutex<HashMap<(String, u16), Running>>,
 }
 
 impl Forwards {
@@ -339,6 +365,119 @@ impl Forwards {
         };
     }
 
+    /// Reach `127.0.0.1:<remote>` on `host` from a free local loopback port.
+    ///
+    /// Idempotent while the tunnel is `Starting`/`Active`: the same local port
+    /// comes back. A `Failed` or exited one — the network dropped, the laptop
+    /// slept — is replaced by a fresh ssh on a fresh port, which is what makes
+    /// "re-establish after network loss" a matter of asking again. Returns the
+    /// forward as it stands *after the grace window*, so a bind or auth failure
+    /// is reported here rather than as a dead page later.
+    pub async fn loopback(self: &Arc<Self>, host: &str, remote: u16) -> Forward {
+        let key = (host.to_owned(), remote);
+        {
+            let mut running = self.loopbacks.lock().await;
+            if let Some(existing) = running.get_mut(&key) {
+                let exited = existing
+                    .child
+                    .as_mut()
+                    .map(|c| c.try_wait().ok().flatten().is_some())
+                    .unwrap_or(true);
+                if !exited
+                    && matches!(existing.forward.state, ForwardState::Starting | ForwardState::Active)
+                {
+                    return existing.forward.clone();
+                }
+                running.remove(&key);
+            }
+        }
+
+        let local = match free_local_port() {
+            Ok(p) => p,
+            Err(e) => {
+                return Forward { port: 0, state: ForwardState::Failed, error: Some(e.to_string()) };
+            }
+        };
+        let spawned = Command::new("ssh")
+            .no_console_window()
+            .args(loopback_command_args(host, local, remote, &crate::keys::identity_args_for(host)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn();
+        let mut child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                return Forward { port: local, state: ForwardState::Failed, error: Some(e.to_string()) };
+            }
+        };
+
+        let stderr = child.stderr.take();
+        // The first stderr line is only the *reason*; it is read in the
+        // background because a healthy tunnel never writes one.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let message = match stderr {
+                Some(pipe) => read_first_error(pipe).await,
+                None => None,
+            };
+            let _ = tx.send(message);
+        });
+
+        tokio::time::sleep(GRACE).await;
+        let forward = match child.try_wait().ok().flatten() {
+            Some(status) => {
+                let message = tokio::time::timeout(std::time::Duration::from_millis(300), rx)
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten();
+                Forward {
+                    port: local,
+                    state: ForwardState::Failed,
+                    error: Some(message.unwrap_or_else(|| format!("ssh exited ({status})"))),
+                }
+            }
+            None => Forward { port: local, state: ForwardState::Active, error: None },
+        };
+        if forward.state == ForwardState::Active {
+            self.loopbacks
+                .lock()
+                .await
+                .insert(key, Running { child: Some(child), forward: forward.clone() });
+        }
+        forward
+    }
+
+    /// Close one app-owned loopback forward. True when one was open.
+    pub async fn stop_loopback(&self, host: &str, remote: u16) -> bool {
+        match self.loopbacks.lock().await.remove(&(host.to_owned(), remote)) {
+            Some(mut entry) => {
+                if let Some(child) = entry.child.as_mut() {
+                    let _ = child.kill().await;
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Close every app-owned loopback forward to `host` — a server disconnect.
+    /// Returns how many were closed, so the disconnect can report it.
+    pub async fn stop_loopbacks_for(&self, host: &str) -> usize {
+        let mut running = self.loopbacks.lock().await;
+        let keys: Vec<_> = running.keys().filter(|(h, _)| h == host).cloned().collect();
+        for key in &keys {
+            if let Some(mut entry) = running.remove(key)
+                && let Some(child) = entry.child.as_mut()
+            {
+                let _ = child.kill().await;
+            }
+        }
+        keys.len()
+    }
+
     /// Close every tunnel. Called when the app quits, so no ssh outlives it.
     pub async fn stop_all(&self) {
         let mut running = self.running.lock().await;
@@ -348,6 +487,13 @@ impl Forwards {
             }
         }
         running.clear();
+        let mut loopbacks = self.loopbacks.lock().await;
+        for entry in loopbacks.values_mut() {
+            if let Some(child) = entry.child.as_mut() {
+                let _ = child.kill().await;
+            }
+        }
+        loopbacks.clear();
     }
 }
 
@@ -457,15 +603,15 @@ mod tests {
         // failed on every host that authenticates with an rmux-generated key,
         // while the host's terminals (multiplexed through the master) worked
         // fine. Both the -L forward and the -D proxy carry the identity now.
-        let identity = ["-i".to_owned(), "/keys/rmux_yitec_1.2.3.4_ed25519".to_owned()];
+        let identity = ["-i".to_owned(), "/keys/rmux_dev_1.2.3.4_ed25519".to_owned()];
 
         for args in [
-            forward_command_args("yitec@1.2.3.4", 3000, &identity),
-            socks_command_args("yitec@1.2.3.4", 3000, &identity),
+            forward_command_args("dev@1.2.3.4", 3000, &identity),
+            socks_command_args("dev@1.2.3.4", 3000, &identity),
         ] {
             let i = args.iter().position(|a| a == "-i").expect("-i present");
-            let key = args.iter().position(|a| a.ends_with("rmux_yitec_1.2.3.4_ed25519")).unwrap();
-            let host = args.iter().rposition(|a| a == "yitec@1.2.3.4").unwrap();
+            let key = args.iter().position(|a| a.ends_with("rmux_dev_1.2.3.4_ed25519")).unwrap();
+            let host = args.iter().rposition(|a| a == "dev@1.2.3.4").unwrap();
             assert_eq!(key, i + 1, "the key path follows -i: {args:?}");
             assert!(i < host, "the identity is offered before the destination: {args:?}");
         }
@@ -474,6 +620,61 @@ mod tests {
         // file makes ssh warn on every connection.
         let bare = forward_command_args("example", 3000, &[]);
         assert!(!bare.iter().any(|a| a == "-i"), "{bare:?}");
+    }
+
+    /// A forward runs its own connection, so the key the operator chose for the
+    /// server has to reach it the same way rmux's own key does — through
+    /// `identity_args_for`, which is what `spawn` calls.
+    #[test]
+    fn a_forward_offers_the_chosen_identity_while_it_exists() {
+        let _serial = crate::keys::CHOSEN_TEST_LOCK.lock();
+        let dir = std::env::temp_dir().join(format!("rmux-fwd-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("work_key");
+        std::fs::write(&key, "x").unwrap();
+        let key_s = key.to_string_lossy().into_owned();
+        let host = "me@forward-identity-test";
+        crate::keys::choose_identity(host, &key);
+
+        for args in [
+            forward_command_args(host, 3000, &crate::keys::identity_args_for(host)),
+            socks_command_args(host, 3000, &crate::keys::identity_args_for(host)),
+            loopback_command_args(host, 1, 2, &crate::keys::identity_args_for(host)),
+        ] {
+            assert!(args.windows(2).any(|w| w[0] == "-i" && w[1] == key_s), "{args:?}");
+            assert!(!args.iter().any(|a| a.contains("IdentitiesOnly")));
+        }
+
+        std::fs::remove_file(&key).unwrap();
+        assert!(!forward_command_args(host, 3000, &crate::keys::identity_args_for(host)).contains(&key_s));
+        crate::keys::replace_chosen_identities(Vec::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_app_owned_forward_is_loopback_on_both_ends() {
+        // Bind side explicit, or GatewayPorts decides and an authenticated agent
+        // UI can end up on the LAN; dial side IPv4, because the server listens
+        // on 127.0.0.1 and `localhost` may resolve to ::1 first.
+        let args = loopback_command_args("example", 50123, 41234, &[]);
+        assert!(args.windows(2).any(|w| w == ["-L", "127.0.0.1:50123:127.0.0.1:41234"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["-o", "ControlPath=none"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["-o", "ExitOnForwardFailure=yes"]), "{args:?}");
+        assert_eq!(args.last().map(String::as_str), Some("example"));
+    }
+
+    #[tokio::test]
+    async fn a_loopback_forward_that_cannot_connect_fails_and_is_not_kept() {
+        // `.invalid` never resolves (RFC 6761), so ssh exits inside the grace
+        // window. The forward must say Failed with ssh's reason — and must not
+        // be remembered, or asking again (the network-loss path) would hand
+        // back the dead one instead of dialling afresh.
+        let forwards = Arc::new(Forwards::new());
+        let f = forwards.loopback("rmux-forward-test.invalid", 3080).await;
+        assert_eq!(f.state, ForwardState::Failed, "{f:?}");
+        assert!(f.error.as_deref().is_some_and(|e| !e.is_empty()), "{f:?}");
+        assert_eq!(forwards.stop_loopbacks_for("rmux-forward-test.invalid").await, 0);
+        assert!(!forwards.stop_loopback("rmux-forward-test.invalid", 3080).await);
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { api, isTauri, type LogStatus } from "../lib/api";
 import { debugLogging, setDebugLoggingEnabled } from "../lib/debug-log";
+import { copyText } from "../lib/clipboard";
 
 /**
  * Getting the log out of the app.
@@ -58,7 +59,7 @@ export function DiagnosticsPanel() {
 
   const copyPath = async (value: string) => {
     try {
-      await navigator.clipboard.writeText(value);
+      await copyText(value);
     } catch {
       // The path is already on screen; failing to copy costs nothing.
     }

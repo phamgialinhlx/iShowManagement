@@ -19,6 +19,7 @@ import {
   writeSplit,
 } from "../lib/companion";
 import { SessionSettings } from "./SessionSettings";
+import { FallbackStrip } from "./FallbackStrip";
 import {
   Icon,
   IconButton,
@@ -30,6 +31,7 @@ import {
   GIT_PATH,
   GEAR_PATH,
 } from "./SessionPaneChrome";
+import { effectiveLowLatency } from "../lib/transport-default";
 
 /**
  * A Claude session pane: the live TUI is the pane. **Transcript** and **Jira**
@@ -168,7 +170,9 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
       >
         {/* Always mounted — hidden, never torn down. Its status line carries the
             transcript / Jira icons, so this is the only header in Claude view. */}
-        <div className="h-full" style={{ display: active === "claude" ? "block" : "none" }}>
+        <div className="flex h-full flex-col" style={{ display: active === "claude" ? "flex" : "none" }}>
+          <FallbackStrip sessionId={session.id} target={target} daemonName={reattachName(session)} />
+          <div className="min-h-0 flex-1">
           <ClaudePanel
             sessionId={session.id}
             target={target}
@@ -180,9 +184,11 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
             fullscreen={session.fullscreen}
             skipPermissions={session.skipPermissions}
             modelProfile={session.modelProfile}
-            lowLatency={session.lowLatency}
+            activeProfile={session.activeProfile}
+            lowLatency={effectiveLowLatency(session)}
             headerActions={headerActions}
           />
+          </div>
         </div>
 
         {active === "transcript" && (
@@ -249,7 +255,7 @@ export function ClaudeSessionPane({ session }: { session: SessionV3 }) {
               // part of the same piece of work, and a split where one half
               // predicts its echo and the other does not is two terminals that
               // feel different for no reason the operator can see.
-              lowLatency={session.lowLatency}
+              lowLatency={effectiveLowLatency(session)}
               // Shares the conversation's id, so it would answer the same
               // focus request. Switching to a Claude pane means the
               // conversation, not the shell beside it.

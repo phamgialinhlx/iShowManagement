@@ -35,6 +35,11 @@ pub struct ConfigHost {
     /// `User` from the same block. Display only, as above.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// `Port` from the same block, verbatim (it may be a token). Display only:
+    /// the connect dialog shows it as a *hint* in an empty PORT field and never
+    /// copies it into the target — ssh applies the config's own port itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
 }
 
 /// Guards against an `Include` cycle, which would otherwise recurse forever.
@@ -215,20 +220,22 @@ fn parse(text: &str) -> Vec<Entry> {
                         alias: pattern.to_owned(),
                         hostname: None,
                         user: None,
+                        port: None,
                     }));
                 }
             }
             // A `Match` block ends the current `Host` block, and its own settings
             // belong to no single alias.
             "match" => current.clear(),
-            "hostname" | "user" => {
+            "hostname" | "user" | "port" => {
                 for &index in &current {
                     if let Some(Entry::Host(host)) = entries.get_mut(index) {
-                        if keyword == "hostname" {
-                            host.hostname = Some(value.to_owned());
-                        } else {
-                            host.user = Some(value.to_owned());
-                        }
+                        let slot = match keyword.as_str() {
+                            "hostname" => &mut host.hostname,
+                            "user" => &mut host.user,
+                            _ => &mut host.port,
+                        };
+                        *slot = Some(value.to_owned());
                     }
                 }
             }
@@ -295,7 +302,7 @@ mod tests {
     #[test]
     fn unquoted_whitespace_still_separates_aliases() {
         // Faithful to ssh: `Host a b` means `ssh a` and `ssh b` both work.
-        let found = hosts("Host Build Server\n    HostName 192.168.100.123\n");
+        let found = hosts("Host Build Server\n    HostName 10.0.1.123\n");
         assert_eq!(found.iter().map(|h| h.alias.as_str()).collect::<Vec<_>>(), ["Build", "Server"]);
     }
 
@@ -382,5 +389,12 @@ mod tests {
         let found = hosts("Host devbox\n    HostName 10.0.0.5\n");
         assert_eq!(found[0].alias, "devbox", "the alias is the connection target");
         assert_ne!(found[0].alias, found[0].hostname.clone().unwrap_or_default());
+    }
+
+    #[test]
+    fn a_port_is_surfaced_as_a_display_hint() {
+        let found = hosts("Host devbox\n    HostName 10.0.0.5\n    Port 2200\n");
+        assert_eq!(found[0].port.as_deref(), Some("2200"));
+        assert_eq!(found[0].alias, "devbox");
     }
 }

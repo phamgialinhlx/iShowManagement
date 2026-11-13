@@ -13,7 +13,7 @@
 //! attributes became the `register` table below, with argument structs carrying
 //! the camelCase keys Tauri derived from the old parameter names.
 
-use rmux_git::{Against, Change, Commit, FileDiff, Status};
+use rmux_git::{Against, BranchSummary, Change, Commit, FileDiff, Status};
 use rmux_ssh::SshTarget;
 use rmux_transport::{LocalTarget, Target, TargetId};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,15 @@ pub async fn git_repo(target: TargetRef, folder: String) -> Result<RepoInfo, Str
     let t = resolved(&target).await?;
     let root = rmux_git::repo_root(t.as_ref(), &folder).await.map_err(|e| e.to_string())?;
     Ok(RepoInfo { root })
+}
+
+/// The branch line the sidebar shows under a project; `None` outside a repo.
+///
+/// Takes the project *folder*, not a root: it is one round trip, and `git -C`
+/// finds the work tree from any subdirectory itself.
+pub async fn git_branch(target: TargetRef, folder: String) -> Result<Option<BranchSummary>, String> {
+    let t = resolved(&target).await?;
+    rmux_git::branch_summary(t.as_ref(), &folder).await.map_err(|e| e.to_string())
 }
 
 pub async fn git_status(target: TargetRef, root: String) -> Result<Status, String> {
@@ -118,6 +127,7 @@ pub struct GitFileDiffArgs {
 
 pub fn register(r: &mut Registry) {
     r.add("git_repo", Web::Yes, |_, a: GitRepoArgs| git_repo(a.target, a.folder));
+    r.add("git_branch", Web::Yes, |_, a: GitRepoArgs| git_branch(a.target, a.folder));
     r.add("git_status", Web::Yes, |_, a: GitStatusArgs| git_status(a.target, a.root));
     r.add("git_log", Web::Yes, |_, a: GitLogArgs| git_log(a.target, a.root, a.limit));
     r.add("git_commit_files", Web::Yes, |_, a: GitCommitFilesArgs| {

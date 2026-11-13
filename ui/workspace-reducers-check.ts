@@ -4,8 +4,6 @@ import {
   addProject,
   addSession,
   removeSession,
-  assignPane,
-  closePane,
   type Core,
 } from "./src/lib/workspace-reducers.ts";
 import { isClaudeSession, reattachName, serverId } from "./src/lib/workspace-model.ts";
@@ -52,45 +50,18 @@ export function run(log: (line: string) => void): boolean {
     check("adding a session makes it active", ws.activeSession === "term-1");
   }
 
-  // ── Removing a session: structure survives, panes clear, active hands off ──
+  // ── Removing a session: structure survives, active hands off ─────────────
+  //
+  // Where it was *shown* is no longer this reducer's business: the layout tree
+  // drops its leaf (`removeSessionLeaves`, pinned in `layout-tree-check.ts`).
   {
     let { ws } = seed();
-    ws = assignPane(ws, 0, { kind: "session", id: "claude-1" });
-    ws = assignPane(ws, 1, { kind: "session", id: "term-1" });
     ws = removeSession(ws, "term-1");
 
     check("the session is gone", !ws.sessions.some((s) => s.id === "term-1"));
     check("its Project stays (empty projects persist)", ws.projects.length === 1);
-    check("its pane is cleared to null", ws.panes[1] === null);
-    check("the other pane is untouched", ws.panes[0]?.kind === "session" && (ws.panes[0] as { id: string }).id === "claude-1");
     check("active hands off to the survivor", ws.activeSession === "claude-1");
     check("removing an unknown id is a no-op", removeSession(ws, "nope") === ws);
-  }
-
-  // ── Pane placement: a session lives in exactly one tile ───────────────────
-  {
-    let { ws } = seed();
-    ws = assignPane(ws, 0, { kind: "session", id: "claude-1" });
-    ws = assignPane(ws, 2, { kind: "session", id: "claude-1" }); // moved, not duplicated
-    const held = ws.panes.filter((p) => p && p.kind === "session" && p.id === "claude-1").length;
-    check("a session occupies exactly one tile", held === 1, `held in ${held}`);
-    check("the tile grew to index 2", ws.panes.length === 3 && ws.panes[0] === null && ws.panes[2]?.kind === "session");
-
-    // Host/files panes may repeat.
-    ws = assignPane(ws, 0, { kind: "host", serverId: "local" });
-    ws = assignPane(ws, 1, { kind: "host", serverId: "local" });
-    check("host panes may repeat across tiles",
-      ws.panes.filter((p) => p?.kind === "host").length === 2);
-  }
-
-  // ── Closing a pane frees the tile without touching the session ────────────
-  {
-    let { ws } = seed();
-    ws = assignPane(ws, 0, { kind: "session", id: "claude-1" });
-    ws = closePane(ws, 0);
-    check("close clears the tile", ws.panes[0] === null);
-    check("the session still exists after closing its pane", ws.sessions.some((s) => s.id === "claude-1"));
-    check("closing an out-of-range tile is a no-op", closePane(ws, 99) === ws);
   }
 
   // ── Adopting a session that is already running on the host ────────────────

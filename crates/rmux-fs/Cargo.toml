@@ -15,10 +15,26 @@ async-trait.workspace = true
 # what carries a binary file across intact.
 base64.workspace = true
 dirs.workspace = true
+# `fs-serve`: the worktree snapshot honours `.gitignore` exactly as git and
+# ripgrep do, and the search walks with the same rules.
+ignore = "0.4"
+# The watcher behind live updates: inotify on Linux, FSEvents on macOS. Pure
+# Rust over libc, so it builds into the static musl agent.
+notify.workspace = true
+parking_lot.workspace = true
+# In-process search. Default features off for the agent's sake — the same
+# trimmed set `rmux-agent` already carries.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl", "unicode-case"] }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# `renameat2(RENAME_NOREPLACE)` / `renamex_np(RENAME_EXCL)` — the atomic
+# no-clobber rename.
+libc = "0.2"
 
 [dev-dependencies]
 rmux-ssh.workspace = true

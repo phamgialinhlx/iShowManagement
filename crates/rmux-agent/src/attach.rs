@@ -14,11 +14,59 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::daemon;
 use crate::ipc;
-use crate::protocol::{Frame, Hello};
+use crate::protocol::{Binding, BindingReport, Frame, Hello};
+
+/// How a client attach behaves beyond the bare protocol.
+#[derive(Clone, Debug, Default)]
+pub struct AttachOptions {
+    /// The command-line detach key (`C-b d`). **`None` for every attach the
+    /// desktop app makes** — it uses `Ctrl-B` as its own prefix, so a filter
+    /// here would turn its forwarded `\x02` plus a typed `d` into a dropped
+    /// terminal. Only the CLI sets this, via `--detach-key`.
+    pub detach: Option<crate::detach::DetachKey>,
+    /// What `[detached (from session …)]` calls it — the alias when it has one.
+    pub label: Option<String>,
+    /// The credential set to bind a **new** session to (`--env-set`). Sent as
+    /// [`Frame::HelloBound`]; a daemon that does not acknowledge it is refused,
+    /// never attached to.
+    pub binding: Option<Binding>,
+}
+
+/// The attach flags that carry a binding. Stripped on a handoff: the owning
+/// daemon already holds the session (that is why it owns it), a live session
+/// keeps the binding it was created with, and an older build would refuse the
+/// flags as unknown options.
+pub const BINDING_FLAGS: &[&str] = &["--env-set", "--env-chain", "--env-members", "--env-overloaded"];
 
 /// Attach to `session`, creating it if needed.
-pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<ExitCode> {
-    let endpoint = daemon::endpoint()?;
+pub async fn attach(hello: Hello, start_daemon: bool) -> anyhow::Result<ExitCode> {
+    attach_with(hello, start_daemon, AttachOptions::default()).await
+}
+
+/// [`attach`], with a detach key and a label for the detach message.
+pub async fn attach_with(
+    mut hello: Hello,
+    start_daemon: bool,
+    options: AttachOptions,
+) -> anyhow::Result<ExitCode> {
+    let mut endpoint = daemon::endpoint()?;
+    // Whether `endpoint` is this build's own daemon, which is the only one this
+    // process may start.
+    let mut own = true;
+
+    // **A command-line attach connects to the owning daemon instead of handing
+    // off.** `hand_off` re-execs the older build with *these* arguments, and an
+    // older build refuses `--detach-key` as an unknown option — so on exactly
+    // the hosts that matter (a session held by a superseded daemon) a CLI attach
+    // would fail outright. The attach protocol (`Hello`, `Data`, `Resize`) is the
+    // one every daemon has always spoken, which is what `write_via_attach`
+    // already relies on, so speaking it to the old daemon from here keeps the
+    // detach key in this process where it works.
+    if options.detach.is_some() {
+        let found = owning_endpoint(&hello.session).await?;
+        own = found.address == endpoint.address;
+        endpoint = found;
+    }
 
     // **Before creating anything, find out whether this session already exists
     // under a different build.** Our own daemon is asked first, because that is
@@ -28,7 +76,7 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
     // hands over to that binary rather than starting a rival copy.
     //
     // The guard stops two builds bouncing a session between them forever.
-    if start_daemon && std::env::var_os(HANDOFF_GUARD).is_none() {
+    if options.detach.is_none() && start_daemon && std::env::var_os(HANDOFF_GUARD).is_none() {
         let ours = sessions_of(&endpoint).await;
         let known = ours.iter().any(|s| s.name == hello.session && s.pid.is_some());
 
@@ -38,11 +86,12 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
             return hand_off(&binary);
         }
     }
+    let binding = options.binding.clone();
 
     // Held for the whole attachment. Dropping it puts the terminal back, which
     // matters on every exit path — a terminal left raw has no echo and no line
     // editing, and the user is left with an apparently broken shell.
-    let _raw = crate::tty::RawMode::enter();
+    let raw = crate::tty::RawMode::enter();
 
     // The real terminal size beats whatever the caller guessed on the command
     // line: `ssh -tt` has already negotiated one, and it is authoritative.
@@ -53,7 +102,7 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
 
     let stream = match ipc::connect(&endpoint).await {
         Ok(stream) => stream,
-        Err(_) if start_daemon => {
+        Err(_) if start_daemon && own => {
             // No daemon yet. Start one and wait — the ordinary first-connection
             // path, not an error worth reporting.
             spawn_daemon()?;
@@ -63,7 +112,43 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
     };
 
     let (mut reader, mut writer) = tokio::io::split(stream);
-    writer.write_all(&Frame::Hello(hello).encode()).await?;
+    let session = hello.session.clone();
+    let mut buf = Vec::new();
+    match binding {
+        None => writer.write_all(&Frame::Hello(hello).encode()).await?,
+        Some(binding) => {
+            writer.write_all(&Frame::HelloBound { hello, binding }.encode()).await?;
+            writer.flush().await?;
+            // The answer comes before any replay. No answer is the old-daemon
+            // case and is a refusal: starting the session anyway would run it on
+            // whatever provider that daemon defaults to.
+            if let Err(e) = bound_answer(&mut reader, &mut buf).await {
+                drop(raw);
+                return Err(e);
+            }
+        }
+    }
+    // "Most recently attached" is what a bare `rmux attach` reaches for.
+    crate::cli::record_recent(&session);
+    // Registered so `rmux detach`, typed *inside* the session, can find this
+    // client. Only a CLI attach registers, so the app's views are never detached.
+    let _client = options.detach.map(|_| crate::cli::ClientRecord::register(&session));
+    let (detach_tx, mut detach_rx) = tokio::sync::mpsc::channel::<()>(1);
+    #[cfg(unix)]
+    if options.detach.is_some() {
+        let tx = detach_tx.clone();
+        tokio::spawn(async move {
+            let Ok(mut usr1) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+            else {
+                return;
+            };
+            if usr1.recv().await.is_some() {
+                let _ = tx.send(()).await;
+            }
+        });
+    }
+    let mut filter = options.detach.map(crate::detach::Filter::new);
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
 
@@ -115,8 +200,22 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
                     if n == 0 {
                         break;
                     }
-                    crate::protocol::encode_data_into(&mut frame, &chunk[..n]);
-                    if writer.write_all(&frame).await.is_err() {
+                    let (bytes, detach) = match filter.as_mut() {
+                        Some(f) => {
+                            let out = f.feed(&chunk[..n]);
+                            (std::borrow::Cow::Owned(out.forward), out.detach)
+                        }
+                        None => (std::borrow::Cow::Borrowed(&chunk[..n]), false),
+                    };
+                    if !bytes.is_empty() {
+                        crate::protocol::encode_data_into(&mut frame, &bytes);
+                        if writer.write_all(&frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    if detach {
+                        let _ = writer.flush().await;
+                        let _ = detach_tx.send(()).await;
                         break;
                     }
                 }
@@ -131,11 +230,19 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
     });
 
     // daemon → stdout.
-    let mut buf = Vec::new();
     let mut code = 0;
+    let mut detached = false;
     'outer: loop {
         let mut chunk = [0u8; 8192];
-        let n = reader.read(&mut chunk).await?;
+        let n = tokio::select! {
+            read = reader.read(&mut chunk) => read?,
+            // Disabled once every sender is gone (stdin closed, no signal task):
+            // a `None` does not match, so the output keeps draining as before.
+            Some(()) = detach_rx.recv() => {
+                detached = true;
+                break 'outer;
+            }
+        };
         if n == 0 {
             break;
         }
@@ -161,18 +268,64 @@ pub async fn attach(mut hello: Hello, start_daemon: bool) -> anyhow::Result<Exit
                 | Frame::Resize { .. }
                 | Frame::Kill { .. }
                 | Frame::SetEnv(_)
+                | Frame::SetKindEnv { .. }
                 | Frame::List
                 | Frame::Sessions(_)
                 | Frame::Write { .. }
                 | Frame::Ack { .. }
                 | Frame::Read { .. }
-                | Frame::Scrollback(_) => {}
+                | Frame::Scrollback(_)
+                | Frame::SetNamedEnv { .. }
+                | Frame::HelloBound { .. }
+                | Frame::Refused { .. }
+                | Frame::GetBinding { .. }
+                | Frame::BindingIs(_)
+                | Frame::Switch { .. } => {}
             }
         }
     }
 
     to_daemon.abort();
+    if detached {
+        // Undo the modes a TUI may have left the *local* terminal in — the
+        // session still has them; this terminal is going back to a shell.
+        // Alternate screen, hidden cursor, mouse reporting, bracketed paste.
+        stdout
+            .write_all(b"\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l")
+            .await?;
+        stdout.flush().await?;
+        drop(raw);
+        let label = options.label.unwrap_or(session);
+        println!("[detached (from session {label})]");
+        return Ok(ExitCode::SUCCESS);
+    }
+    drop(raw);
     Ok(if code == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+/// Read the daemon's answer to a [`Frame::HelloBound`], leaving anything after
+/// it (the replay) in `buf`.
+async fn bound_answer<R: tokio::io::AsyncRead + Unpin>(reader: &mut R, buf: &mut Vec<u8>) -> anyhow::Result<()> {
+    loop {
+        if let Some((frame, used)) = Frame::decode(buf)? {
+            buf.drain(..used);
+            return match frame {
+                Frame::Ack { ok: true } => Ok(()),
+                Frame::Refused { reason } => anyhow::bail!("{reason}"),
+                other => anyhow::bail!("the agent daemon answered a bound attach with {other:?}"),
+            };
+        }
+        let mut chunk = [0u8; 4096];
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            anyhow::bail!(
+                "the rmux agent daemon on this host is too old to bind a session to a credential \
+                 set, so the session was not started (it would have run on another provider) — \
+                 end that daemon's sessions or reinstall the agent"
+            );
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
 }
 
 /// Start a detached daemon.
@@ -339,7 +492,7 @@ fn hand_off(binary: &std::path::Path) -> anyhow::Result<ExitCode> {
     {
         use std::os::unix::process::CommandExt as _;
 
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        let args = handoff_args(std::env::args().skip(1).collect());
         let error = std::process::Command::new(binary)
             .args(&args)
             .env(HANDOFF_GUARD, "1")
@@ -355,7 +508,7 @@ fn hand_off(binary: &std::path::Path) -> anyhow::Result<ExitCode> {
         // rather than proxied — the child gets this process's own stdin, stdout
         // and console — so the only cost against the Unix path is one extra
         // process sitting in the tree, not a second hop on every keystroke.
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        let args = handoff_args(std::env::args().skip(1).collect());
         let status = std::process::Command::new(binary)
             .args(&args)
             .env(HANDOFF_GUARD, "1")
@@ -366,6 +519,104 @@ fn hand_off(binary: &std::path::Path) -> anyhow::Result<ExitCode> {
             _ => ExitCode::FAILURE,
         })
     }
+}
+
+/// The binding flags of `attach`, before they are checked against the session.
+#[derive(Clone, Debug, Default)]
+pub struct BindingFlags {
+    pub set: Option<String>,
+    pub chain: Option<String>,
+    /// Comma-separated member set names, in order.
+    pub members: Option<String>,
+    pub overloaded: bool,
+}
+
+impl BindingFlags {
+    /// The binding these flags ask for, for `session` — whose name prefix
+    /// decides the kind, exactly as it decides which per-kind set applies.
+    pub fn resolve(self, session: &str) -> anyhow::Result<Option<Binding>> {
+        let Some(set) = self.set else {
+            anyhow::ensure!(self.chain.is_none() && self.members.is_none(), "--env-chain needs --env-set");
+            return Ok(None);
+        };
+        let kind = rmux_claude_core::env_kind::for_session(session).ok_or_else(|| {
+            anyhow::anyhow!("--env-set applies to claude-, codex- and dsh- sessions, not {session}")
+        })?;
+        anyhow::ensure!(rmux_claude_core::env_kind::valid_set_name(&set), "{set:?} is not a valid set name");
+        let chain = match (self.chain, self.members) {
+            (None, None) => None,
+            (Some(id), Some(members)) => {
+                let members: Vec<String> =
+                    members.split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned).collect();
+                anyhow::ensure!(members.contains(&set), "--env-set {set} is not one of --env-members");
+                Some(rmux_claude_core::fallback::ChainState {
+                    id,
+                    members,
+                    active: set.clone(),
+                    switch_on_overloaded: self.overloaded,
+                    ..Default::default()
+                })
+            }
+            _ => anyhow::bail!("--env-chain and --env-members go together"),
+        };
+        Ok(Some(Binding { kind: kind.to_owned(), set, chain }))
+    }
+}
+
+/// Where `setenv` delivers: everywhere, one kind, or one named set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetenvTarget {
+    Shared,
+    Kind(String),
+    Named { kind: String, set: String, label: Option<String> },
+}
+
+impl SetenvTarget {
+    /// `[--kind K [--set NAME [--label TEXT]]]`, in any order.
+    pub fn parse(args: &[String]) -> anyhow::Result<Self> {
+        let (mut kind, mut set, mut label) = (None, None, None);
+        let mut it = args.iter();
+        while let Some(flag) = it.next() {
+            let mut value = || it.next().cloned().ok_or_else(|| anyhow::anyhow!("setenv {flag} needs a value"));
+            match flag.as_str() {
+                "--kind" => kind = Some(value()?),
+                "--set" => set = Some(value()?),
+                "--label" => label = Some(value()?),
+                other => anyhow::bail!("setenv takes --kind, --set and --label, not {other:?}"),
+            }
+        }
+        Ok(match (kind, set) {
+            (None, None) if label.is_none() => SetenvTarget::Shared,
+            (Some(kind), None) if label.is_none() => SetenvTarget::Kind(kind),
+            (Some(kind), Some(set)) => SetenvTarget::Named { kind, set, label },
+            _ => anyhow::bail!("setenv --set needs --kind, and --label needs --set"),
+        })
+    }
+
+    pub async fn deliver(self, pairs: std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        match self {
+            SetenvTarget::Shared => set_env(pairs).await,
+            SetenvTarget::Kind(kind) => set_kind_env(&kind, pairs).await,
+            SetenvTarget::Named { kind, set, label } => set_named_env(&kind, &set, label, pairs).await,
+        }
+    }
+}
+
+/// This process's arguments minus the binding flags — see [`BINDING_FLAGS`].
+fn handoff_args(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--env-overloaded" {
+            continue;
+        }
+        if BINDING_FLAGS.contains(&a.as_str()) {
+            it.next();
+            continue;
+        }
+        out.push(a);
+    }
+    out
 }
 
 /// The first agent build that understands the drive frames
@@ -542,9 +793,23 @@ pub async fn kill(session: &str) -> anyhow::Result<()> {
 pub async fn spawn_detached(
     session: &str,
     cwd: &str,
-    login_command: &str,
+    login_command: Option<&str>,
     cols: u16,
     rows: u16,
+) -> anyhow::Result<()> {
+    spawn_detached_bound(session, cwd, login_command, cols, rows, None).await
+}
+
+/// [`spawn_detached`], bound to a credential set — how `rmux spawn` gives a
+/// child its parent's provider. A refusal (set not loaded, wrong kind, an old
+/// daemon) is an error and nothing is started.
+pub async fn spawn_detached_bound(
+    session: &str,
+    cwd: &str,
+    login_command: Option<&str>,
+    cols: u16,
+    rows: u16,
+    binding: Option<Binding>,
 ) -> anyhow::Result<()> {
     // A name that already exists would be *reattached* rather than created, and
     // the caller would be handed someone else's conversation as though it were
@@ -572,12 +837,19 @@ pub async fn spawn_detached(
         // A **login** shell, like every other Claude launch: `claude` is
         // installed by a version manager whose PATH exists only there, so
         // spawning the binary directly gives "command not found" on a host where
-        // it plainly works when typed.
-        login_command: Some(login_command.to_owned()),
+        // it plainly works when typed. `None` is a plain interactive login shell.
+        login_command: login_command.map(str::to_owned),
         env: Default::default(),
         cols,
         rows,
     };
+    if let Some(binding) = binding {
+        stream.write_all(&Frame::HelloBound { hello, binding }.encode()).await?;
+        stream.flush().await?;
+        let mut buf = Vec::new();
+        let (mut reader, _writer) = tokio::io::split(stream);
+        return bound_answer(&mut reader, &mut buf).await;
+    }
     stream.write_all(&Frame::Hello(hello).encode()).await?;
     stream.flush().await?;
 
@@ -639,6 +911,17 @@ pub async fn read(session: &str) -> anyhow::Result<Option<Vec<u8>>> {
     if !list().await.unwrap_or_default().iter().any(|s| s.name == session) {
         return Ok(None);
     }
+    read_scrollback(session).await
+}
+
+/// The scrollback of a session **whether or not its shell is still running**.
+///
+/// [`read`] answers `None` for an exited session, which is right for a remote
+/// caller and useless for `rmux spawn` explaining *why* the agent it just
+/// started died (`command not found: claude` is in that buffer). The daemon
+/// keeps an exited session's terminal until the name is reused, so its last
+/// words are still there to read.
+pub async fn read_scrollback(session: &str) -> anyhow::Result<Option<Vec<u8>>> {
     let endpoint = owning_endpoint(session).await?;
     let Ok(mut stream) = ipc::connect(&endpoint).await else { return Ok(None) };
 
@@ -930,9 +1213,248 @@ pub async fn set_env(pairs: std::collections::BTreeMap<String, String>) -> anyho
     Ok(())
 }
 
+/// Replace one agent kind's credential environment in this build's daemon.
+///
+/// Unlike [`set_env`] this **waits for the daemon's answer**, and a missing
+/// answer is an error. That is the compatibility rule for this frame: a daemon
+/// that predates it rejects the unknown frame kind and closes, and the honest
+/// report is "the credentials did not land" — never a quiet success after which
+/// a session starts against whatever provider the host defaults to.
+pub async fn set_kind_env(
+    kind: &str,
+    pairs: std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        rmux_claude_core::env_kind::is_known(kind),
+        "unknown agent kind {kind:?} (expected one of {})",
+        rmux_claude_core::env_kind::KINDS.join(", ")
+    );
+    let endpoint = daemon::endpoint()?;
+    let mut stream = match ipc::connect(&endpoint).await {
+        Ok(stream) => stream,
+        Err(_) => {
+            spawn_daemon()?;
+            wait_for_daemon(&endpoint).await?
+        }
+    };
+    stream
+        .write_all(&Frame::SetKindEnv { kind: kind.to_owned(), env: pairs }.encode())
+        .await?;
+    stream.flush().await?;
+    match read_ack(&mut stream).await? {
+        Some(true) => Ok(()),
+        Some(false) => anyhow::bail!("the agent daemon refused credentials for {kind:?}"),
+        None => anyhow::bail!(
+            "the agent daemon on this host is too old to keep credentials per agent, so the \
+             {kind} credentials were not delivered — restart its sessions or reinstall the agent"
+        ),
+    }
+}
+
+/// Store one named credential set in this build's daemon, from stdin.
+///
+/// Waits for the answer like [`set_kind_env`]; an older daemon drops the
+/// unknown frame and that is reported, not swallowed.
+pub async fn set_named_env(
+    kind: &str,
+    set: &str,
+    label: Option<String>,
+    pairs: std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let mut stream = connect_or_start().await?;
+    stream
+        .write_all(
+            &Frame::SetNamedEnv { kind: kind.to_owned(), set: set.to_owned(), label, env: pairs }.encode(),
+        )
+        .await?;
+    stream.flush().await?;
+    match read_answer(&mut stream).await? {
+        Some(Ok(())) => Ok(()),
+        Some(Err(reason)) => anyhow::bail!("the agent daemon refused the {kind} set {set:?}: {reason}"),
+        None => anyhow::bail!(
+            "the agent daemon on this host is too old to keep credentials per session, so the \
+             {kind} set {set:?} was not delivered — end its sessions or reinstall the agent"
+        ),
+    }
+}
+
+/// Which set `session` runs on, from this build's daemon. `None` when no
+/// daemon is running or it is too old to say.
+pub async fn get_binding(session: &str) -> Option<BindingReport> {
+    get_binding_at(&daemon::endpoint().ok()?, session).await
+}
+
+/// [`get_binding`], asking every installed build's daemon until one holds a
+/// binding for `session` — sessions outlive upgrades, so the owner may be older.
+pub async fn binding_anywhere(session: &str) -> Option<BindingReport> {
+    if let Some(r) = get_binding(session).await.filter(|r| r.binding.is_some()) {
+        return Some(r);
+    }
+    for binary in sibling_binaries() {
+        let Some(name) = binary.file_name().and_then(|n| n.to_str()) else { continue };
+        let Ok(endpoint) = ipc::Endpoint::for_exe_name(crate::provision::VERSION, name) else { continue };
+        if let Some(r) = get_binding_at(&endpoint, session).await.filter(|r| r.binding.is_some()) {
+            return Some(r);
+        }
+    }
+    None
+}
+
+/// [`get_binding`] against a specific daemon.
+pub async fn get_binding_at(endpoint: &ipc::Endpoint, session: &str) -> Option<BindingReport> {
+    let mut stream = ipc::connect(endpoint).await.ok()?;
+    stream.write_all(&Frame::GetBinding { session: session.to_owned() }.encode()).await.ok()?;
+    stream.flush().await.ok()?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match Frame::decode(&buf) {
+            Ok(Some((Frame::BindingIs(report), _))) => return Some(report),
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) => {}
+        }
+        match tokio::io::AsyncReadExt::read(&mut stream, &mut chunk).await {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// Move a chained session to `member` and relaunch it ("switch back").
+pub async fn switch_member(session: &str, member: &str) -> anyhow::Result<()> {
+    let endpoint = daemon::endpoint()?;
+    let mut stream = ipc::connect(&endpoint).await?;
+    stream
+        .write_all(&Frame::Switch { session: session.to_owned(), member: member.to_owned() }.encode())
+        .await?;
+    stream.flush().await?;
+    match read_answer(&mut stream).await? {
+        Some(Ok(())) => Ok(()),
+        Some(Err(reason)) => anyhow::bail!("{reason}"),
+        None => anyhow::bail!("the agent daemon on this host is too old to switch a session's account"),
+    }
+}
+
+async fn connect_or_start() -> anyhow::Result<ipc::Stream> {
+    let endpoint = daemon::endpoint()?;
+    match ipc::connect(&endpoint).await {
+        Ok(stream) => Ok(stream),
+        Err(_) => {
+            spawn_daemon()?;
+            wait_for_daemon(&endpoint).await
+        }
+    }
+}
+
+/// Read an `Ack` or a `Refused`; `None` when the daemon closed without either.
+async fn read_answer<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<Option<Result<(), String>>> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 256];
+    loop {
+        if let Some((frame, _)) = Frame::decode(&buf)? {
+            return match frame {
+                Frame::Ack { ok: true } => Ok(Some(Ok(()))),
+                Frame::Ack { ok: false } => Ok(Some(Err("refused".to_owned()))),
+                Frame::Refused { reason } => Ok(Some(Err(reason))),
+                other => anyhow::bail!("expected an answer, got {other:?}"),
+            };
+        }
+        let n = tokio::io::AsyncReadExt::read(stream, &mut chunk).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Read one `Ack`; `None` when the daemon closed without one.
+async fn read_ack<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> anyhow::Result<Option<bool>> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 64];
+    loop {
+        if let Some((frame, _)) = Frame::decode(&buf)? {
+            return match frame {
+                Frame::Ack { ok } => Ok(Some(ok)),
+                other => anyhow::bail!("expected an ack, got {other:?}"),
+            };
+        }
+        let n = tokio::io::AsyncReadExt::read(stream, &mut chunk).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_daemon_that_closes_without_an_ack_is_an_error_not_a_success() {
+        // What an older daemon does with a frame kind it does not know: decode
+        // fails, the connection drops. `read_ack` must report that as "no
+        // answer", which `set_kind_env` turns into a refusal.
+        let (mut client, server) = tokio::io::duplex(64);
+        drop(server);
+        assert_eq!(read_ack(&mut client).await.unwrap(), None);
+
+        let (mut client, mut server) = tokio::io::duplex(64);
+        server.write_all(&Frame::Ack { ok: true }.encode()).await.unwrap();
+        assert_eq!(read_ack(&mut client).await.unwrap(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_bound_attach_to_a_daemon_that_closes_is_refused_not_started() {
+        // An older daemon cannot decode `HelloBound` and drops the connection.
+        // The client must say so and stop — attaching anyway would run the
+        // session on that daemon's default provider.
+        let (client, server) = tokio::io::duplex(64);
+        drop(server);
+        let (mut reader, _w) = tokio::io::split(client);
+        let err = bound_answer(&mut reader, &mut Vec::new()).await.unwrap_err().to_string();
+        assert!(err.contains("too old to bind"), "{err}");
+
+        let (client, mut server) = tokio::io::duplex(256);
+        server.write_all(&Frame::Refused { reason: "set 9 is not loaded".into() }.encode()).await.unwrap();
+        let (mut reader, _w) = tokio::io::split(client);
+        assert!(bound_answer(&mut reader, &mut Vec::new()).await.unwrap_err().to_string().contains("set 9"));
+
+        // Ack, then the replay stays in the buffer for the stream loop.
+        let (client, mut server) = tokio::io::duplex(256);
+        let mut both = Frame::Ack { ok: true }.encode();
+        both.extend(Frame::Data(b"replay".to_vec()).encode());
+        server.write_all(&both).await.unwrap();
+        let (mut reader, _w) = tokio::io::split(client);
+        let mut buf = Vec::new();
+        bound_answer(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(Frame::decode(&buf).unwrap().unwrap().0, Frame::Data(b"replay".to_vec()));
+    }
+
+    #[test]
+    fn binding_flags_resolve_against_the_session_kind_and_strip_on_handoff() {
+        let flags = BindingFlags { set: Some("2".into()), chain: Some("c".into()), members: Some("1, 2,3".into()), overloaded: false };
+        let b = flags.resolve("claude-x").unwrap().unwrap();
+        assert_eq!((b.kind.as_str(), b.set.as_str()), ("claude", "2"));
+        assert_eq!(b.chain.unwrap().members, ["1", "2", "3"]);
+        assert!(BindingFlags { set: Some("1".into()), ..Default::default() }.resolve("term-1").is_err());
+        assert!(BindingFlags { set: Some("9".into()), chain: Some("c".into()), members: Some("1".into()), overloaded: false }
+            .resolve("claude-x")
+            .is_err());
+        assert_eq!(BindingFlags::default().resolve("claude-x").unwrap(), None);
+        let args: Vec<String> = ["attach", "--session", "s", "--env-set", "1", "--env-overloaded", "--env-chain", "c", "--cols", "80"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(handoff_args(args), ["attach", "--session", "s", "--cols", "80"]);
+        assert_eq!(
+            SetenvTarget::parse(&["--set".into(), "1".into(), "--kind".into(), "claude".into()]).unwrap(),
+            SetenvTarget::Named { kind: "claude".into(), set: "1".into(), label: None }
+        );
+        assert!(SetenvTarget::parse(&["--set".into(), "1".into()]).is_err());
+    }
 
     #[test]
     fn agent_version_parses_the_installed_name() {

@@ -450,44 +450,7 @@ impl ControlMaster {
 
         let mut cmd = Command::new("ssh");
         cmd.no_console_window();
-        cmd.arg("-N") // no remote command; this process only holds the transport
-            .arg("-o")
-            .arg(format!("ControlPath={}", self.socket.display()))
-            .arg("-o")
-            .arg("ControlMaster=yes")
-            // Die with rmux instead of outliving it in the user's session.
-            .arg("-o")
-            .arg("ControlPersist=no")
-            // Notice a dead link in ~90s rather than hanging on a half-open socket
-            // — but not sooner: a *busy* host (heavy load, into swap) answers a
-            // keepalive slowly, and a 45s window dropped the master on such a host
-            // mid-session, detaching every pane through it. 90s tolerates the stall;
-            // a genuinely dead host still surfaces, and the pane auto-reconnects
-            // either way (`ClaudePanel`'s exit poll).
-            .arg("-o")
-            .arg("ServerAliveInterval=15")
-            .arg("-o")
-            .arg("ServerAliveCountMax=6")
-            .arg("-o")
-            .arg(format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"));
-
-        // **The key rmux installed, offered to the connection that authenticates.**
-        //
-        // Every client command is multiplexed through this master, so this is the
-        // one place credentials are actually checked. `~/.ssh/rmux_<host>_ed25519`
-        // is not a name OpenSSH tries by itself, so without this the key sits on
-        // the host being ignored and the password prompt returns for ever.
-        for arg in crate::keys::identity_args_for(&self.host.label()) {
-            cmd.arg(arg);
-        }
-
-        if let Some(user) = &self.host.user {
-            cmd.arg("-l").arg(user);
-        }
-        if let Some(port) = self.host.port {
-            cmd.arg("-p").arg(port.to_string());
-        }
-        cmd.arg(&self.host.alias);
+        cmd.args(self.master_args());
 
         for (k, v) in super::askpass::env_for_gui_prompts() {
             cmd.env(k, v);
@@ -573,6 +536,58 @@ impl ControlMaster {
             }
         }
         self.ensure_started().await
+    }
+
+    /// The master's argv (without the program): multiplexing, keepalives, the
+    /// identities, the user/port overrides, then the destination.
+    ///
+    /// Split out of `start` so a test can read it — the master is the one
+    /// connection where credentials are checked, so whether it carries the
+    /// chosen key is the whole question.
+    pub(crate) fn master_args(&self) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            // No remote command; this process only holds the transport.
+            "-N".to_owned(),
+            "-o".to_owned(),
+            format!("ControlPath={}", self.socket.display()),
+            "-o".to_owned(),
+            "ControlMaster=yes".to_owned(),
+            // Die with rmux instead of outliving it in the user's session.
+            "-o".to_owned(),
+            "ControlPersist=no".to_owned(),
+            // Notice a dead link in ~90s rather than hanging on a half-open
+            // socket — but not sooner: a *busy* host (heavy load, into swap)
+            // answers a keepalive slowly, and a 45s window dropped the master on
+            // such a host mid-session, detaching every pane through it. 90s
+            // tolerates the stall; a genuinely dead host still surfaces, and the
+            // pane auto-reconnects either way (`ClaudePanel`'s exit poll).
+            "-o".to_owned(),
+            "ServerAliveInterval=15".to_owned(),
+            "-o".to_owned(),
+            "ServerAliveCountMax=6".to_owned(),
+            "-o".to_owned(),
+            format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"),
+        ];
+
+        // **The keys, offered to the connection that authenticates.**
+        //
+        // Every client command is multiplexed through this master, so this is the
+        // one place credentials are actually checked. Both the key the operator
+        // chose for this server and `~/.ssh/rmux_<host>_ed25519` are names
+        // OpenSSH does not try by itself, so without this the key sits on the
+        // host being ignored and the password prompt returns for ever.
+        args.extend(crate::keys::identity_args_for(&self.host.label()));
+
+        if let Some(user) = &self.host.user {
+            args.push("-l".to_owned());
+            args.push(user.clone());
+        }
+        if let Some(port) = self.host.port {
+            args.push("-p".to_owned());
+            args.push(port.to_string());
+        }
+        args.push(self.host.alias.clone());
+        args
     }
 
     /// Ask OpenSSH whether the master is live (`ssh -O check`).
@@ -1169,6 +1184,36 @@ fn short_hash(host: &SshHostId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The master is where credentials are checked, so the chosen key must be on
+    /// it — additively, beside `-l`/`-p`, before the destination — and must not
+    /// be there once the file is gone. Never `IdentitiesOnly`.
+    #[test]
+    fn the_master_offers_the_chosen_identity_only_while_the_file_exists() {
+        let _serial = crate::keys::CHOSEN_TEST_LOCK.lock();
+        let dir = std::env::temp_dir().join(format!("rmux-master-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("work_key");
+        std::fs::write(&key, "x").unwrap();
+
+        let host = SshHostId { alias: "master-identity-test".into(), user: Some("me".into()), port: Some(2222) };
+        crate::keys::choose_identity(&host.label(), &key);
+        let master = ControlMaster::for_host(&host);
+
+        let args = master.master_args();
+        let key_s = key.to_string_lossy().into_owned();
+        let i = args.windows(2).position(|w| w[0] == "-i" && w[1] == key_s).expect("chosen -i on the master");
+        let dest = args.iter().rposition(|a| a == "master-identity-test").unwrap();
+        assert!(i < dest, "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["-p", "2222"]));
+        assert!(!args.iter().any(|a| a.contains("IdentitiesOnly")), "{args:?}");
+
+        std::fs::remove_file(&key).unwrap();
+        assert!(!master.master_args().iter().any(|a| a == &key_s), "a missing key is not named");
+
+        crate::keys::replace_chosen_identities(Vec::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
 
     /// **The assertion that pins the whole fix.**

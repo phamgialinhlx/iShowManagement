@@ -149,6 +149,24 @@ pub struct Status {
     pub changes: Vec<Change>,
 }
 
+/// Just the branch line of a checkout — what the sidebar shows under a project.
+///
+/// Separate from [`Status`] because it is polled for every project on a
+/// connected server, and the change list is the expensive half of `git status`
+/// on a large tree. Only the `# branch.*` headers are read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSummary {
+    /// `main`, or `(detached)`.
+    pub branch: String,
+    pub ahead: i64,
+    pub behind: i64,
+    /// Absent when no remote-tracking branch is configured — `0/0` and "no
+    /// upstream" are different facts, and the sidebar omits the arrows for the
+    /// second rather than claiming the branch is in sync.
+    pub upstream: Option<String>,
+}
+
 /// One entry in the history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +216,32 @@ pub async fn status(target: &dyn Target, root: &str) -> anyhow::Result<Status> {
     let (body, ok) = run(target, &script).await?;
     anyhow::ensure!(ok, "{}", body.trim().lines().next().unwrap_or("git status failed"));
     Ok(parse_status(&body))
+}
+
+/// The branch and its divergence for a project folder, or `None` when the
+/// folder is not inside a git work tree (or has no `git` at all).
+///
+/// "Not a repository" is an ordinary answer for a project, never an error, so
+/// stderr is discarded and an empty header block reads as `None`.
+///
+/// - `--no-optional-locks`: this runs on a timer beside whatever the operator
+///   is doing in a terminal, and a background `status` that takes
+///   `index.lock` makes their own `git commit` fail with "another git process
+///   seems to be running".
+/// - `-uno` plus `sed … q`: only the `# ` headers are wanted, and they come
+///   first. `sed` stops reading at the first entry line, so a tree with ten
+///   thousand modified files does not ship them all across the network to be
+///   thrown away.
+/// - The folder goes through `shell_quote`; the remote login shell re-parses
+///   this line. On a Windows host the `Target` routes it through Git for
+///   Windows' bash, where `git` and `sed` both exist.
+pub async fn branch_summary(target: &dyn Target, folder: &str) -> anyhow::Result<Option<BranchSummary>> {
+    let script = format!(
+        "git --no-optional-locks -C {} status --porcelain=v2 --branch -uno 2>/dev/null | sed -n '/^# /p;/^[^#]/q'; true;",
+        shell_quote(folder)
+    );
+    let (body, _) = run(target, &script).await?;
+    Ok(parse_branch_summary(&body))
 }
 
 /// Recent commits, newest first.
@@ -376,6 +420,37 @@ pub fn parse_status(text: &str) -> Status {
     }
 
     status
+}
+
+/// The `# branch.*` headers of `git status --porcelain=v2 --branch`, one per
+/// line. `None` when there is no `branch.head` — which is what a folder outside
+/// a work tree produces (nothing at all on stdout).
+pub fn parse_branch_summary(text: &str) -> Option<BranchSummary> {
+    let mut out: Option<BranchSummary> = None;
+    let mut upstream = None;
+    let (mut ahead, mut behind) = (0, 0);
+    for line in text.lines() {
+        let Some(header) = line.trim_end_matches('\r').strip_prefix("# ") else { continue };
+        if let Some(name) = header.strip_prefix("branch.head ") {
+            out = Some(BranchSummary { branch: name.trim().to_string(), ..BranchSummary::default() });
+        } else if let Some(up) = header.strip_prefix("branch.upstream ") {
+            upstream = Some(up.trim().to_string());
+        } else if let Some(ab) = header.strip_prefix("branch.ab ") {
+            for part in ab.split_whitespace() {
+                match part.as_bytes().first() {
+                    Some(b'+') => ahead = part[1..].parse().unwrap_or(0),
+                    Some(b'-') => behind = part[1..].parse().unwrap_or(0),
+                    _ => {}
+                }
+            }
+        }
+    }
+    out.map(|mut s| {
+        s.upstream = upstream;
+        s.ahead = ahead;
+        s.behind = behind;
+        s
+    })
 }
 
 pub fn parse_log(text: &str) -> Vec<Commit> {
@@ -614,5 +689,41 @@ mod tests {
         // The entry after a rename must not be eaten by it.
         assert_eq!(files[2].path, "added.rs");
         assert_eq!(files[2].staged, "A");
+    }
+
+    #[test]
+    fn a_branch_summary_reads_the_headers_and_the_divergence() {
+        let text = "# branch.oid 3a0fc54\n# branch.head herdr-ui\n# branch.upstream origin/herdr-ui\n# branch.ab +3 -12\n";
+        let s = parse_branch_summary(text).expect("a repository");
+        assert_eq!(s.branch, "herdr-ui");
+        assert_eq!(s.upstream.as_deref(), Some("origin/herdr-ui"));
+        assert_eq!((s.ahead, s.behind), (3, 12));
+    }
+
+    #[test]
+    fn a_branch_with_no_upstream_has_no_divergence_claim() {
+        let s = parse_branch_summary("# branch.oid abc\n# branch.head main\n").unwrap();
+        assert_eq!(s.branch, "main");
+        assert_eq!(s.upstream, None);
+        assert_eq!((s.ahead, s.behind), (0, 0));
+    }
+
+    #[test]
+    fn a_folder_outside_a_work_tree_is_none_not_an_error() {
+        assert_eq!(parse_branch_summary(""), None);
+        assert_eq!(parse_branch_summary("\n"), None);
+    }
+
+    #[test]
+    fn a_detached_head_and_crlf_lines_parse() {
+        // Git for Windows' bash can hand back CRLF through a pty.
+        let s = parse_branch_summary("# branch.oid abc\r\n# branch.head (detached)\r\n").unwrap();
+        assert_eq!(s.branch, "(detached)");
+    }
+
+    #[test]
+    fn an_entry_line_after_the_headers_is_ignored() {
+        let s = parse_branch_summary("# branch.head main\n1 .M N... 100644 100644 100644 a b src/# branch.head evil\n").unwrap();
+        assert_eq!(s.branch, "main");
     }
 }

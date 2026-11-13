@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.26"
+version = "0.2.27"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -174,3 +174,18 @@ strip = "debuginfo"
 [profile.agent-release]
 inherits = "release"
 opt-level = "z"
+
+# **tao, patched: an Objective-C exception during event dispatch is caught and
+# logged instead of aborting the app.** tao overrides `-[NSApplication
+# sendEvent:]` with an `extern "C"` function, so any `NSException` AppKit or
+# WebKit raises while delivering a click or keystroke has to unwind through a
+# frame that cannot be unwound — `panic_cannot_unwind`, SIGABRT, and nothing in
+# `rmux.log` but "panic in a function that cannot unwind" (the hook never sees
+# a foreign exception, so it cannot name it). Measured: two such aborts in ~15h
+# on 0.2.26, both on the main thread under `tao::…::app::send_event`. A stock
+# Cocoa app's run loop catches and logs these and keeps going; the patch
+# (`vendor/tao/src/platform_impl/macos/app.rs`, `dispatch_catching`) restores
+# that and logs the exception's name and reason. Drop it when upstream tao
+# catches there itself; re-apply when bumping tao.
+[patch.crates-io]
+tao = { path = "vendor/tao" }

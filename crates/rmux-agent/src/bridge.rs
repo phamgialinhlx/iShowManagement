@@ -509,22 +509,12 @@ async fn dispatch(request: Request) -> Response {
             // minted (`pi-…`/`claude-…`) rather than the wire re-stating it. Only
             // multi-line differs: Claude's `\\\r` line break is Claude's alone, so
             // pi gets a bracketed paste instead (see `keys::send_message_pi`).
-            let chunks = if session.starts_with("pi-") {
-                keys::send_message_pi(&message)
-            } else {
-                keys::send_message(&message)
-            };
-            for (i, chunk) in chunks.iter().enumerate() {
-                if i > 0 {
-                    tokio::time::sleep(keys::SUBMIT_SETTLE).await;
-                }
-                match attach::write(&session, chunk).await {
-                    Ok(true) => {}
-                    // `write` drives old daemons too, so a `false` here means no
-                    // live daemon holds the name — it ended.
-                    Ok(false) => return not_found(&session),
-                    Err(e) => return failed(e),
-                }
+            match send_message(&session, &message).await {
+                Ok(true) => {}
+                // `write` drives old daemons too, so a `false` here means no
+                // live daemon holds the name — it ended.
+                Ok(false) => return not_found(&session),
+                Err(e) => return failed(e),
             }
             Response::Ok
         }
@@ -599,6 +589,39 @@ async fn dispatch(request: Request) -> Response {
     }
 }
 
+/// Submit a message to a Claude or pi session: **the** definition of how,
+/// shared by the bridge's `send` and the `rmux prompt` CLI.
+///
+/// The same two-write sequence the desktop app uses, from the same module.
+/// Appending the carriage return to the text makes the TUI treat the whole thing
+/// as one bracketed paste and swallow it, so the message sits in the composer,
+/// typed but never sent — which reads from the caller as "it accepted my message
+/// and did nothing".
+///
+/// The encoder is chosen by the session-name prefix, the same signal
+/// `live_sessions` and `Close` already trust: the host derives the agent from the
+/// name it minted (`pi-…`/`claude-…`) rather than a caller re-stating it. Only
+/// multi-line differs: Claude's `\\\r` line break is Claude's alone, so pi gets a
+/// bracketed paste instead (see `keys::send_message_pi`).
+///
+/// `Ok(false)` when no live daemon holds the name.
+pub(crate) async fn send_message(session: &str, message: &str) -> anyhow::Result<bool> {
+    let chunks = if session.starts_with("pi-") {
+        keys::send_message_pi(message)
+    } else {
+        keys::send_message(message)
+    };
+    for (i, chunk) in chunks.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(keys::SUBMIT_SETTLE).await;
+        }
+        if !attach::write(session, chunk).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn failed(e: impl std::fmt::Display) -> Response {
     Response::Error { code: ErrorCode::Failed, message: e.to_string() }
 }
@@ -616,7 +639,7 @@ fn refused(message: &str) -> Response {
 /// an agent reading command output gets words rather than `\x1b[0m` noise. It is
 /// not a terminal; anything that needs the real screen attaches and renders the
 /// raw stream instead.
-fn readable(bytes: &[u8]) -> String {
+pub(crate) fn readable(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -706,7 +729,7 @@ fn host_info() -> HostInfo {
     }
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     // **`gethostname`, not `/proc/sys/kernel/hostname`.** The first version read
     // procfs, which is correct on the Linux hosts the agent is usually installed
     // on and simply absent on macOS — where the agent also runs, for local
@@ -742,13 +765,12 @@ fn hostname() -> String {
 /// know what shells exist, `~/.rmux/aliases.json` knows what the operator calls
 /// them, and Claude's own session files know what each one is *doing*.
 async fn live_sessions() -> anyhow::Result<Vec<Session>> {
-    let summaries = attach::list().await?;
     let aliases = alias::load();
-    let statuses = status::snapshot();
 
-    Ok(summaries
+    Ok(joined_sessions()
+        .await?
         .into_iter()
-        .map(|s| {
+        .map(|(s, live)| {
             let kind = if s.name.starts_with("claude-") {
                 Kind::Claude
             } else if s.name.starts_with("pi-") {
@@ -757,11 +779,7 @@ async fn live_sessions() -> anyhow::Result<Vec<Session>> {
                 Kind::Shell
             };
 
-            // Matched on pid, which is the only field both sides agree on: the
-            // daemon knows the shell's pid, and Claude records its own. Matching
-            // on cwd would collapse two conversations in one checkout into one.
-            let live = statuses.iter().find(|st| st.pid.is_some() && st.pid == s.pid);
-
+            let live = live.as_ref();
             Session {
                 title: aliases.get(&s.name).cloned(),
                 kind,
@@ -779,6 +797,26 @@ async fn live_sessions() -> anyhow::Result<Vec<Session>> {
                 drivable: true,
                 name: s.name,
             }
+        })
+        .collect())
+}
+
+/// Every live daemon session joined with the status its agent publishes.
+///
+/// **The one join** — the bridge's `listSessions` and the `rmux` CLI's `list`,
+/// `wait` and `prompt` all read status through here, so they cannot disagree
+/// about which session is busy. Matched on pid, which is the only field both
+/// sides agree on: the daemon knows the shell's pid, and Claude records its own.
+/// Matching on cwd would collapse two conversations in one checkout into one.
+pub(crate) async fn joined_sessions(
+) -> anyhow::Result<Vec<(crate::protocol::SessionSummary, Option<status::Snapshot>)>> {
+    let summaries = attach::list().await?;
+    let statuses = status::snapshot();
+    Ok(summaries
+        .into_iter()
+        .map(|s| {
+            let live = statuses.iter().find(|st| st.pid.is_some() && st.pid == s.pid).cloned();
+            (s, live)
         })
         .collect())
 }
@@ -1007,7 +1045,7 @@ fn record_boundary_at_or_before(file: &mut std::fs::File, limit: u64) -> std::io
 }
 
 /// Read one conversation back, tail-bounded.
-fn read_conversation(id: &str, max_bytes: Option<u64>) -> anyhow::Result<(Vec<Message>, bool)> {
+pub(crate) fn read_conversation(id: &str, max_bytes: Option<u64>) -> anyhow::Result<(Vec<Message>, bool)> {
     let path = find_transcript(id)?;
     read_transcript_at(id, &path, max_bytes)
 }
@@ -1196,7 +1234,7 @@ fn read_prefix(path: &std::path::Path, max: usize) -> std::io::Result<Vec<u8>> {
 }
 
 /// Read one pi conversation back, tail-bounded.
-fn pi_read_conversation(id: &str, max_bytes: Option<u64>) -> anyhow::Result<(Vec<Message>, bool)> {
+pub(crate) fn pi_read_conversation(id: &str, max_bytes: Option<u64>) -> anyhow::Result<(Vec<Message>, bool)> {
     let tail = max_bytes.unwrap_or(DEFAULT_TAIL_BYTES).clamp(1, MAX_TAIL_BYTES);
     let path = find_pi_transcript(id)?;
 
@@ -1292,46 +1330,11 @@ async fn spawn(
         "{folder} is not a directory on this host",
     );
 
-    // The prompt travels as an *argument* rather than being typed in afterwards.
-    // Typing means guessing when the TUI is ready to receive it, and a guess that
-    // is early loses the message into a composer that has not been drawn yet.
-    // `launch_line` shell-quotes it, which is the injection boundary that matters
-    // most in this whole feature — it is free text from a remote caller landing
-    // in a login shell.
-    // The prompt is a launch argument for both agents — Claude quotes it after
-    // `claude`, pi as a `--` positional — because typing it in afterwards means
-    // guessing when the TUI is ready and losing it into a composer not yet drawn.
-    let (line, prefix) = match agent {
-        Agent::Claude => {
-            let args: Vec<String> = prompt
-                .map(str::trim)
-                .filter(|p| !p.is_empty())
-                .map(|p| vec![p.to_owned()])
-                .unwrap_or_default();
-            (launch::launch_line(None, &args, launch::Rendering::default()), "claude")
-        }
-        // pi runs inline (`--tui-mode regular`) for the same reasons Claude opts
-        // out of the alternate screen — see `pi::launch_line`.
-        Agent::Pi => {
-            // Give pi the status signal Claude has for free. Install the
-            // extension (idempotent, best-effort — a host that cannot take it
-            // still runs pi, just without the dot) and tell it where the writer
-            // is via `RMUX_AGENT_BIN`. The env goes on the **shell line**, like
-            // Claude's `CLAUDE_CODE_*` prefix: an assignment prefix does not stop
-            // the login shell exec-ing the single command, so pi keeps the
-            // session's own pid and `live_sessions` still correlates on it.
-            if let Some(home) = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned))
-                && let Err(e) = pi::install_status_extension(&home)
-            {
-                tracing::warn!(error = %e, "could not install pi status extension");
-            }
-            let line = pi::launch_line(prompt, name, None);
-            let line = match std::env::current_exe().ok().and_then(|p| p.to_str().map(str::to_owned)) {
-                Some(bin) => format!("RMUX_AGENT_BIN={} {line}", rmux_transport::shell_quote(&bin)),
-                None => line,
-            };
-            (line, "pi")
-        }
+    // The prompt is a launch argument — see `launch_line_for`.
+    let line = launch_line_for(agent, prompt, name, &[]);
+    let prefix = match agent {
+        Agent::Claude => "claude",
+        Agent::Pi => "pi",
     };
 
     // Named for its agent so rmux's rail adopts it as the right kind rather than
@@ -1345,7 +1348,7 @@ async fn spawn(
             .unwrap_or_default()
     );
 
-    attach::spawn_detached(&session, &folder, &line, SPAWN_COLS, SPAWN_ROWS).await?;
+    attach::spawn_detached(&session, &folder, Some(&line), SPAWN_COLS, SPAWN_ROWS).await?;
 
     if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
         // Best-effort: a session that started but could not be named is still a
@@ -1382,8 +1385,56 @@ async fn spawn(
         }))
 }
 
+/// The shell line that starts a coding agent — shared by the bridge's `spawn`
+/// and `rmux spawn`, so the two cannot launch Claude or pi differently.
+///
+/// The prompt travels as an *argument* rather than being typed in afterwards.
+/// Typing means guessing when the TUI is ready to receive it, and a guess that
+/// is early loses the message into a composer that has not been drawn yet.
+/// `launch_line` shell-quotes it, which is the injection boundary that matters
+/// most in this whole feature — it is free text from a caller landing in a login
+/// shell. `claude_args` go before the prompt (e.g.
+/// `--dangerously-skip-permissions`) and are quoted the same way.
+pub(crate) fn launch_line_for(
+    agent: Agent,
+    prompt: Option<&str>,
+    name: Option<&str>,
+    claude_args: &[String],
+) -> String {
+    match agent {
+        Agent::Claude => {
+            let mut args: Vec<String> = claude_args.to_vec();
+            if let Some(p) = prompt.map(str::trim).filter(|p| !p.is_empty()) {
+                args.push(p.to_owned());
+            }
+            launch::launch_line(None, &args, launch::Rendering::default())
+        }
+        // pi runs inline (`--tui-mode regular`) for the same reasons Claude opts
+        // out of the alternate screen — see `pi::launch_line`.
+        Agent::Pi => {
+            // Give pi the status signal Claude has for free. Install the
+            // extension (idempotent, best-effort — a host that cannot take it
+            // still runs pi, just without the dot) and tell it where the writer
+            // is via `RMUX_AGENT_BIN`. The env goes on the **shell line**, like
+            // Claude's `CLAUDE_CODE_*` prefix: an assignment prefix does not stop
+            // the login shell exec-ing the single command, so pi keeps the
+            // session's own pid and `live_sessions` still correlates on it.
+            if let Some(home) = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned))
+                && let Err(e) = pi::install_status_extension(&home)
+            {
+                tracing::warn!(error = %e, "could not install pi status extension");
+            }
+            let line = pi::launch_line(prompt, name, None);
+            match std::env::current_exe().ok().and_then(|p| p.to_str().map(str::to_owned)) {
+                Some(bin) => format!("RMUX_AGENT_BIN={} {line}", rmux_transport::shell_quote(&bin)),
+                None => line,
+            }
+        }
+    }
+}
+
 /// Resolve a leading `~`, which a remote caller has no way to expand itself.
-fn expand_home(folder: &str) -> anyhow::Result<String> {
+pub(crate) fn expand_home(folder: &str) -> anyhow::Result<String> {
     let Some(rest) = folder.strip_prefix("~/").or_else(|| folder.strip_prefix("~")) else {
         return Ok(folder.to_owned());
     };
