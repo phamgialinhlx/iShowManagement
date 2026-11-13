@@ -167,6 +167,17 @@ export function usePrefixKeys(options: {
           });
           return;
         }
+        case "pane.break": {
+          // tmux `break-pane`: the focused pane becomes a tab of its own, right
+          // after this one. Structural — nothing ends.
+          if (!at || !leaf) return;
+          const source =
+            leaf.pane.kind === "session"
+              ? ({ kind: "session", sessionId: leaf.pane.id } as const)
+              : ({ kind: "leaf", projectId: at.projectId, tabId: at.tab.id, leafId: leaf.id } as const);
+          if (!state.moveToNewTab(source, at.projectId)) prefixToast("this pane is already alone in its tab");
+          return;
+        }
         case "mode.navigate": {
           const order = spaceOrder();
           const current = state.layout.activeProject;

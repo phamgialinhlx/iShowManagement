@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { api, hasBackend, type TargetRef, type Transcript, type TranscriptEntry } from "../lib/api";
+import { hasBackend, type TargetRef, type Transcript, type TranscriptEntry } from "../lib/api";
+import { TAIL_STEP, hasSelectionWithin, humanBytes, readTranscript, sameTranscript } from "../lib/transcript-read";
 import { MARKDOWN_COMPONENTS } from "../lib/markdown-code";
 import { useWorkspace } from "../lib/workspace";
 import { bench } from "../lib/debug-log";
@@ -24,28 +25,6 @@ import { copyText } from "../lib/clipboard";
  * Transcripts reach hundreds of megabytes (a real one measured 228MB), so only
  * the tail is fetched and "load more" doubles it rather than fetching the lot.
  */
-
-/**
- * How much of the tail to read at a time.
- *
- * 512KB sounded generous and was not: most of a Claude transcript is plumbing
- * — slash-command wrappers, caveat banners, system reminders — which this view
- * demotes and hides. On a real 220MB transcript that budget surfaced a single
- * visible message, which reads as "the transcript is broken" rather than "the
- * window is small". 2MB is a few hundred KB of actual conversation.
- */
-const TAIL_STEP = 2 * 1024 * 1024;
-
-const humanBytes = (bytes: number) => {
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 1)}${units[unit]}`;
-};
 
 const clock = (iso?: string) => {
   if (!iso) return "";
@@ -113,40 +92,6 @@ function Turn({ entry, provider }: { entry: TranscriptEntry; provider: "claude" 
   );
 }
 
-/**
- * Is the operator selecting text inside this view right now?
- *
- * Guards every automatic DOM change here. `getSelection` is checked against the
- * container rather than globally, so a selection in another pane does not freeze
- * this one — and `isCollapsed` is what separates a real selection from a bare
- * caret, which every click leaves behind and which nobody would want to be
- * treated as "busy reading".
- */
-function hasSelectionWithin(container: HTMLElement | null): boolean {
-  if (!container) return false;
-  const selection = window.getSelection();
-  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
-  const range = selection.getRangeAt(0);
-  return container.contains(range.commonAncestorContainer);
-}
-
-/**
- * Did the poll actually bring anything new?
- *
- * Compared by what the reader would notice — how much was read, how many turns,
- * and the last turn's text — rather than deep-equalled. A transcript tail is
- * append-only in practice, so the final entry changing is the signal, and this
- * runs every five seconds on a list that can be thousands of items long.
- */
-function sameTranscript(a: Transcript | null, b: Transcript): boolean {
-  if (!a) return false;
-  if (a.readBytes !== b.readBytes || a.totalBytes !== b.totalBytes) return false;
-  if (a.entries.length !== b.entries.length) return false;
-  const last = a.entries.at(-1);
-  const next = b.entries.at(-1);
-  return last?.text === next?.text && last?.timestamp === next?.timestamp;
-}
-
 export function TranscriptView({
   sessionId,
   target,
@@ -195,13 +140,7 @@ export function TranscriptView({
     }
     setLoading(true);
     try {
-      const next =
-        provider === "pi"
-          ? await api.piTranscript(target, folder, resume, tail)
-          : provider === "codex"
-            ? // Codex's rollout, tail only; with no id, the newest one for this folder.
-              await api.codexTranscript(target, folder, resume, tail)
-            : await api.claudeTranscript(target, folder, resume, tail);
+      const next = await readTranscript(provider, target, folder, resume, tail);
       // Only swap state when something actually changed. A poll that returns
       // the same bytes used to replace the array anyway, re-rendering every
       // turn — which is invisible when nothing is selected and destroys the

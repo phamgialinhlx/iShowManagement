@@ -11,6 +11,7 @@ import { AlertStack } from "../components/AlertStack";
 import { TitleBar, TITLE_BAR_HEIGHT } from "../components/TitleBar";
 import { SavedViews } from "../components/SavedViews";
 import { TransfersControl } from "../components/Transfers";
+import { UpdateStrip } from "../components/UpdateStrip";
 import { visibleLeaves } from "../lib/layout-tree";
 import { readHandsFree, useHandsFree, writeHandsFree } from "../lib/hands-free";
 import type { SessionStatus } from "../lib/workspace-model";
@@ -386,6 +387,10 @@ export function Workbench({
           )}
 
           <div className="ml-auto flex items-center gap-4">
+            {/* "A newer rmux is ready / available". In the footer, never a
+                dialog: a modal would take keystrokes from a terminal. */}
+            <UpdateStrip />
+
             {waitingIds.length > 0 && (
               <button
                 type="button"

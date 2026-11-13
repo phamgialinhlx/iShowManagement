@@ -33,6 +33,7 @@ import { attachClipboard } from "../lib/terminal-clipboard";
 import { AGENT_MOUSE_MODES, MouseModeTracker } from "../lib/mouse-modes";
 import { replayMouseRepair } from "../lib/replay-modes";
 import { PanelLoader } from "./PanelLoader";
+import { usePaneHeaderDrag } from "./PaneDrag";
 import { Icon, IconButton, RELOAD_PATH } from "./SessionPaneChrome";
 import { loadGpuRenderer } from "../lib/gpu-renderer";
 
@@ -271,6 +272,8 @@ export function ClaudePanel({
   // instead of being sent to Claude. See lib/mouse-modes.ts.
   const mouseModes = useRef(new MouseModeTracker());
   const [selectMode, setSelectMode] = useState(false);
+  // The header is the pane's drag handle and its menu (`PaneDrag.tsx`).
+  const headerDrag = usePaneHeaderDrag();
   // Read by the terminal effect, which outlives renders (it reruns only on
   // `generation`) — the state value it closed over would go stale the moment
   // SELECT is toggled.
@@ -1008,6 +1011,7 @@ export function ClaudePanel({
       }}
     >
       <header
+        {...headerDrag}
         className="flex shrink-0 items-center gap-3 border-b px-3 py-1"
         style={{ borderColor: "var(--border)" }}
       >

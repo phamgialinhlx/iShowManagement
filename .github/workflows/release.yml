@@ -144,4 +144,10 @@ jobs:
           releaseName: rmux ${{ github.event.inputs.tag || github.ref_name }}
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
+          # **CI never signs updates and never holds the updater key.** A CI
+          # secret is one malicious workflow step from exfiltration, and that key
+          # can push code to every installed rmux. Updater artefacts are off and
+          # no latest.json is written here; scripts/sign-win-linux-update.sh signs
+          # this release's installers on the developer's Mac afterwards.
+          includeUpdaterJson: false
+          args: --config src-tauri/tauri.ci.conf.json ${{ matrix.args }}

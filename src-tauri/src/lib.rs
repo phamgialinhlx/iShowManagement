@@ -29,6 +29,7 @@ pub mod logs;
 mod new_window;
 mod settings_window;
 mod theme;
+mod updates;
 pub mod server;
 
 /// A target as the UI sees it. Lives in `rmux-app` with the commands that
@@ -126,6 +127,12 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             theme::theme_set_active,
             theme::theme_set_auto,
             theme::theme_delete,
+            updates::update_status,
+            updates::update_configure,
+            updates::update_check,
+            updates::update_open,
+            updates::update_dismiss,
+            updates::update_restart,
         ],
     )
 }
@@ -203,6 +210,11 @@ pub fn run() {
         // guarded by `tests/key_file_dialog.rs`; without the grant the picker
         // promise rejects and the button silently does nothing.
         .plugin(tauri_plugin_dialog::init())
+        // Self-update (`updates`). Driven entirely from Rust — the webview names
+        // an action (`update_restart`), never a URL or a payload — so it needs
+        // **no** ACL grant, and `tests/updater_acl.rs` keeps it that way. The
+        // signature is checked against `plugins.updater.pubkey`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Face model weights. See `face_models::SCHEME` for why this is a
         // protocol of our own rather than Tauri's asset: handler.
         .register_uri_scheme_protocol(face_models::SCHEME, |ctx, request| {
@@ -236,6 +248,7 @@ pub fn run() {
         .manage(notify::NotifyStore::default())
         .manage(uplink::UplinkStore::default())
         .manage(theme::ThemeStore::default())
+        .manage(updates::UpdateStore::default())
         .invoke_handler(invoke_handler())
         .setup(|app| {
             // The shared command context. Created on demand by the first

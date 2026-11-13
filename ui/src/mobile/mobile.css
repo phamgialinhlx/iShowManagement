@@ -1,0 +1,805 @@
+/*
+ * The mobile/tablet shell. Every colour is a design token from the active herdr
+ * palette (`theme.ts` › `deriveTokens`), so light and dark come from the same
+ * derivation the desktop uses. Touch targets are at least 44px. Nothing here is
+ * smaller than 12px: a phone held at arm's length is not a 27" monitor, and the
+ * desktop's 9px `.micro` captions are re-sized inside `.m-app` for that reason.
+ */
+
+html,
+body {
+  background: var(--app-bg);
+  /* The page itself never scrolls; the list and the conversation do. */
+  overscroll-behavior: none;
+}
+
+.m-app {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vv-top, 0px);
+  height: var(--vv-height, 100%);
+  display: flex;
+  background: var(--app-bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The desktop's 9px caption is unreadable here; same component, larger type. */
+.m-app .micro {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--text-soft);
+}
+
+.m-pane-list,
+.m-pane-chat {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Phone: one screen at a time. */
+.m-pane-list {
+  flex: 1 1 100%;
+}
+.m-pane-chat {
+  flex: 1 1 100%;
+}
+.m-app[data-screen="list"] .m-pane-chat {
+  display: none;
+}
+.m-app[data-screen="chat"] .m-pane-list {
+  display: none;
+}
+
+/* Tablet and up: both columns. */
+@media (min-width: 768px) {
+  .m-app[data-screen] .m-pane-list,
+  .m-app[data-screen] .m-pane-chat {
+    display: flex;
+  }
+  .m-pane-list {
+    flex: 0 0 clamp(300px, 34vw, 380px);
+    border-right: 1px solid var(--border);
+    background: var(--sidebar-bg, var(--app-panel));
+  }
+  .m-pane-chat {
+    flex: 1 1 auto;
+  }
+  .m-icon-btn.m-back {
+    display: none;
+  }
+}
+
+/* ── top bars ─────────────────────────────────────────────────────────── */
+
+.m-top {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  padding: calc(env(safe-area-inset-top, 0px) + 6px) max(12px, env(safe-area-inset-right, 0px)) 6px
+    max(12px, env(safe-area-inset-left, 0px));
+  border-bottom: 1px solid var(--border);
+  background: var(--app-panel);
+}
+
+.m-brand {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.m-top-note {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.m-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.m-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-subtitle {
+  margin: 2px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.m-subtitle-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-icon-btn {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.m-icon-btn:hover {
+  background: var(--hover);
+}
+.m-icon-btn[aria-pressed="true"] {
+  background: var(--surface0);
+  color: var(--accent);
+}
+.m-icon-btn:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+.m-icon-btn:focus-visible,
+.m-btn:focus-visible,
+.m-row:focus-visible,
+.m-key:focus-visible,
+.m-send:focus-visible,
+.m-pill:focus-visible,
+.m-tools > summary:focus-visible,
+.m-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ── the session list ─────────────────────────────────────────────────── */
+
+.m-list-screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* The scrolling element carries its own ceiling (CLAUDE.md: "Any list of
+   unknown length gets a ceiling, in the element that scrolls"). */
+.m-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 0 calc(env(safe-area-inset-bottom, 0px) + 16px);
+}
+
+.m-server + .m-server {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.m-server-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 14px 16px 4px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-soft);
+}
+
+.m-server-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-badge {
+  margin-left: auto;
+  min-width: 24px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--st-blocked);
+  color: var(--app-bg);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.m-project-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 16px 4px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.m-project-name {
+  flex: 0 0 auto;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-project-folder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-soft);
+}
+
+.m-sub-head {
+  margin: 6px 0 0;
+  padding: 4px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+
+.m-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px;
+}
+
+.m-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 8px 8px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.m-row:hover {
+  background: var(--hover);
+}
+.m-row[aria-current="page"] {
+  background: var(--active-row-bg, var(--surface0));
+}
+.m-row > svg {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.m-row-mark {
+  flex: 0 0 20px;
+  display: grid;
+  place-items: center;
+  color: var(--text-soft);
+}
+
+.m-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.m-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+}
+
+.m-row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.m-rows-quiet .m-row-name {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--text-soft);
+}
+
+.m-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.m-dot-idle {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+.m-dot-unknown {
+  width: 6px;
+  height: 6px;
+}
+
+/* ── empty / notes / alerts ───────────────────────────────────────────── */
+
+.m-empty {
+  padding: 32px 20px;
+  text-align: center;
+}
+.m-empty-center {
+  margin: auto;
+  max-width: 420px;
+}
+.m-empty-title {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.m-empty-body {
+  margin: 0 auto;
+  max-width: 36ch;
+  font-size: 14px;
+  color: var(--text-soft);
+}
+
+.m-note {
+  margin: 4px 0;
+  font-size: 13px;
+  color: var(--text-soft);
+  text-align: center;
+}
+.m-note-blocked {
+  color: var(--text);
+}
+.m-note-bar {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--app-panel);
+}
+
+.m-alert {
+  margin: 8px 0;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--red) 55%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--red) 10%, var(--app-bg));
+  overflow-wrap: anywhere;
+}
+.m-alert p {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.m-btn {
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--app-panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.m-btn:disabled {
+  color: var(--text-soft);
+  cursor: default;
+}
+
+.m-error {
+  color: var(--red) !important;
+}
+
+/* ── the conversation ─────────────────────────────────────────────────── */
+
+.m-chat-screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.m-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.m-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+/* Hidden but laid out: the terminal underneath the chat must keep a size to fit
+   to, and `visibility` also keeps it from taking focus. */
+.m-layer[data-shown="false"] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.m-terminal {
+  background: var(--app-bg);
+}
+
+.m-chat {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.m-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.m-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 12px max(12px, env(safe-area-inset-right, 0px)) 16px max(12px, env(safe-area-inset-left, 0px));
+}
+
+.m-more {
+  align-self: center;
+}
+
+.m-msg {
+  display: flex;
+  flex-direction: column;
+  max-width: min(88%, 720px);
+  min-width: 0;
+}
+.m-msg-user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+.m-msg-assistant {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.m-bubble {
+  max-width: 100%;
+  min-width: 0;
+  padding: 10px 14px;
+  border-radius: calc(var(--radius) * 3);
+  font-size: 15px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.m-msg-user .m-bubble {
+  background: color-mix(in srgb, var(--accent) 16%, var(--app-panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-bottom-right-radius: var(--radius);
+}
+.m-msg-assistant .m-bubble {
+  background: var(--app-panel);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: var(--radius);
+}
+
+/* Markdown inside a bubble: the desktop's `.markdown` rules, sized for a phone. */
+.m-bubble.markdown > :last-child {
+  margin-bottom: 0;
+}
+.m-bubble.markdown h1,
+.m-bubble.markdown h2,
+.m-bubble.markdown h3,
+.m-bubble.markdown h4 {
+  margin: 0.8em 0 0.4em;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+.m-bubble.markdown h1 {
+  font-size: 1.2rem;
+}
+.m-bubble.markdown h2 {
+  font-size: 1.1rem;
+}
+.m-bubble.markdown code {
+  font-size: max(12px, 0.88em);
+  overflow-wrap: anywhere;
+}
+.m-bubble pre,
+.m-bubble pre.inset {
+  max-width: 100%;
+  margin: 0.6em 0;
+  font-size: 13px !important;
+  line-height: 1.5 !important;
+  /* Long unbroken tokens (paths, hashes) wrap rather than widening the bubble. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  border-radius: var(--radius);
+}
+.m-bubble a {
+  overflow-wrap: anywhere;
+}
+
+.m-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.m-table-wrap table {
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.m-table-wrap th,
+.m-table-wrap td,
+.m-table-wrap code {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.m-table-wrap code {
+  white-space: nowrap;
+}
+.m-table-wrap th,
+.m-table-wrap td {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  min-width: 8ch;
+}
+
+.m-meta {
+  margin-top: 3px;
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+/* A run of tool calls: one small row, opened on demand. */
+.m-tools {
+  align-self: flex-start;
+  max-width: min(100%, 720px);
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--app-panel) 60%, var(--app-bg));
+}
+.m-tools > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 6px 12px;
+  list-style: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+.m-tools > summary::-webkit-details-marker {
+  display: none;
+}
+.m-tools > summary::before {
+  content: "›";
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  transition: transform 120ms ease;
+}
+.m-tools[open] > summary::before {
+  transform: rotate(90deg);
+}
+.m-tools-label {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text);
+}
+.m-tools-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.m-tools-body {
+  padding: 0 12px 10px;
+}
+.m-tool + .m-tool {
+  margin-top: 8px;
+}
+.m-tool-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-soft);
+}
+.m-tool-text {
+  margin: 4px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: var(--radius);
+  background: var(--well);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.m-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+  cursor: pointer;
+}
+
+/* ── keys and composer ────────────────────────────────────────────────── */
+
+.m-keys {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 8px max(12px, env(safe-area-inset-left, 0px));
+  border-top: 1px solid var(--border);
+  background: var(--app-panel);
+}
+.m-key {
+  /* Grows to share the row, never shrinks below its label. */
+  flex: 1 0 auto;
+  min-width: 44px;
+  max-width: 96px;
+  height: 44px;
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--app-bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  cursor: pointer;
+}
+.m-key:disabled {
+  color: var(--text-soft);
+  cursor: default;
+}
+.m-keys-status {
+  background: var(--app-panel);
+}
+
+.m-composer-slot[hidden] {
+  display: none;
+}
+
+.m-composer {
+  flex: 0 0 auto;
+  padding: 8px max(12px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px))
+    max(12px, env(safe-area-inset-left, 0px));
+  border-top: 1px solid var(--border);
+  background: var(--app-panel);
+}
+
+.m-composer-status {
+  margin: 0;
+  padding: 2px 4px 6px;
+  font-size: 13px;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+.m-keys-status {
+  padding: 0 16px 6px;
+}
+
+.m-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: 860px;
+  margin: 0 auto;
+}
+
+.m-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 14px;
+  resize: none;
+  border: 1px solid var(--border-strong);
+  border-radius: calc(var(--radius) * 3);
+  background: var(--app-bg);
+  color: var(--text);
+  /* 16px or iOS zooms the page on focus. */
+  font: inherit;
+  font-size: 16px;
+  line-height: 22px;
+  overflow-y: auto;
+}
+.m-input::placeholder {
+  color: var(--text-soft);
+}
+.m-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.m-send {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+.m-send:disabled {
+  background: var(--surface0);
+  color: var(--text-soft);
+  cursor: default;
+}
+.m-send-wait {
+  font-size: 13px;
+  white-space: nowrap;
+}

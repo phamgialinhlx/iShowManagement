@@ -691,6 +691,192 @@ export function placeBeside(
   return { ...added, placed: "tab" };
 }
 
+// ── children past the point a tab can hold them ──────────────────────────────
+
+/** A size in CSS pixels — the area a tab's panes are drawn in. */
+export type Area = { w: number; h: number };
+
+/**
+ * The smallest pane a new child may be given: about 60 columns × 12 rows of the
+ * terminal font (13px IBM Plex Mono advances ~7.8px a cell, a row is ~17px)
+ * plus a pane header and padding. Below this a Claude TUI wraps every line and
+ * the composer pushes the conversation off the pane — it is on screen without
+ * being usable, which is worse than being one tab away.
+ */
+export const MIN_CHILD_PANE: Area = { w: 480, h: 230 };
+
+/** With no measured size (a hidden tile, a harness), a tab is full at this many
+ *  panes — the same 2 × 2 a 16:9 window holds at the minimum above. */
+export const MAX_LEAVES_UNSIZED = 4;
+
+const validArea = (a: Area | null | undefined): a is Area =>
+  !!a && Number.isFinite(a.w) && Number.isFinite(a.h) && a.w > 0 && a.h > 0;
+
+/**
+ * How splitting `leafId` would go: along its long side on screen, and the size
+ * the new half would get. `half` is `null` when the area is unknown — then only
+ * the direction is decided (from `aspect`, as `placeBeside` always has).
+ */
+export function splitFor(
+  root: SplitNode,
+  leafId: string,
+  area: Area | null,
+  aspect = 16 / 9,
+): { dir: "row" | "col"; half: Area | null } {
+  const r = leafRects(root)[leafId] ?? UNIT;
+  if (validArea(area)) {
+    const w = r.w * area.w;
+    const h = r.h * area.h;
+    return w > h ? { dir: "row", half: { w: w / 2, h } } : { dir: "col", half: { w, h: h / 2 } };
+  }
+  const a = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
+  return { dir: r.w * a > r.h ? "row" : "col", half: null };
+}
+
+/** The leaf with the most room, by drawn area (ties: the first). */
+export function largestLeaf(root: SplitNode, area: Area | null = null): string {
+  const rects = leafRects(root);
+  const sx = validArea(area) ? area.w : 1;
+  const sy = validArea(area) ? area.h : 1;
+  let best = leaves(root)[0]!.id;
+  let size = -1;
+  for (const l of leaves(root)) {
+    const r = rects[l.id] ?? UNIT;
+    const s = r.w * sx * r.h * sy;
+    if (s > size + EPS) {
+      size = s;
+      best = l.id;
+    }
+  }
+  return best;
+}
+
+/** Would a new pane split off `leafId` still be usable? Measured when the area
+ *  is known; otherwise the tab's pane count against the fallback cap. */
+export function roomToSplit(
+  root: SplitNode,
+  leafId: string,
+  area: Area | null,
+  min: Area = MIN_CHILD_PANE,
+  cap = MAX_LEAVES_UNSIZED,
+): boolean {
+  const { half } = splitFor(root, leafId, area);
+  if (half) return half.w >= min.w && half.h >= min.h;
+  return leaves(root).length < cap;
+}
+
+/**
+ * Where a spawned child goes (herdr's orchestration, with an overflow):
+ *
+ * - **beside its parent** — a split of the parent's pane, as `placeBeside` —
+ *   while the new half would still be a usable pane;
+ * - otherwise into the parent's **overflow tab**: a tab of the same project
+ *   holding nothing but the parent's other children, split at its largest pane,
+ *   if that still leaves a usable pane;
+ * - otherwise a **new overflow tab** right after the parent's tab (after the
+ *   last overflow tab, when there are several), named `<parent> ·N`.
+ *
+ * An overflow tab is recognised by what it holds, not by a stored mark, so one
+ * the operator rearranged by hand stops being one — and a child they dragged
+ * into a tab of its own makes that tab one. A parent not in a tab of `pid`
+ * gives a plain new tab, as before.
+ *
+ * Pure decision; `placeChild` applies it.
+ */
+export type ChildPlacement =
+  | { kind: "split"; tabId: string; leafId: string; dir: "row" | "col"; overflow: boolean }
+  | { kind: "newTab"; afterTabId: string | null; name: string; overflow: boolean };
+
+export function childPlacement(
+  layout: Layout,
+  pid: ProjectId,
+  parentSessionId: string | null,
+  opts: {
+    area?: Area | null;
+    aspect?: number;
+    /** Is this session another child of the same parent? */
+    isSibling?: (sessionId: string) => boolean;
+    parentName?: string;
+    childName?: string;
+    min?: Area;
+    cap?: number;
+  } = {},
+): ChildPlacement {
+  const area = validArea(opts.area) ? opts.area : null;
+  const loc = parentSessionId ? locateSession(layout, parentSessionId) : null;
+  if (!loc || loc.projectId !== pid) {
+    return { kind: "newTab", afterTabId: null, name: opts.childName ?? "", overflow: false };
+  }
+  const pt = tabsOf(layout, pid);
+  const home = pt.tabs.find((t) => t.id === loc.tabId)!;
+  if (roomToSplit(home.root, loc.leafId, area, opts.min, opts.cap)) {
+    const { dir } = splitFor(home.root, loc.leafId, area, opts.aspect);
+    return { kind: "split", tabId: home.id, leafId: loc.leafId, dir, overflow: false };
+  }
+  const sibling = opts.isSibling ?? (() => false);
+  const overflow = pt.tabs.filter((t) => {
+    if (t.id === home.id) return false;
+    const ids = sessionsInTab(t);
+    return ids.length > 0 && ids.length === leaves(t.root).length && ids.every(sibling);
+  });
+  for (const t of overflow) {
+    const leafId = largestLeaf(t.root, area);
+    if (roomToSplit(t.root, leafId, area, opts.min, opts.cap)) {
+      const { dir } = splitFor(t.root, leafId, area, opts.aspect);
+      return { kind: "split", tabId: t.id, leafId, dir, overflow: true };
+    }
+  }
+  const base = (opts.parentName ?? "").trim() || (opts.childName ?? "").trim() || "children";
+  return {
+    kind: "newTab",
+    afterTabId: overflow.length ? overflow[overflow.length - 1]!.id : home.id,
+    name: `${base} ·${overflow.length + 2}`,
+    overflow: true,
+  };
+}
+
+/** Insert a tab after `afterTabId` (or at the end), **not** activated — the
+ *  strip gains a tab and nothing the operator is looking at changes. */
+function insertTab(layout: Layout, pid: ProjectId, tab: Tab, afterTabId: string | null): Layout {
+  return withTabs(layout, pid, (pt) => {
+    const at = afterTabId ? pt.tabs.findIndex((t) => t.id === afterTabId) : -1;
+    const tabs = [...pt.tabs];
+    tabs.splice(at < 0 ? tabs.length : at + 1, 0, tab);
+    return { tabs, activeTab: pt.activeTab ?? tab.id };
+  });
+}
+
+/**
+ * Apply `childPlacement`. Like `placeBeside`, **nothing the operator is using
+ * moves**: no focus, no zoom, no active tab, no active project changes — a
+ * child arriving in an overflow tab appears in the strip and the sidebar only.
+ */
+export function placeChild(
+  layout: Layout,
+  pid: ProjectId,
+  parentSessionId: string | null,
+  pane: PaneRef,
+  mint: Mint,
+  opts: Parameters<typeof childPlacement>[3] = {},
+): { layout: Layout; tabId: string; leafId: string; placement: ChildPlacement } {
+  const placement = childPlacement(layout, pid, parentSessionId, opts);
+  const leafId = mint("leaf");
+  if (placement.kind === "split") {
+    const tab = tabsOf(layout, pid).tabs.find((t) => t.id === placement.tabId)!;
+    const root = splitLeaf(tab.root, placement.leafId, placement.dir, { kind: "leaf", id: leafId, pane }, mint("split"));
+    return { layout: withTab(layout, pid, tab.id, (t) => ({ ...t, root })), tabId: tab.id, leafId, placement };
+  }
+  const tabId = mint("tab");
+  const tab: Tab = {
+    id: tabId,
+    name: placement.name,
+    renamed: placement.overflow || undefined,
+    root: { kind: "leaf", id: leafId, pane },
+    focus: leafId,
+  };
+  return { layout: insertTab(layout, pid, tab, placement.afterTabId), tabId, leafId, placement };
+}
+
 /** The first leaf of the subtree that takes a removed leaf's place. */
 function heir<L extends BaseLeaf>(node: NodeOf<L>, leafId: string): string | null {
   if (node.kind === "leaf") return null;
@@ -793,7 +979,11 @@ export function moveTab(layout: Layout, pid: ProjectId, from: number, to: number
  */
 export type MoveSource =
   | { kind: "session"; sessionId: string }
-  | { kind: "tab"; projectId: ProjectId; tabId: string };
+  | { kind: "tab"; projectId: ProjectId; tabId: string }
+  /** One pane by position — a host or files pane, which has no session id to
+   *  name it by. A session pane is dragged as `session`, so the sidebar row and
+   *  the pane header are the same move. */
+  | { kind: "leaf"; projectId: ProjectId; tabId: string; leafId: string };
 
 /** The pane it is dropped on. */
 export type MoveTarget = { projectId: ProjectId; tabId: string; leafId: string };
@@ -807,11 +997,15 @@ export function resolveMoveSource(
   layout: Layout,
   source: MoveSource,
 ): { projectId: ProjectId; tabId: string; node: SplitNode; wholeTab: boolean } | null {
-  if (source.kind === "session") {
-    const loc = locateSession(layout, source.sessionId);
+  if (source.kind === "session" || source.kind === "leaf") {
+    const loc =
+      source.kind === "session"
+        ? locateSession(layout, source.sessionId)
+        : { projectId: source.projectId, tabId: source.tabId, leafId: source.leafId };
     if (!loc) return null;
-    const tab = tabsOf(layout, loc.projectId).tabs.find((t) => t.id === loc.tabId)!;
-    const node = findLeaf(tab.root, loc.leafId)!;
+    const tab = tabsOf(layout, loc.projectId).tabs.find((t) => t.id === loc.tabId);
+    const node = tab ? findLeaf(tab.root, loc.leafId) : null;
+    if (!tab || !node) return null;
     return { projectId: loc.projectId, tabId: loc.tabId, node, wholeTab: tab.root.kind === "leaf" };
   }
   const tab = tabsOf(layout, source.projectId).tabs.find((t) => t.id === source.tabId);
@@ -877,6 +1071,68 @@ export function moveBeside(
   next = withTab(next, target.projectId, target.tabId, (t) => ({ ...t, root, focus, zoomed: undefined }));
   next = selectTab(next, target.projectId, target.tabId);
   return { layout: next, focus, sessions, fromProject: src.projectId };
+}
+
+/**
+ * Move a session (or a pane, or a whole tab) **into another tab** — a drop on a
+ * tab in the strip, or "Move to tab" in a pane's menu. It lands beside the
+ * target tab's largest pane, split along that pane's long side, and is then
+ * exactly a `moveBeside`: leaf ids preserved, a tab it leaves empty removed
+ * (structurally — nothing ends), the target tab active with the moved pane
+ * focused. `null` when it is already in that tab, or either end is gone.
+ */
+export function moveToTab(
+  layout: Layout,
+  source: MoveSource,
+  target: { projectId: ProjectId; tabId: string },
+  mint: Mint,
+  area: Area | null = null,
+): ReturnType<typeof moveBeside> {
+  const src = resolveMoveSource(layout, source);
+  if (!src) return null;
+  if (src.projectId === target.projectId && src.tabId === target.tabId) return null;
+  const tab = tabsOf(layout, target.projectId).tabs.find((t) => t.id === target.tabId);
+  if (!tab) return null;
+  const leafId = largestLeaf(tab.root, area);
+  const { dir } = splitFor(tab.root, leafId, area);
+  return moveBeside(layout, source, { projectId: target.projectId, tabId: tab.id, leafId }, dir === "row" ? "right" : "down", mint);
+}
+
+/**
+ * Break a pane out into a **new tab** of `projectId` (tmux's `break-pane`): a
+ * drop on `+` or the strip's empty end, "Move to new tab", or prefix `!`. The
+ * subtree keeps its leaf ids; the new tab sits right after the one it left (at
+ * the end when it came from another project) and becomes active, focused on the
+ * moved pane. A tab left empty is removed — no session ends. `null` for a pane
+ * that is already alone in a tab of that project (nothing would change).
+ */
+export function moveToNewTab(
+  layout: Layout,
+  source: MoveSource,
+  projectId: ProjectId,
+  mint: Mint,
+  name = "",
+): { layout: Layout; tabId: string; focus: string; sessions: string[]; fromProject: ProjectId } | null {
+  const src = resolveMoveSource(layout, source);
+  if (!src) return null;
+  if (src.wholeTab && src.projectId === projectId) return null;
+  const srcTab = tabsOf(layout, src.projectId).tabs.find((t) => t.id === src.tabId)!;
+  const focus =
+    src.node.kind === "leaf" ? src.node.id : findLeaf(src.node, srcTab.focus) ? srcTab.focus : leaves(src.node)[0]!.id;
+  const sessions = leaves(src.node).flatMap((l) => (l.pane.kind === "session" ? [l.pane.id] : []));
+  const index = tabsOf(layout, projectId).tabs.findIndex((t) => t.id === src.tabId);
+  let next = src.wholeTab
+    ? removeTab(layout, src.projectId, src.tabId)
+    : closeLeaf(layout, src.projectId, src.tabId, src.node.id);
+  const tabId = mint("tab");
+  const tab: Tab = { id: tabId, name, root: src.node, focus };
+  next = withTabs(next, projectId, (pt) => {
+    const tabs = [...pt.tabs];
+    tabs.splice(index < 0 ? tabs.length : index + 1, 0, tab);
+    return { tabs, activeTab: tabId };
+  });
+  next = selectTab(next, projectId, tabId);
+  return { layout: next, tabId, focus, sessions, fromProject: src.projectId };
 }
 
 // ── the project grid ─────────────────────────────────────────────────────────

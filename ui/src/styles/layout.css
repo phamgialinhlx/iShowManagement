@@ -189,6 +189,32 @@
 .tab[data-drop="true"] {
   box-shadow: inset 2px 0 0 var(--accent, rgb(var(--primary)));
 }
+/* A pane dragged over a tab: it will land in that tab (and the tab opens after
+   a moment's hover, so it can be dropped on a particular half). Outlined rather
+   than filled, so the active tab's accent ground still reads as "active". */
+.tab[data-drop-into="true"] {
+  box-shadow: inset 0 0 0 1px var(--accent, rgb(var(--primary)));
+  color: var(--text);
+}
+.tab[data-drop-into="true"][data-active="true"] {
+  box-shadow: inset 0 0 0 1px var(--text);
+}
+/* A pane dragged over `+` or the strip's empty end: it becomes a new tab. */
+.tab-add[data-drop="true"] {
+  color: var(--accent-text, var(--app-bg, #11111b));
+  background: var(--accent, rgb(var(--primary)));
+}
+/* The pane header is the drag handle for its pane (`PaneDrag.tsx`). */
+[data-pane-header] {
+  cursor: grab;
+}
+[data-pane-header] button,
+[data-pane-header] a {
+  cursor: pointer;
+}
+[data-pane-header] input {
+  cursor: text;
+}
 .tab-label {
   min-width: 0;
   overflow: hidden;

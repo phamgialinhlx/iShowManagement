@@ -617,12 +617,21 @@ pub async fn claude_state(
     Ok(PolledState { state: session.state(), exited: session.terminal().exit_code() })
 }
 
+/// Submit a message. `agent` picks the composer encoding — `"pi"` gets
+/// `keys::send_message_pi`, anything else (Claude, Codex, absent) Claude's
+/// `keys::send_message`, the same split the Redstone bridge makes by name.
 pub async fn claude_send(
     store: &ClaudeStore,
     id: String,
     text: String,
+    agent: Option<String>,
 ) -> Result<(), String> {
-    session(store, &id)?.send(&text).await.map_err(err)
+    let session = session(store, &id)?;
+    if agent.as_deref() == Some("pi") {
+        session.send_pi(&text).await.map_err(err)
+    } else {
+        session.send(&text).await.map_err(err)
+    }
 }
 
 pub async fn claude_interrupt(store: &ClaudeStore, id: String) -> Result<(), String> {
@@ -645,6 +654,30 @@ pub async fn claude_write(
     data: String,
 ) -> Result<(), String> {
     session(store, &id)?.terminal().write(data.as_bytes()).map_err(err)
+}
+
+/// Press named keys (`enter`, `esc`, `up`, `2`, …) in a session's TUI.
+///
+/// The names are `rmux_claude::keys::named` — the vocabulary `rmux keys`
+/// already speaks — so the web UI's quick keys carry no second key table. Every
+/// name is validated before any byte is written: half a sequence delivered to a
+/// TUI has already moved a highlight or dismissed a dialog.
+pub async fn claude_keys(store: &ClaudeStore, id: String, keys: Vec<String>) -> Result<(), String> {
+    let session = session(store, &id)?;
+    let bytes = keys_to_bytes(&keys)?;
+    for chunk in bytes {
+        session.terminal().write(&chunk).map_err(err)?;
+    }
+    Ok(())
+}
+
+fn keys_to_bytes(keys: &[String]) -> Result<Vec<Vec<u8>>, String> {
+    if keys.is_empty() {
+        return Err("no keys given".into());
+    }
+    keys.iter()
+        .map(|k| rmux_claude::keys::named(k).ok_or_else(|| format!("unknown key `{k}`")))
+        .collect()
 }
 
 pub async fn claude_stop(store: &ClaudeStore, id: String) -> Result<(), String> {
@@ -764,6 +797,16 @@ pub struct IdArgs {
 pub struct SendArgs {
     pub id: String,
     pub text: String,
+    /// Which agent the session runs (`"pi"` changes the multi-line encoding).
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeysArgs {
+    pub id: String,
+    pub keys: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -852,7 +895,7 @@ pub fn register(r: &mut Registry) {
         claude_state(&store_of(&call), a.id).await
     });
     r.add("claude_send", Web::Yes, |call: Call, a: SendArgs| async move {
-        claude_send(&store_of(&call), a.id, a.text).await
+        claude_send(&store_of(&call), a.id, a.text, a.agent).await
     });
     r.add("claude_interrupt", Web::Yes, |call: Call, a: IdArgs| async move {
         claude_interrupt(&store_of(&call), a.id).await
@@ -860,10 +903,32 @@ pub fn register(r: &mut Registry) {
     r.add("claude_resize", Web::Yes, |call: Call, a: ResizeArgs| async move {
         claude_resize(&store_of(&call), a.id, a.cols, a.rows).await
     });
+    r.add("claude_keys", Web::Yes, |call: Call, a: KeysArgs| async move {
+        claude_keys(&store_of(&call), a.id, a.keys).await
+    });
     r.add("claude_write", Web::Yes, |call: Call, a: WriteArgs| async move {
         claude_write(&store_of(&call), a.id, a.data).await
     });
     r.add("claude_stop", Web::Yes, |call: Call, a: IdArgs| async move {
         claude_stop(&store_of(&call), a.id).await
     });
+}
+
+#[cfg(test)]
+mod keys_tests {
+    use super::keys_to_bytes;
+
+    #[test]
+    fn quick_keys_resolve_through_the_shared_table() {
+        let keys: Vec<String> = ["1", "enter", "esc", "up", "down"].iter().map(|s| s.to_string()).collect();
+        let bytes = keys_to_bytes(&keys).unwrap();
+        assert_eq!(bytes, vec![b"1".to_vec(), b"\r".to_vec(), b"\x1b".to_vec(), b"\x1b[A".to_vec(), b"\x1b[B".to_vec()]);
+    }
+
+    #[test]
+    fn one_unknown_key_refuses_the_whole_sequence() {
+        let keys: Vec<String> = ["enter", "not-a-key"].iter().map(|s| s.to_string()).collect();
+        assert!(keys_to_bytes(&keys).unwrap_err().contains("not-a-key"));
+        assert!(keys_to_bytes(&[]).is_err());
+    }
 }

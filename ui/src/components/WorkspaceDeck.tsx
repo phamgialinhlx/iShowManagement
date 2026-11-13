@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "../lib/bridge";
 
 import { useWorkspace } from "../lib/workspace";
@@ -13,6 +13,8 @@ import {
   viewTree,
   warmTabs,
   type Direction,
+  type Leaf,
+  type MoveSource,
   type ProjectLeaf,
   type Rect,
   type Split,
@@ -37,6 +39,17 @@ import { useEndedChildren } from "../lib/children-watch";
 import { requestClose } from "../lib/shortcuts";
 import { effectiveLowLatency } from "../lib/transport-default";
 import { currentSessionDrag, endSessionDrag, isSessionDrag, useSessionDrag } from "../lib/session-drag";
+import { PaneDragProvider } from "./PaneDrag";
+import { PaneMoveMenu } from "./PaneMoveMenu";
+import type { MenuAt } from "./Menu";
+
+/** What dragging a pane's header moves: its session (the same move as its
+ *  sidebar row), or — for a host or files pane — the pane by position. */
+function leafSource(projectId: ProjectId, tabId: string, leaf: Leaf): MoveSource {
+  return leaf.pane.kind === "session"
+    ? { kind: "session", sessionId: leaf.pane.id }
+    : { kind: "leaf", projectId, tabId, leafId: leaf.id };
+}
 
 /**
  * The workbench main area, v4 — herdr's model: the active **project**'s **tabs**,
@@ -189,8 +202,9 @@ function ShellSessionPane({ session }: { session: SessionV3 }) {
   );
 }
 
-/** A single session pane — Claude, pi or a shell, by kind. */
-function SessionPane({ session }: { session: SessionV3 }) {
+/** A single session pane — Claude, pi or a shell, by kind. Exported for the
+ *  mobile bundle's TERMINAL view, which reuses the desktop pane as it is. */
+export function SessionPane({ session }: { session: SessionV3 }) {
   if (session.kind === "claude") return <ClaudeSessionPane session={session} />;
   if (session.kind === "pi") return <PiSessionPane session={session} />;
   if (session.kind === "dsh") return <DshSessionPane session={session} />;
@@ -325,6 +339,15 @@ function SplitTab({
   const setSplitRatio = useWorkspace((s) => s.setSplitRatio);
   const box = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<RatioOverride>(null);
+  // A pane header's right-click menu (`PaneMoveMenu`), by leaf.
+  const [menu, setMenu] = useState<{ leafId: string; at: MenuAt } | null>(null);
+  const openMenuFor = useCallback((leafId: string) => (at: MenuAt) => setMenu({ leafId, at }), []);
+  const menuOpeners = useMemo(() => new Map<string, (at: MenuAt) => void>(), []);
+  const openerFor = (leafId: string) => {
+    let f = menuOpeners.get(leafId);
+    if (!f) menuOpeners.set(leafId, (f = openMenuFor(leafId)));
+    return f;
+  };
 
   const rects = useMemo(() => leafRects(tab.root, undefined, drag), [tab.root, drag]);
   // Outer splits are drawn *last*, so where an inner divider meets the outer
@@ -419,7 +442,9 @@ function SplitTab({
             {/* `.panel` keeps the appearance system's tint on every pane. The
                 frame carries the border; the terminal host sits inside it. */}
             <div className="panel split-frame">
-              <Pane pane={leaf.pane} at={{ projectId, tabId: tab.id, leafId: leaf.id }} />
+              <PaneDragProvider source={leafSource(projectId, tab.id, leaf)} openMenu={openerFor(leaf.id)}>
+                <Pane pane={leaf.pane} at={{ projectId, tabId: tab.id, leafId: leaf.id }} />
+              </PaneDragProvider>
             </div>
             {visible && shown && <PaneDropZone projectId={projectId} tabId={tab.id} leafId={leaf.id} />}
           </div>
@@ -450,6 +475,21 @@ function SplitTab({
             />
           );
         })}
+
+      {menu &&
+        (() => {
+          const leaf = findLeaf(tab.root, menu.leafId);
+          if (!leaf) return null;
+          return (
+            <PaneMoveMenu
+              at={menu.at}
+              projectId={projectId}
+              tabId={tab.id}
+              source={leafSource(projectId, tab.id, leaf)}
+              onClose={() => setMenu(null)}
+            />
+          );
+        })()}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { hasBackend, invoke, isTauri, type Channel } from "./bridge";
 
 import type { Theme } from "./theme";
+import type { UpdateStatus } from "./updates";
 
 /**
  * The theme config as Rust serves it: which theme is active, plus only the
@@ -737,6 +738,15 @@ export const api = {
   jiraPoll: (serverUrl: string, state: string) =>
     call<SignedIn | null>("jira_poll", { serverUrl, state }),
   openExternal: (url: string) => call<void>("open_external", { url }),
+
+  /* Updates (desktop only; `src-tauri/src/updates.rs`). The webview never
+     passes a URL — `updateOpen` names which link, Rust holds the URL. */
+  updateStatus: () => call<UpdateStatus>("update_status"),
+  updateConfigure: (auto: boolean) => call<void>("update_configure", { auto }),
+  updateCheck: () => call<UpdateStatus>("update_check"),
+  updateOpen: (kind: "download" | "notes") => call<void>("update_open", { kind }),
+  updateDismiss: () => call<void>("update_dismiss"),
+  updateRestart: () => call<void>("update_restart"),
 
   /** Open Settings in its own window, or focus it if it is already open. */
   openSettings: () => call<void>("open_settings"),

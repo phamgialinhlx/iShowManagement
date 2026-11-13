@@ -27,7 +27,9 @@ import {
   placeTile as lPlaceTile,
   setViewRatio as lSetViewRatio,
   migrateLayoutV3,
-  placeBeside,
+  placeChild,
+  moveToTab as lMoveToTab,
+  moveToNewTab as lMoveToNewTab,
   migrateV3toV4,
   moveTab as lMoveTab,
   moveBeside as lMoveBeside,
@@ -49,9 +51,11 @@ import {
   swapInDirection,
   tabsOf,
   toggleZoom as lToggleZoom,
+  type Area,
   type Direction,
   type Layout,
   type MoveSource,
+  type SplitNode,
   type MoveTarget,
   type PersistedV4,
   type SavedView,
@@ -321,14 +325,14 @@ type State = Core & {
    * another pane. Idempotent by daemon name. Returns the row's id, or null when
    * the decision no longer applies.
    */
-  adoptChild: (serverId: ServerId, decision: ChildDecision, aspect?: number) => string | null;
+  adoptChild: (serverId: ServerId, decision: ChildDecision, aspect?: number, area?: Area | null) => string | null;
   /**
    * Move every adopted child that sits in a different project from its parent
    * back beside the parent, and drop a project that move left empty. Repairs
    * children placed by the old folder rule (a `~/x` → `/data/x` symlink put the
    * child in a second project of the same name). Returns the ids it moved.
    */
-  rehomeChildren: (aspect?: number) => string[];
+  rehomeChildren: (aspect?: number, area?: Area | null) => string[];
   removeProject: (id: ProjectId) => void;
   removeServer: (id: ServerId) => void;
 
@@ -374,7 +378,9 @@ type State = Core & {
 
   // ── projects / tabs / panes (herdr's model, `layout-tree.ts`) ─────────────
   selectProject: (projectId: ProjectId) => void;
-  selectTab: (projectId: ProjectId, tabId: string) => void;
+  /** `keyboard: false` switches without taking the keyboard — a spring-loaded
+   *  tab under a drag. */
+  selectTab: (projectId: ProjectId, tabId: string, opts?: { keyboard?: boolean }) => void;
   /** The active project's tab at a 0-based index. */
   selectTabIndex: (index: number) => void;
   /** Next (+1) / previous (-1) tab in the active project, wrapping. */
@@ -402,6 +408,18 @@ type State = Core & {
    * moved.
    */
   moveBeside: (source: MoveSource, target: MoveTarget, side: Direction) => boolean;
+  /**
+   * Can `source` go into the tab `tabId` of `projectId` — or, with `tabId`
+   * null, into a new tab there? Same answers as `moveRefusal`: `"noop"` when it
+   * is already there, `"server"` across servers.
+   */
+  tabMoveRefusal: (source: MoveSource, projectId: ProjectId, tabId: string | null) => "noop" | "server" | null;
+  /** Move `source` into an existing tab, beside its largest pane
+   *  (`layout-tree.ts` `moveToTab`). Structural only — nothing ends. */
+  moveToTab: (source: MoveSource, projectId: ProjectId, tabId: string) => boolean;
+  /** Break `source` out into a new tab of `projectId` (tmux `break-pane`).
+   *  Structural only — nothing ends. */
+  moveToNewTab: (source: MoveSource, projectId: ProjectId) => boolean;
   focusLeaf: (projectId: ProjectId, tabId: string, leafId: string, opts?: { keyboard?: boolean }) => void;
   /** Move the focus to the geometric neighbour, keyboard included. */
   focusDirection: (dir: Direction) => void;
@@ -613,12 +631,67 @@ function mint(prefix: "tab" | "leaf" | "split" | "tile"): string {
 
 const restored = load();
 
+/** "Is this session another child of `parentId`?" — what marks an overflow tab. */
+const siblingOf =
+  (sessions: readonly Pick<SessionV3, "id" | "parentId">[], parentId: string) =>
+  (id: string): boolean =>
+    sessions.some((x) => x.id === id && x.parentId === parentId);
+
+/**
+ * Would moving `node` into `projectId` cross servers? Every pane being moved
+ * must already be on the target's server: a session runs on one host, and a
+ * project is a folder on one host.
+ */
+function crossesServer(
+  s: Pick<State, "projects" | "sessions">,
+  node: SplitNode,
+  projectId: ProjectId,
+): boolean {
+  const serverOfProject = (pid: ProjectId) => s.projects.find((p) => p.id === pid)?.serverId;
+  const to = serverOfProject(projectId);
+  for (const l of treeLeaves(node)) {
+    const pane = l.pane;
+    const from =
+      pane.kind === "session"
+        ? serverOfProject(s.sessions.find((x) => x.id === pane.id)?.projectId ?? "")
+        : pane.kind === "host"
+          ? pane.serverId
+          : serverOfProject(pane.projectId);
+    if (!to || from !== to) return true;
+  }
+  return false;
+}
+
 /** The pane area's width / height — a new tile goes the way the focused tile
  *  is long on screen, which a unit-square tree cannot know by itself. */
 function paneAreaAspect(): number {
   if (typeof document === "undefined") return 16 / 9;
   const r = document.querySelector(".pane-area")?.getBoundingClientRect();
   return r && r.width > 0 && r.height > 0 ? r.width / r.height : 16 / 9;
+}
+
+/**
+ * The size, in CSS pixels, a tab of `projectId` is drawn at: its tab body when
+ * one is on screen, else its tile less the tab bar, else the pane area less
+ * one. `null` when nothing measures (a harness, a hidden window) — callers then
+ * fall back to counting panes. Exported for the child watcher.
+ */
+export function tabAreaOf(projectId: ProjectId | null | undefined): Area | null {
+  if (typeof document === "undefined") return null;
+  const ok = (r: DOMRect | undefined) => (r && r.width > 0 && r.height > 0 ? r : undefined);
+  const shown = projectId
+    ? Array.from(document.querySelectorAll<HTMLElement>(".split-tab")).find(
+        (el) => el.dataset.tabProject === projectId && el.style.display !== "none",
+      )
+    : undefined;
+  const body = ok(shown?.getBoundingClientRect());
+  if (body) return { w: body.width, h: body.height };
+  const bar = 22; // --tile-bar-h
+  const tile = projectId
+    ? Array.from(document.querySelectorAll<HTMLElement>(".project-tile")).find((el) => el.dataset.tileProject === projectId)
+    : undefined;
+  const r = ok(tile?.getBoundingClientRect()) ?? ok(document.querySelector(".pane-area")?.getBoundingClientRect());
+  return r && r.height > bar ? { w: r.width, h: r.height - bar } : null;
 }
 
 /** Just the reducer core, for handing to a reducer and merging its result back. */
@@ -695,6 +768,28 @@ export const useWorkspace = create<State>((set, get) => {
     const s = get();
     const next = normalizeLayout(s.layout, s, mint);
     if (next !== s.layout) set({ layout: next });
+  };
+
+  /**
+   * Commit a structural move (`moveBeside`, `moveToTab`, `moveToNewTab`).
+   * Same server, other project: the sessions now belong to the target's
+   * project — changed in the same write as the layout, so `normalizeLayout`
+   * never sees a session placed outside its own project (it would pull it
+   * straight back out). The source project stays even if this emptied it: the
+   * operator opened it. Modelled on `rehomeChildren`, minus the removal.
+   *
+   * The moved pane takes the focus and the keyboard — the operator just put it
+   * there on purpose. **Nothing ends**: no `removeSession`, no close.
+   */
+  const landMove = (r: { layout: Layout; sessions: string[]; fromProject: ProjectId }, to: ProjectId) => {
+    const s = get();
+    const moving = new Set(r.sessions);
+    const extra: Partial<State> = {};
+    if (r.fromProject !== to && moving.size) {
+      extra.sessions = s.sessions.map((x) => (moving.has(x.id) ? { ...x, projectId: to } : x));
+    }
+    land(r.layout, { keyboard: true }, extra);
+    renormalize();
   };
 
   /** Create a session in `projectId` without placing it — `addSession` and
@@ -980,7 +1075,7 @@ export const useWorkspace = create<State>((set, get) => {
     return id;
   },
 
-  adoptChild: (serverId, decision, aspect) => {
+  adoptChild: (serverId, decision, aspect, area) => {
     const state = get();
     const { child } = decision;
     const onServer = new Set(state.projects.filter((p) => p.serverId === serverId).map((p) => p.id));
@@ -1024,22 +1119,22 @@ export const useWorkspace = create<State>((set, get) => {
     // `rAddSession` makes the new session active; adoption must not.
     core = { ...core, activeSession: keepActive };
 
-    const placed = placeBeside(
-      state.layout,
-      projectId,
-      parent.id,
-      { kind: "session", id },
-      mint,
+    // Beside the parent while that still leaves a usable pane; past that, the
+    // parent's overflow tab (`layout-tree.ts` `childPlacement`). Never focused.
+    const placed = placeChild(state.layout, projectId, parent.id, { kind: "session", id }, mint, {
+      area,
       aspect,
-      decision.name,
-    );
+      isSibling: siblingOf(core.sessions, parent.id),
+      parentName: parent.name,
+      childName: decision.name,
+    });
     // Pool and layout in one write, so nothing ever renders the session unplaced.
     set({ ...core, layout: placed.layout, runtime: { ...state.runtime, [id]: { ...IDLE } } });
     schedulePersist(get);
     return id;
   },
 
-  rehomeChildren: (aspect) => {
+  rehomeChildren: (aspect, area) => {
     const state = get();
     let layout = state.layout;
     let sessions = state.sessions;
@@ -1055,7 +1150,13 @@ export const useWorkspace = create<State>((set, get) => {
       // purpose (see `chooseProject`); and never move work across servers.
       if (!home || home.running || !away || away.serverId !== home.serverId) continue;
       layout = removeSessionLeaves(layout, child.id);
-      layout = placeBeside(layout, home.id, parent.id, { kind: "session", id: child.id }, mint, aspect, child.name).layout;
+      layout = placeChild(layout, home.id, parent.id, { kind: "session", id: child.id }, mint, {
+        area,
+        aspect,
+        isSibling: siblingOf(sessions, parent.id),
+        parentName: parent.name,
+        childName: child.name,
+      }).layout;
       sessions = sessions.map((x) => (x.id === child.id ? { ...x, projectId: home.id } : x));
       left.add(away.id);
       moved.push(child.id);
@@ -1304,7 +1405,8 @@ export const useWorkspace = create<State>((set, get) => {
     if (!get().projects.some((p) => p.id === projectId)) return;
     land(lSelectProject(get().layout, projectId), { keyboard: true });
   },
-  selectTab: (projectId, tabId) => land(lSelectTab(get().layout, projectId, tabId), { keyboard: true }),
+  selectTab: (projectId, tabId, opts) =>
+    land(lSelectTab(get().layout, projectId, tabId), { keyboard: opts?.keyboard ?? true }),
   selectTabIndex: (index) => land(lSelectTabIndex(get().layout, index), { keyboard: true }),
   cycleTab: (delta) => land(lCycleTab(get().layout, delta), { keyboard: true }),
 
@@ -1338,43 +1440,41 @@ export const useWorkspace = create<State>((set, get) => {
   moveRefusal: (source, target) => {
     const s = get();
     if (!canMoveBeside(s.layout, source, target)) return "noop";
-    const src = resolveMoveSource(s.layout, source)!;
-    const serverOfProject = (pid: ProjectId) => s.projects.find((p) => p.id === pid)?.serverId;
-    const to = serverOfProject(target.projectId);
-    // Every pane being moved must already be on the target's server: a session
-    // runs on one host, and a project is a folder on one host.
-    for (const l of treeLeaves(src.node)) {
-      const pane = l.pane;
-      const from =
-        pane.kind === "session"
-          ? serverOfProject(s.sessions.find((x) => x.id === pane.id)?.projectId ?? "")
-          : pane.kind === "host"
-            ? pane.serverId
-            : serverOfProject(pane.projectId);
-      if (!to || from !== to) return "server";
+    return crossesServer(s, resolveMoveSource(s.layout, source)!.node, target.projectId) ? "server" : null;
+  },
+
+  tabMoveRefusal: (source, projectId, tabId) => {
+    const s = get();
+    const src = resolveMoveSource(s.layout, source);
+    if (!src) return "noop";
+    if (tabId === null ? src.wholeTab && src.projectId === projectId : src.projectId === projectId && src.tabId === tabId) {
+      return "noop";
     }
-    return null;
+    if (tabId !== null && !tabsOf(s.layout, projectId).tabs.some((t) => t.id === tabId)) return "noop";
+    return crossesServer(s, src.node, projectId) ? "server" : null;
+  },
+
+  moveToTab: (source, projectId, tabId) => {
+    if (get().tabMoveRefusal(source, projectId, tabId)) return false;
+    const r = lMoveToTab(get().layout, source, { projectId, tabId }, mint, tabAreaOf(projectId));
+    if (!r) return false;
+    landMove(r, projectId);
+    return true;
+  },
+
+  moveToNewTab: (source, projectId) => {
+    if (get().tabMoveRefusal(source, projectId, null)) return false;
+    const r = lMoveToNewTab(get().layout, source, projectId, mint);
+    if (!r) return false;
+    landMove(r, projectId);
+    return true;
   },
 
   moveBeside: (source, target, side) => {
     if (get().moveRefusal(source, target)) return false;
-    const s = get();
-    const r = lMoveBeside(s.layout, source, target, side, mint);
+    const r = lMoveBeside(get().layout, source, target, side, mint);
     if (!r) return false;
-    // Same server, other project: the sessions now belong to the target's
-    // project — changed in the same write as the layout, so `normalizeLayout`
-    // never sees a session placed outside its own project (it would pull it
-    // straight back out). The source project stays even if this emptied it:
-    // the operator opened it. Modelled on `rehomeChildren`, minus the removal.
-    const moving = new Set(r.sessions);
-    const extra: Partial<State> = {};
-    if (r.fromProject !== target.projectId && moving.size) {
-      extra.sessions = s.sessions.map((x) => (moving.has(x.id) ? { ...x, projectId: target.projectId } : x));
-    }
-    // The dropped pane takes the focus and the keyboard — the operator just put
-    // it there on purpose.
-    land(r.layout, { keyboard: true }, extra);
-    renormalize();
+    landMove(r, target.projectId);
     return true;
   },
 

@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+import { usePaneHeaderDrag } from "./PaneDrag";
+
 /**
  * The bar that names a pane.
  *
@@ -30,8 +32,11 @@ export function PaneHeader({
   detail?: string;
   actions?: ReactNode;
 }) {
+  // The header is the pane's drag handle and its menu (`PaneDrag.tsx`).
+  const drag = usePaneHeaderDrag();
   return (
     <header
+      {...drag}
       className="flex shrink-0 items-center gap-3 border-b px-3 py-1"
       style={{ borderColor: "var(--border)" }}
     >

@@ -5,6 +5,9 @@
 # Node / Vite
 node_modules
 /dist
+/dist-mobile
+# renderlint's reports and screenshots
+.renderlint/
 *.tsbuildinfo
 
 # Tauri build output

@@ -5,6 +5,7 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { ClaudeAccountPanel } from "../components/ClaudeAccountPanel";
 import { ModelProfilesPanel } from "../components/ModelProfilesPanel";
 import { DiagnosticsPanel } from "../components/DiagnosticsPanel";
+import { UpdatesPanel } from "../components/UpdateStrip";
 import { LockPanel } from "../components/LockPanel";
 import { CoworkPanel } from "../components/CoworkPanel";
 import { RedstonePanel } from "../components/RedstonePanel";
@@ -44,7 +45,8 @@ type Section =
   | "cli"
   | "shortcuts"
   | "appearance"
-  | "diagnostics";
+  | "diagnostics"
+  | "updates";
 
 const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "claude", label: "CLAUDE", blurb: "The account your sessions run as" },
@@ -59,6 +61,7 @@ const SECTIONS: { id: Section; label: string; blurb: string }[] = [
   { id: "shortcuts", label: "SHORTCUTS", blurb: "Move around without the mouse" },
   { id: "appearance", label: "APPEARANCE", blurb: "Colours, backdrop and interface scale" },
   { id: "diagnostics", label: "DIAGNOSTICS", blurb: "Export the log when something breaks" },
+  { id: "updates", label: "UPDATES", blurb: "This version, and getting the next one" },
 ];
 
 export function Settings() {
@@ -202,6 +205,11 @@ export function Settings() {
           {section === "appearance" && (
             <ErrorBoundary label="Appearance">
               <AppearancePanel />
+            </ErrorBoundary>
+          )}
+          {section === "updates" && (
+            <ErrorBoundary label="Updates">
+              <UpdatesPanel />
             </ErrorBoundary>
           )}
           {section === "diagnostics" && (

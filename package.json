@@ -7,6 +7,11 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/build-askpass.mjs",
     "preview": "vite preview",
+    "dev:mobile": "vite --config vite.mobile.config.ts",
+    "dev:mobile:fixture": "RMUX_MOBILE_FIXTURE=1 vite --config vite.mobile.config.ts",
+    "preview:mobile:fixture": "RMUX_MOBILE_FIXTURE=1 vite preview --config vite.mobile.config.ts",
+    "build:mobile": "tsc --noEmit && vite build --config vite.mobile.config.ts",
+    "lint:mobile": "vite build --config vite.mobile.config.ts && renderlint --config renderlint.mobile.config.mjs",
     "tauri": "tauri"
   },
   "devDependencies": {
@@ -15,6 +20,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
+    "@yitec/renderlint": "github:ngocanhnckh/renderlint",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.1.5"

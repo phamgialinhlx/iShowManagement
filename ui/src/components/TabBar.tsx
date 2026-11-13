@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { leaves, tabLabel, tabsOf, type Direction } from "../lib/layout-tree";
 import { label as chordLabel, readBindings, requestClose, type ActionId } from "../lib/shortcuts";
 import { useWorkspace } from "../lib/workspace";
-import { beginSessionDrag, currentSessionDrag, endSessionDrag } from "../lib/session-drag";
+import { beginSessionDrag, currentSessionDrag, endSessionDrag, isSessionDrag, useSessionDrag } from "../lib/session-drag";
 import { MenuItem, MenuSurface, type MenuAt } from "./Menu";
 
 /**
@@ -17,6 +17,13 @@ import { MenuItem, MenuSurface, type MenuAt } from "./Menu";
  * tab beside it (`session-drag.ts`); the strip scrolls sideways rather than wrapping, because a second
  * row of tabs would take a row from every terminal under it.
  *
+ * **A pane dragged onto the strip** (from its header, or a sidebar row) moves
+ * between tabs: dropped on a tab it joins that tab beside its largest pane;
+ * dropped on `+` or the strip's empty end it becomes a tab of its own. Holding
+ * it over a tab for `SPRING_MS` opens that tab — *without* taking the keyboard
+ * — so it can then be dropped on a particular half of a particular pane. A
+ * whole tab dragged here still only reorders.
+ *
  * The pane tools on the right act on the focused pane — the mouse route to
  * what the shortcuts do, with the chord in each tooltip so the keyboard route is
  * discoverable from the control itself.
@@ -27,6 +34,15 @@ import { MenuItem, MenuSurface, type MenuAt } from "./Menu";
  * focused pane — pressing one in another tile works because the tile's
  * mousedown has already focused it (`ProjectTile`).
  */
+/** How long a pane dragged over a tab must hover before that tab opens. Long
+ *  enough that sweeping across the strip on the way to `+` opens nothing. */
+const SPRING_MS = 600;
+
+/** A pane (not a whole tab — that reorders) is being dragged. */
+function isPaneDrag(dt: DataTransfer | null): boolean {
+  return isSessionDrag(dt) && !dt!.types.includes("text/x-rmux-tab") && currentSessionDrag()?.kind !== "tab";
+}
+
 export function TabBar({
   projectId: pid,
   focused = true,
@@ -54,10 +70,25 @@ export function TabBar({
   const [dropAt, setDropAt] = useState<number | null>(null);
   const [swapMenu, setSwapMenu] = useState<MenuAt | null>(null);
   const strip = useRef<HTMLDivElement>(null);
+  // A pane being dragged over the strip: the tab it would join, or "new".
+  const [into, setInto] = useState<string | "new" | null>(null);
+  const dragging = useSessionDrag();
+  useEffect(() => {
+    if (!dragging) setInto(null);
+  }, [dragging]);
+  const refusal = useWorkspace((s) => s.tabMoveRefusal);
 
   const project = projects.find((p) => p.id === pid);
   const { tabs, activeTab: activeId } = tabsOf(layout, pid);
   const activeOne = tabs.find((t) => t.id === activeId);
+  // Spring-loaded tabs: hover a tab long enough and it opens under the drag.
+  useEffect(() => {
+    if (!into || into === "new" || into === activeId) return;
+    const t = setTimeout(() => {
+      if (currentSessionDrag()) useWorkspace.getState().selectTab(pid, into, { keyboard: false });
+    }, SPRING_MS);
+    return () => clearTimeout(t);
+  }, [into, activeId, pid]);
   const at = activeOne ? { projectId: pid, tab: activeOne } : null;
   const paneCount = at ? leaves(at.tab.root).length : 0;
   const nameOf = (id: string) => sessions.find((s) => s.id === id)?.name;
@@ -73,7 +104,33 @@ export function TabBar({
 
   return (
     <div className="tab-bar" data-focused={focused}>
-      <div className="tab-strip" ref={strip}>
+      <div
+        className="tab-strip"
+        ref={strip}
+        // `+` and the empty end of the strip: a pane dropped here becomes a tab
+        // of its own (tmux's break-pane). Tabs stop their own events first.
+        onDragOver={(e) => {
+          if (!isPaneDrag(e.dataTransfer)) return;
+          if (refusal(currentSessionDrag()!, pid, null)) {
+            setInto(null);
+            return;
+          }
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          setInto("new");
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setInto((x) => (x === "new" ? null : x));
+        }}
+        onDrop={(e) => {
+          if (!isPaneDrag(e.dataTransfer)) return;
+          e.preventDefault();
+          const src = currentSessionDrag();
+          setInto(null);
+          endSessionDrag();
+          if (src && !refusal(src, pid, null)) useWorkspace.getState().moveToNewTab(src, pid);
+        }}
+      >
         {tabs.map((tab, i) => {
           const active = tab.id === activeId;
           const text = tabLabel(tab, i, nameOf);
@@ -84,8 +141,9 @@ export function TabBar({
               data-active={active}
               data-renamed={!!tab.renamed}
               data-drop={dropAt === i}
+              data-drop-into={into === tab.id || undefined}
               draggable={editing !== tab.id}
-              title={`${text}${tab.zoomed ? " — zoomed" : ""}\nDouble-click to rename · drag to reorder, or onto a pane to split it`}
+              title={`${text}${tab.zoomed ? " — zoomed" : ""}\nDouble-click to rename · drag to reorder, or onto a pane to split it · drop a pane here to move it into this tab`}
               // On click, not mousedown: a press that becomes a drag must not
               // switch to the dragged tab first, or the only pane left on
               // screen is the one being dragged and there is nowhere to drop it.
@@ -101,6 +159,22 @@ export function TabBar({
                 beginSessionDrag(e.dataTransfer, { kind: "tab", projectId: pid, tabId: tab.id });
               }}
               onDragOver={(e) => {
+                if (isPaneDrag(e.dataTransfer)) {
+                  // A pane over a tab: it joins that tab. Over its own tab it
+                  // has nowhere to go, but the hover still springs it open.
+                  e.stopPropagation();
+                  const src = currentSessionDrag()!;
+                  const why = refusal(src, pid, tab.id);
+                  if (why === "server") {
+                    e.dataTransfer.dropEffect = "none";
+                    setInto(null);
+                    return;
+                  }
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = why ? "none" : "move";
+                  setInto(tab.id);
+                  return;
+                }
                 if (!e.dataTransfer.types.includes("text/x-rmux-tab")) return;
                 // Reorder within this project's strip only — an index from
                 // another tile's strip names a different tab here.
@@ -109,8 +183,20 @@ export function TabBar({
                 e.preventDefault();
                 setDropAt(i);
               }}
-              onDragLeave={() => setDropAt((d) => (d === i ? null : d))}
+              onDragLeave={(e) => {
+                setDropAt((d) => (d === i ? null : d));
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setInto((x) => (x === tab.id ? null : x));
+              }}
               onDrop={(e) => {
+                if (isPaneDrag(e.dataTransfer)) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const src = currentSessionDrag();
+                  setInto(null);
+                  endSessionDrag();
+                  if (src && !refusal(src, pid, tab.id)) useWorkspace.getState().moveToTab(src, pid, tab.id);
+                  return;
+                }
                 const from = Number(e.dataTransfer.getData("text/x-rmux-tab"));
                 setDropAt(null);
                 endSessionDrag();
@@ -168,6 +254,7 @@ export function TabBar({
         <button
           type="button"
           className="tab-add"
+          data-drop={into === "new" || undefined}
           aria-label={`New tab in ${project?.label ?? "this project"}`}
           title={`New tab — a terminal in ${project?.label ?? "this project"}${hint("tab.new")}`}
           onClick={() => newTab(pid)}

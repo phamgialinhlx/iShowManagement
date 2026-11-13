@@ -60,5 +60,17 @@
     "macOS": {
       "entitlements": "Entitlements.plist"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyQUEyQzdCNEYyN0EzMTkKUldRWm95ZFBleXlxNG5jU1ppTUNKbHJ6VmQ4bEtqVXdMV2Qyb1NiVG5WL3NZbWY5dXJ4aUkvMkMK",
+      "endpoints": [
+        "https://github.com/phamgialinhlx/iShowManagement/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

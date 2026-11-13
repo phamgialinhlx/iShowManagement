@@ -215,6 +215,7 @@ export type PrefixActionId =
   | "pane.zoom"
   | "mode.resize"
   | "pane.rename"
+  | "pane.break"
   | "tile.openBeside"
   | "tile.close";
 
@@ -250,6 +251,8 @@ export const PREFIX_ACTIONS: readonly PrefixAction[] = [
   { id: "pane.close", label: "Close pane (asks)", group: "Panes" },
   { id: "pane.zoom", label: "Zoom pane", group: "Panes" },
   { id: "pane.rename", label: "Rename pane (its session)", group: "Panes" },
+  // tmux's `break-pane`, on tmux's key — herdr has no equivalent.
+  { id: "pane.break", label: "Move pane to a new tab", group: "Panes" },
   // The project grid — rmux's, not herdr's. Shift on both so the lower-case
   // letters keep herdr's meaning (`v` splits, `q` stays unbound).
   { id: "tile.openBeside", label: "Open the next project beside", group: "Workspace" },
@@ -289,6 +292,7 @@ export const PREFIX_DEFAULTS: Record<PrefixActionId, string> = {
   "pane.zoom": "z",
   "mode.resize": "r",
   "pane.rename": "P",
+  "pane.break": "!",
   "tile.openBeside": "V",
   "tile.close": "Q",
 };

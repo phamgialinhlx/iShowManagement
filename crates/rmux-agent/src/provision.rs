@@ -302,9 +302,13 @@ pub async fn ensure<T: Target + ?Sized>(target: &T, binaries: &dyn BinarySource)
     // is executable, and fails in a way that would otherwise surface much later
     // as an unexplained terminal that will not open.
     let after = run(target, &installed_version_script(home, VERSION, &fingerprint)).await?;
+    // The likeliest cause in practice is not a bad upload but an app that was
+    // updated while running: the old process keeps its compiled-in version and
+    // reads the agent from the *new* bundle on disk. Say what fixes it — two
+    // bare version numbers sent the operator looking for a bug.
     anyhow::ensure!(
         after.trim() == VERSION,
-        "the uploaded agent reported {:?}, expected {VERSION}",
+        "the uploaded agent reported {:?}, expected {VERSION} — if rmux was just updated, quit it (⌘Q) and open it again",
         after.trim()
     );
 

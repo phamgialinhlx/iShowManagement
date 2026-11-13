@@ -354,6 +354,30 @@ daemon.
   `tauri-action` fails trying to import one rather than falling back to unsigned. macOS is built,
   signed and notarised on the developer's Mac by `scripts/release-mac.sh`; CI opens the release
   as a **draft** so that dmg can be added before anyone publishes it.
+- **Self-update is signed on this Mac, and the key never goes to CI.** Every installed rmux
+  installs whatever `~/.tauri/rmux-updater.key` (`0600`, password-less) signed, checked against
+  `plugins.updater.pubkey` in `tauri.conf.json` — so that key can push code to every machine
+  running rmux. A collaborator has already exfiltrated this repo's CI secrets once; the key is
+  **not** an Actions secret and never will be. CI builds with `tauri.ci.conf.json`
+  (`createUpdaterArtifacts: false`, `includeUpdaterJson: false`) and needs no key.
+  `tests/updater_acl.rs` fails if the pubkey stops verifying that key (fixture in
+  `tests/fixtures/`) or if any `updater:`/`process:` permission is granted — the webview never
+  drives the updater; `src/updates.rs` does, and installs **only on RESTART TO UPDATE**, never
+  earlier (replacing the bundle under a running build swaps its `Resources/agents`, and the old
+  build then refuses the new agent's version).
+  The order for a release `X.Y.Z`, all with `GH_TOKEN=$(gh auth token --user <release account>)`:
+  1. bump the version, `scripts/build-agents.sh`, tag, let CI build `rmux-vX.Y.Z-win-linux` (draft);
+  2. create the macOS release `rmux-vX.Y.Z` (notes per the rule above), then
+     `scripts/release-mac.sh` — it tars the **stapled** app (never Tauri's pre-notarisation
+     tarball), signs it, and uploads dmg, `.app.tar.gz`, `.sig` and a merged `latest.json`;
+  3. `scripts/sign-win-linux-update.sh rmux-vX.Y.Z-win-linux` — signs CI's `-setup.exe` and
+     `.AppImage` here, uploads the `.sig`s, merges their entries into that `latest.json`;
+  4. publish both and `gh release edit rmux-vX.Y.Z --latest`: the endpoint is
+     `releases/latest/download/latest.json`, so only the release marked latest is read.
+  `latest.json` has one version; `scripts/update-manifest.mjs` drops any entry pointing at another
+  release, or an old installer would be offered as the new version forever. Linux self-updates
+  only as an AppImage, Windows only from the NSIS install; anything else falls back to the
+  GitHub release list and a Download link.
 
 ## An installed key has to be offered, or nothing changes
 

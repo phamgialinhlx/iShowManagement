@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 
 import "../styles/sidebar.css";
@@ -342,6 +342,7 @@ function SessionItem({
   return (
     <div
       className="sb-row"
+      data-session={session.id}
       data-active={active}
       data-on-screen={onScreen}
       style={rowSurface(active, onScreen)}
@@ -1224,6 +1225,58 @@ export function WorkspaceRail({
     return Number.isFinite(n) && n >= SPLIT_MIN && n <= SPLIT_MAX ? n : 0.6;
   });
   const body = useRef<HTMLDivElement>(null);
+  const aside = useRef<HTMLElement>(null);
+  /** When the sidebar itself was last pressed — a switch made by clicking a
+   *  row is already where the operator is looking, so it is not flashed. */
+  const pressedAt = useRef(0);
+
+  // **Follow the active session.** A switch from ⌘K, a notification card or a
+  // shortcut lands on a session the sidebar may be showing nowhere — its
+  // machine folded, its project closed, its row scrolled off — so finding
+  // which row you are now in meant scrolling and reading. On every switch the
+  // row is unfolded into existence, scrolled into view (only if it is not
+  // already), and briefly flashed so the eye lands on it. Unfolding is
+  // remembered like a manual unfold: it is what the operator would have done.
+  useEffect(() => {
+    if (!active || collapsed) return;
+    const st = useWorkspace.getState();
+    const session = st.sessions.find((x) => x.id === active);
+    const project = session && st.projects.find((x) => x.id === session.projectId);
+    if (!project) return;
+    if (folded.has(project.serverId)) toggleFold(project.serverId);
+    if (!expanded.has(project.id)) toggleExpanded(project.id);
+    const flash = Date.now() - pressedAt.current > 800;
+    // Two frames: the unfold has to render before the row has a box.
+    let raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(() => {
+        const rows = aside.current?.querySelectorAll<HTMLElement>(`[data-session="${CSS.escape(active)}"]`) ?? [];
+        rows.forEach((row) => {
+          const pane = row.closest<HTMLElement>(".sb-scroll");
+          // Centre the row in its own scroller. `scrollIntoView({block:"nearest"})`
+          // parked it at the very edge, under the sticky project header, so the
+          // row it was meant to reveal was the one thing hidden. Only when the
+          // switch came from elsewhere (⌘K, a shortcut): a row clicked in the
+          // sidebar is already where the hand is and must not move under it.
+          if (pane && flash) {
+            const r = row.getBoundingClientRect();
+            const c = pane.getBoundingClientRect();
+            const target = pane.scrollTop + (r.top - c.top) - (pane.clientHeight - r.height) / 2;
+            const max = pane.scrollHeight - pane.clientHeight;
+            pane.scrollTo({ top: Math.max(0, Math.min(max, target)), behavior: "smooth" });
+          }
+          if (flash) {
+            row.classList.remove("sb-flash");
+            void row.offsetWidth; // restart the animation on a repeat switch
+            row.classList.add("sb-flash");
+          }
+        });
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+    // Only a change of session should move the sidebar; folding by hand
+    // afterwards must not be undone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, collapsed]);
 
   // Branch lines are drawn only at full width; the compact column has none, so
   // it does not poll (a widget that is not shown must not run).
@@ -1255,7 +1308,13 @@ export function WorkspaceRail({
   const rest = `${((1 - split) * 100).toFixed(2)}%`;
 
   return (
-    <aside className="sb" style={{ width: railWidth }} aria-label="Sidebar">
+    <aside
+      ref={aside}
+      className="sb"
+      style={{ width: railWidth }}
+      aria-label="Sidebar"
+      onPointerDownCapture={() => (pressedAt.current = Date.now())}
+    >
       <RailGrip side="right" onPointerDown={(e) => startResize(e, "left")} />
 
       <div className="sb-top">

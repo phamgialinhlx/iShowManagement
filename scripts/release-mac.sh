@@ -38,12 +38,30 @@
 #
 # Deployment identifiers are read from the environment on purpose — none of them
 # belong in a tracked file. See CLAUDE.local.md.
+#
+# ## Self-update
+#
+# Step 7 makes the updater artefacts from the *stapled* app — the tarball every
+# installed rmux downloads — signs it with ~/.tauri/rmux-updater.key (see
+# scripts/lib/updater.sh: that key never goes to CI) and, if the GitHub release
+# `rmux-v<version>` already exists, uploads the tarball, its .sig and a merged
+# latest.json to it. Run as the account that can push releases:
+#
+#   GH_TOKEN=$(gh auth token --user <release account>) scripts/release-mac.sh
+#
+# SKIP_UPLOAD=1 builds and signs everything but uploads nothing.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+
+# shellcheck source=lib/updater.sh
+. scripts/lib/updater.sh
+# Before the build, like the certificate: a missing key found after notarising
+# is two Apple round trips wasted.
+updater_key_check
 
 # --- 1. the certificate ------------------------------------------------------
 #
@@ -278,6 +296,51 @@ case "$STAPLED" in
   *) die "the app inside the dmg has no stapled ticket; a first launch offline would fail" ;;
 esac
 
+# --- 7. the self-update artefacts --------------------------------------------
+#
+# **From the stapled app, never from the bundler.** `createUpdaterArtifacts`
+# would have Tauri tar the app during step 3 — before the nested signing, the
+# re-seal and the ticket — so every update would install exactly the unnotarised
+# copy the dmg comment above describes. The tarball is made here, last, from the
+# artefact step 6 just proved. `COPYFILE_DISABLE` keeps macOS's `._` resource
+# forks out of it; the updater would extract them into the bundle.
+say "Making the self-update tarball from the stapled app"
+TAG="rmux-v$VERSION"
+TARBALL_NAME="rmux_${VERSION}_aarch64.app.tar.gz"
+TARBALL="target/release/bundle/macos/$TARBALL_NAME"
+rm -f "$TARBALL" "$TARBALL.sig"
+COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$(dirname "$APP")" "$(basename "$APP")"
+updater_sign "$TARBALL" "$VERSION"
+
+# latest.json lives on the macOS release (the one marked latest), and is merged
+# rather than overwritten: a Windows/Linux entry already signed for *this*
+# version is kept, anything older is dropped — see update-manifest.mjs.
+MANIFEST_DIR=$(mktemp -d)
+EXISTING="-"
+if [ -z "${SKIP_UPLOAD:-}" ] && gh release download "$TAG" --repo "$REPO" -p latest.json -D "$MANIFEST_DIR/old" >/dev/null 2>&1; then
+  EXISTING="$MANIFEST_DIR/old/latest.json"
+fi
+URL=$(download_url "$TAG" "$TARBALL_NAME")
+MANIFEST="target/release/bundle/macos/latest.json"
+node scripts/update-manifest.mjs --in "$EXISTING" --out "$MANIFEST" --version "$VERSION" \
+  --notes-url "https://github.com/$REPO/releases/tag/$TAG" \
+  --entry "darwin-aarch64=$URL=$TARBALL.sig" \
+  --entry "darwin-aarch64-app=$URL=$TARBALL.sig"
+rm -rf "$MANIFEST_DIR"
+
+if [ -n "${SKIP_UPLOAD:-}" ]; then
+  say "SKIP_UPLOAD set — nothing uploaded"
+elif gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+  say "Uploading the update to $TAG"
+  gh release upload "$TAG" --repo "$REPO" --clobber "$DMG" "$TARBALL" "$TARBALL.sig" "$MANIFEST"
+else
+  say "No release $TAG yet — create it (with the notes), then upload:"
+  echo "  gh release upload $TAG --repo $REPO --clobber $DMG $TARBALL $TARBALL.sig $MANIFEST"
+fi
+
 say "Done"
 echo "  app: $APP"
 echo "  dmg: $DMG  ← send this one (verified from inside the image)"
+echo "  update: $TARBALL (+ .sig) and $MANIFEST"
+echo "  next: mark $TAG latest (gh release edit $TAG --latest); once CI has built"
+echo "        ${TAG}-win-linux, run scripts/sign-win-linux-update.sh ${TAG}-win-linux"

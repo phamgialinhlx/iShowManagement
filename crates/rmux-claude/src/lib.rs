@@ -249,7 +249,19 @@ impl ClaudeSession {
 
     /// Send a message to Claude.
     pub async fn send(&self, text: &str) -> anyhow::Result<()> {
-        for (i, chunk) in keys::send_message(text).into_iter().enumerate() {
+        self.write_message(keys::send_message(text)).await
+    }
+
+    /// Send a message to **pi**, whose composer needs a different multi-line
+    /// encoding (`keys::send_message_pi`). Same two-write discipline as `send`.
+    pub async fn send_pi(&self, text: &str) -> anyhow::Result<()> {
+        self.write_message(keys::send_message_pi(text)).await
+    }
+
+    /// Write the chunks a `keys::send_message*` encoder produced, in order, with
+    /// the settle gap between them — the text-then-Enter rule.
+    async fn write_message(&self, chunks: Vec<Vec<u8>>) -> anyhow::Result<()> {
+        for (i, chunk) in chunks.into_iter().enumerate() {
             if i > 0 {
                 // Applied locally, never as a round trip — a network hop here is
                 // how the old design lost the Enter on a slow link.

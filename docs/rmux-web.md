@@ -79,6 +79,24 @@ is a **move**, not a rewrite: behaviour must be byte-for-byte what it was.
 4. Phone/iPad layout: one pane, drawer rail, a key bar (Esc, Tab, Ctrl, arrows).
 5. Provisioned/upgraded from the desktop; workspace stored on the host and shared.
 
+## The mobile bundle
+
+A second UI for phones and tablets — the session list and each agent session as a
+chat — built from `ui/mobile.html` into `dist-mobile/` (`pnpm build:mobile`). It is
+served by its own rmux-web instance with `--ui dist-mobile`; nothing else changes.
+Which UI a browser gets is decided by which bundle that instance serves, never by a
+hostname or a user agent.
+
+- Same `bridge.ts`, same `/api/seed`, same commands. The conversation is the
+  transcript (`claude_transcript` / `pi_transcript` / `codex_transcript`, tail
+  only); a message is `claude_send` (with `agent: "pi"` for pi's multi-line
+  encoding); quick keys are `claude_keys` (names resolved by
+  `rmux_claude::keys::named`); interrupt is `claude_interrupt`. TERMINAL reuses the
+  desktop session pane and its attach path unchanged.
+- `pnpm lint:mobile` builds it and runs renderlint (`renderlint.mobile.config.mjs`)
+  against `pnpm preview:mobile:fixture` — the built bundle plus a fake rmux-web
+  (`ui/mobile/fixture-server.mjs`) with canned sessions. No host is contacted.
+
 ## Wire protocol (web)
 
 One WebSocket per page carries every stream; commands are plain HTTP.

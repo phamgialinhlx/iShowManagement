@@ -4,7 +4,7 @@ import { api, hasBackend } from "./api";
 import { endedChildren, parseSeen, planChildren, pollInterval, type HostChild } from "./children.ts";
 import { isServerConnected } from "./git-branch";
 import { isPrimaryWindow } from "./window-scope";
-import { useWorkspace } from "./workspace";
+import { tabAreaOf, useWorkspace } from "./workspace";
 import type { ServerId } from "./workspace-model.ts";
 
 /**
@@ -114,7 +114,9 @@ export function ingestChildren(serverId: ServerId, children: readonly HostChild[
   for (const d of plan.adopt) {
     const parent = useWorkspace.getState().sessions.find((s) => s.id === d.parentId);
     const aspect = paneAspect(parent?.projectId);
-    const id = useWorkspace.getState().adoptChild(serverId, d, aspect);
+    // Measured, so "too crowded for another split" is a pane size and not a
+    // count (`layout-tree.ts` `childPlacement`).
+    const id = useWorkspace.getState().adoptChild(serverId, d, aspect, tabAreaOf(parent?.projectId));
     if (id) adopted.push(id);
   }
   const next = { ...all };
@@ -149,7 +151,8 @@ export function startChildrenWatch(): () => void {
   running = true;
   // Children placed by the old folder rule sit in a second project; put them
   // back beside their parents once, before the first poll.
-  useWorkspace.getState().rehomeChildren(paneAspect(useWorkspace.getState().layout.activeProject ?? undefined));
+  const focused = useWorkspace.getState().layout.activeProject ?? undefined;
+  useWorkspace.getState().rehomeChildren(paneAspect(focused), tabAreaOf(focused));
   const last = new Map<ServerId, number>();
   const inFlight = new Set<ServerId>();
 
